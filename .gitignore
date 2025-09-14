@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files (if large)
+*.pkl
+*.h5
+*.hdf5
+*.csv
+*.tsv
+*.json
+*.parquet
+
+# Model checkpoints
+*.ckpt
+*.pth
+*.pt
+*.bin
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Outputs (if temporary)
+outputs/
+results/
+
+# Project-specific directories
+core/__pycache__/
+data_loading/cache/
+data/LBA/
+data/processed/
+data/qm9/
+
