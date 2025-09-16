@@ -9,6 +9,7 @@ Usage:
     python cache_universal_datasets.py --dataset qm9 --max_samples 1000
     python cache_universal_datasets.py --dataset lba --max_samples 500
     python cache_universal_datasets.py --dataset all --max_samples 100
+    python data_loading/cache_universal_datasets.py --dataset protein --data-path ../data/proteins/raw_structures_hq_40k
 """
 
 import os
@@ -29,8 +30,10 @@ def get_adapter(dataset_name: str):
         from data_loading.adapters.lba_adapter import LBAAdapter
         return LBAAdapter(), './data/LBA'
     elif dataset_name.lower() == 'pdb':
-        # TODO: Add PDB adapter when available
-        raise NotImplementedError("PDB adapter not yet implemented")
+        from data_loading.adapters.protein_adapter import ProteinAdapter
+        # İkinci değer, ham verinin aranacağı varsayılan yoldur.
+        # Komut satırından üzerine yazacağımız için burası kritik değil.
+        return ProteinAdapter(), '../data/proteins/raw_structures_hq' 
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -46,41 +49,40 @@ def get_cache_path(dataset_name: str, max_samples: int = None) -> str:
     
     return os.path.join(cache_dir, cache_file)
 
-def cache_dataset(dataset_name: str, max_samples: int = None, force_rebuild: bool = False):
+def cache_dataset(dataset_name: str, data_path: Path, max_samples: int = None, force_rebuild: bool = False):
     """Cache universal representations for a dataset"""
     print(f"🚀 Caching {dataset_name.upper()} dataset...")
     print("=" * 60)
     
-    # Get adapter and data path
-    try:
-        adapter, data_path = get_adapter(dataset_name)
-    except Exception as e:
-        print(f"❌ Error getting adapter: {e}")
+    adapter, default_data_path = get_adapter(dataset_name)
+    
+    # Eğer kullanıcı özel bir data_path belirtmediyse, varsayılanı kullan
+    if data_path is None:
+        data_path = Path(default_data_path)
+
+    if not data_path.exists():
+        print(f"❌ Veri yolu bulunamadı: {data_path}")
+        print(f"💡 Lütfen önce '--data-path' parametresi ile doğru yolu belirtin veya veri setini indirin.")
         return False
     
-    # Check if data path exists
-    if not os.path.exists(data_path):
-        print(f"❌ Data path not found: {data_path}")
-        print(f"💡 Please download the dataset first using the download scripts")
-        return False
-    
-    # Get cache path
+    # Cache yolu hala varsayılan olarak data_loading/cache içinde kalıyor
     cache_path = get_cache_path(dataset_name, max_samples)
     
     # Check if cache already exists
     if os.path.exists(cache_path) and not force_rebuild:
-        print(f"✅ Cache already exists: {cache_path}")
-        print(f"💡 Use --force to rebuild cache")
+        print(f"✅ Cache dosyası zaten mevcut: {cache_path}")
+        print(f"💡 Cache'i yeniden oluşturmak için --force kullanın.")
         return True
     
-    # Process dataset with caching
     start_time = time.time()
     try:
+        # process_dataset metoduna güncellenmiş data_path'i gönderiyoruz
         universal_data = adapter.process_dataset(
-            data_path=data_path,
+            data_path=str(data_path),
             cache_path=cache_path,
             max_samples=max_samples
         )
+        # ... (fonksiyonun geri kalanı aynı)
         
         end_time = time.time()
         processing_time = end_time - start_time
@@ -89,7 +91,6 @@ def cache_dataset(dataset_name: str, max_samples: int = None, force_rebuild: boo
         print(f"⏱️ Processing time: {processing_time:.2f} seconds")
         print(f"💾 Cache file: {cache_path}")
         
-        # Show cache file size
         cache_size = os.path.getsize(cache_path)
         cache_size_mb = cache_size / (1024 * 1024)
         print(f"📊 Cache size: {cache_size_mb:.2f} MB")
@@ -104,7 +105,7 @@ def cache_dataset(dataset_name: str, max_samples: int = None, force_rebuild: boo
 
 def cache_all_datasets(max_samples: int = None, force_rebuild: bool = False):
     """Cache all available datasets"""
-    datasets = ['qm9', 'lba']  # Add more as adapters become available
+    datasets = ['qm9', 'lba', 'pdb']  # Add more as adapters become available
     
     print(f"🚀 Caching ALL datasets (max_samples={max_samples or 'all'})...")
     print("=" * 60)
