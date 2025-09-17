@@ -15,7 +15,7 @@ wandb_run_name: "protein-test-40k-run-1"
 # -------------------------
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
-dataset_download_dir: ../data/proteins/processed_graphs_40k" # .pt dosyaları bunun içinde /processed_40k gibi bir yere kaydedilecek
+dataset_download_dir: "../data/proteins/processed_graphs_40k" # .pt dosyaları bunun içinde /processed_40k gibi bir yere kaydedilecek
 num_workers: 8
 max_samples: 40000 # Test seti için 40k ile sınırla
 use_universal_cache: true
@@ -23,14 +23,14 @@ use_universal_cache: true
 # -------------------------
 # Eğitim Parametreleri
 # -------------------------
-max_epochs: 200
-batch_size: 8
+max_epochs: 10
+batch_size: 2
 lr: 0.0005
 early_stopping_patience: 30
 gradient_clip_val: 0.5
 optimiser_weight_decay: 1.0e-10
 monitor_loss_name: "train_total_loss"
-use_bfloat16: false
+use_bfloat16: false 
 accelerator: auto
 devices: auto
 precision: 32
