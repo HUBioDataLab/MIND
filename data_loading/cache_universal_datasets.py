@@ -3,11 +3,12 @@
 Universal Dataset Caching System
 
 Caches universal representations for any dataset using the adapter system.
-This script can cache QM9, LBA, PDB, or any future dataset adapters.
+This script can cache QM9, LBA, COCONUT, PDB, or any future dataset adapters.
 
 Usage:
     python cache_universal_datasets.py --dataset qm9 --max_samples 1000
     python cache_universal_datasets.py --dataset lba --max_samples 500
+    python cache_universal_datasets.py --dataset coconut --max_samples 1000
     python cache_universal_datasets.py --dataset all --max_samples 100
 """
 
@@ -28,6 +29,9 @@ def get_adapter(dataset_name: str):
     elif dataset_name.lower() == 'lba':
         from data_loading.adapters.lba_adapter import LBAAdapter
         return LBAAdapter(), './data/LBA'
+    elif dataset_name.lower() == 'coconut':
+        from data_loading.adapters.coconut_adapter import COCONUTAdapter
+        return COCONUTAdapter(), './data'
     elif dataset_name.lower() == 'pdb':
         # TODO: Add PDB adapter when available
         raise NotImplementedError("PDB adapter not yet implemented")
@@ -104,7 +108,7 @@ def cache_dataset(dataset_name: str, max_samples: int = None, force_rebuild: boo
 
 def cache_all_datasets(max_samples: int = None, force_rebuild: bool = False):
     """Cache all available datasets"""
-    datasets = ['qm9', 'lba']  # Add more as adapters become available
+    datasets = ['qm9', 'lba', 'coconut']  # Add more as adapters become available
     
     print(f"🚀 Caching ALL datasets (max_samples={max_samples or 'all'})...")
     print("=" * 60)
@@ -157,7 +161,7 @@ def main():
     """Main function"""
     parser = argparse.ArgumentParser(description='Cache universal representations for datasets')
     parser.add_argument('--dataset', type=str, required=False, 
-                       choices=['qm9', 'lba', 'pdb', 'all'],
+                       choices=['qm9', 'lba', 'coconut', 'pdb', 'all'],
                        help='Dataset to cache')
     parser.add_argument('--max_samples', type=int, default=None,
                        help='Maximum number of samples to cache (default: all)')

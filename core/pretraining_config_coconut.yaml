@@ -1,0 +1,112 @@
+seed: 42
+dataset: COCONUT
+dataset_download_dir: ./data
+out_path: ./outputs/universal_pretrain_coconut
+wandb_project_name: esa-universal-pretraining
+wandb_run_name: universal-COCONUT-pretraining
+max_epochs: 50
+gradient_clip_val: 0.5
+monitor_loss_name: train_total_loss
+
+num_workers: 8
+molecule_max_atoms: 150  # Very conservative limit for COCONUT natural products
+
+# Universal representation specific settings
+use_universal_cache: true
+universal_cache_path: "./data_loading/cache/universal_coconut_100000.pkl"
+
+apply_attention_on: node
+graph_dim: 512
+edge_dim: 64
+hidden_dims: [512, 512, 512, 512,512,512,512,512]
+num_heads: [8, 8, 8, 8,8,8,8,8]
+layer_types: ["M", "S", "S", "M","S","M","S","P"]
+xformers_or_torch_attn: torch
+norm_type: LN
+use_3d_coordinates: true
+
+use_hierarchical_features: true
+block_embedding_dim: 32
+position_embedding_dim: 16
+entity_embedding_dim: 8
+max_block_types: 150  # GET vocabulary size (4 special + 20 AA + 8 bases + 118 atoms)
+max_position_types: 15  # GET position codes (15 total)
+max_entity_types: 6  # protein, ligand, DNA, RNA, small molecule, other
+
+# MLP config
+use_mlps: true
+mlp_hidden_size: 512
+num_mlp_layers: 3
+
+# Hardcoded values that are now configurable
+max_atomic_num: 118  # GET atomic elements vocabulary (118 chemical elements from h to og)
+rwse_dim: 24  # RWSE positional encoding dimension
+lap_dim: 4  # LapPE positional encoding dimension
+mlp_inter_dim: 128  # MLP intermediate dimension
+pma_num_outputs: 32  # PMA (Pooling by Multihead Attention) outputs
+max_node_items: 100  # Very conservative limit for attention stability
+max_edge_items: 1000  # Very conservative edge limit for attention stability
+output_dim: 1  # Output dimension for final predictions
+mlp_type: standard
+mlp_dropout: 0.0
+use_mlp_ln: false
+pre_or_post: pre
+use_bfloat16: true
+
+# Dropout settings
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+
+# ESA optimizations
+set_max_items: 0
+triu_attn_mask: false
+
+# Positional encoding
+posenc: null
+
+gaussian_kernels: 128
+cutoff_distance: 5.0
+max_neighbors: 16
+max_distance: 12.0  # Slightly larger for natural products with extended conformations
+distance_bins: 64
+
+# Pretraining tasks optimized for natural products (3D structure-based)
+pretraining_tasks: ["long_range_distance", "short_range_distance", "coordinate_denoising"]
+task_weights:
+  long_range_distance: 0.8   # Higher weight for natural products with complex 3D structures
+  short_range_distance: 1.0  # Local chemical bond learning
+  coordinate_denoising: 1.2  # Higher weight for complex natural product conformations
+
+mlm_mask_ratio: 0  # Required parameter (not used since MLM task is removed)
+temperature: 0.1
+
+lr: 0.0003  # Slightly lower learning rate for stable training on diverse natural products
+early_stopping_patience: 10
+optimiser_weight_decay: 0.001
+
+# Optimized batch size for COCONUT (balanced for natural product diversity)
+batch_size: 2048
+
+# Dataset size limit (large natural products database)
+max_samples: 100000  # Scaled up for more comprehensive training
+
+# Memory efficient settings
+use_memory_efficient_attention: true
+attention_dropout: 0.1
+
+# Universal representation features
+# Note: Hierarchical blocks are ALWAYS available in universal representations
+# They are pre-processed in the adapter, no need for GET processing during training
+preserve_universal_blocks: true
+
+# Fast training optimizations (since data loading is instant)
+fast_dev_run: false
+accelerator: auto
+devices: auto
+precision: 32
+
+# Disable sanity check for faster startup
+num_sanity_val_steps: 0

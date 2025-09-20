@@ -54,7 +54,7 @@ class UniversalMolecule:
     
     def get_blocks_by_entity(self, entity_idx: int) -> List[UniversalBlock]:
         """Get all blocks belonging to a specific entity"""
-        entity_blocks = []4444
+        entity_blocks = []
         for block in self.blocks:
             if block.atoms and block.atoms[0].entity_idx == entity_idx:
                 entity_blocks.append(block)
