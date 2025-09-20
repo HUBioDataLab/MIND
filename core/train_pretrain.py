@@ -20,7 +20,12 @@ from pytorch_lightning.loggers import WandbLogger
 # Imports from this project
 sys.path.append(os.path.realpath("."))
 
-from core.models_pretrain import PretrainingESAModel, PretrainingConfig, create_pretraining_config
+# Add parent directory to path for imports (relative to current file)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
+from core.pretraining_model import PretrainingESAModel, PretrainingConfig, create_pretraining_config
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes
 from torch_geometric.transforms import Compose
@@ -220,7 +225,7 @@ def train_universal_pretraining(
         callbacks=callbacks,
         logger=wandb_logger,
         gradient_clip_val=config.gradient_clip_val,
-        precision="16-mixed" if config.use_bfloat16 else "32",
+        precision="bf16-mixed" if config.use_bfloat16 else "32",
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         num_sanity_val_steps=getattr(config, 'num_sanity_val_steps', 0),
@@ -278,7 +283,7 @@ def main():
         config_dict['batch_size'] = args.batch_size
     
     # Create config object
-    config = create_pretraining_config(config_dict)
+    config = create_pretraining_config(**config_dict)
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)

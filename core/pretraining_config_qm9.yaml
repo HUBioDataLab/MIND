@@ -13,7 +13,7 @@ molecule_max_atoms: 100
 
 # Universal representation specific settings
 use_universal_cache: true
-universal_cache_path: "/home/arin/fix/mind_data_encode/data_loading/cache/universal_qm9_all.pkl"
+universal_cache_path: "./data/processed/raw/universal_qm9_all.pkl"
 
 apply_attention_on: node
 graph_dim: 512
@@ -65,30 +65,30 @@ set_max_items: 0
 triu_attn_mask: false
 
 # Positional encoding
-posenc: null
+use_posenc: false  # Set to true to enable RWSE+LapPE positional encoders
 
 gaussian_kernels: 128
 cutoff_distance: 5.0
 max_neighbors: 16
 max_distance: 10.0  # Appropriate for small molecules
-distance_bins: 64
+distance_bins: 16  # Fewer bins for easier learning
 
-# Pretraining tasks optimized for universal representations
-pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm", "coordinate_denoising"]
+# Pretraining tasks matching working model
+pretraining_tasks: ["short_range_distance", "mlm", "long_range_distance"]
 task_weights:
-  long_range_distance: 0.5   # Global 3D structure learning (reduced for stability)
+  long_range_distance: 1.0  # Global 3D structure learning
   short_range_distance: 1.0  # Local chemical bond learning
-  mlm: 0.3                   # Masked language modeling on blocks
-  coordinate_denoising: 1.0  # Coordinate denoising (GET-inspired)
+  mlm: 0.5  # Masked language modeling helps representation learning
+  
 
 mlm_mask_ratio: 0.15
 temperature: 0.1
 
-lr: 0.0005
+lr: 0.0005  # Match working model exactly
 early_stopping_patience: 30
-optimiser_weight_decay: 0.001
+optimiser_weight_decay: 0.0000000001  # Match working model exactly
 
-# Optimized batch size for universal representations
+# Optimized batch size for node attention
 batch_size: 256
 
 # Dataset size limit (for testing)
@@ -107,7 +107,7 @@ preserve_universal_blocks: true
 fast_dev_run: false
 accelerator: auto
 devices: auto
-precision: bf16-mixed
+precision: bfloat16
 
 # Disable sanity check for faster startup
 num_sanity_val_steps: 0

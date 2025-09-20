@@ -13,7 +13,7 @@ molecule_max_atoms: 500  # LBA has larger molecules
 
 # Universal representation specific settings
 use_universal_cache: true
-universal_cache_path: "/home/arin/fix/mind_data_encode/data_loading/cache/universal_lba_all.pkl"
+universal_cache_path: "./data/processed/raw/universal_lba_all.pkl"
 
 apply_attention_on: node
 graph_dim: 512
@@ -44,14 +44,14 @@ rwse_dim: 24  # RWSE positional encoding dimension
 lap_dim: 4  # LapPE positional encoding dimension
 mlp_inter_dim: 128  # MLP intermediate dimension
 pma_num_outputs: 32  # PMA (Pooling by Multihead Attention) outputs
-max_node_items: 128  # Maximum nodes for attention (conservative for stability)
-max_edge_items: 1024  # Maximum edges for attention (conservative for stability)
+max_node_items: 200  # Maximum nodes for attention (increased for protein-ligand complexes)
+max_edge_items: 2000  # Maximum edges for attention (increased for protein-ligand complexes)
 output_dim: 1  # Output dimension for final predictions
 mlp_type: standard
 mlp_dropout: 0.0
 use_mlp_ln: false
 pre_or_post: pre
-use_bfloat16: false
+use_bfloat16: true
 
 # Dropout settings
 sab_dropout: 0.0
@@ -65,28 +65,27 @@ set_max_items: 0
 triu_attn_mask: false
 
 # Positional encoding
-posenc: null
+use_posenc: false  # Set to true to enable RWSE+LapPE positional encoders
 
 gaussian_kernels: 128
 cutoff_distance: 5.0
 max_neighbors: 16
 max_distance: 10.0  # Appropriate for protein-ligand complexes
-distance_bins: 64
+distance_bins: 16  # Fewer bins for easier learning
 
-# Pretraining tasks optimized for universal representations
-pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm", "coordinate_denoising"]
+# Pretraining tasks matching working model
+pretraining_tasks: ["short_range_distance", "mlm", "long_range_distance"]
 task_weights:
-  long_range_distance: 0.5   # Global 3D structure learning (reduced for stability)
   short_range_distance: 1.0  # Local chemical bond learning
-  mlm: 0.3                   # Masked language modeling on blocks
-  coordinate_denoising: 1.0  # Coordinate denoising (GET-inspired)
+  mlm: 0.5                   # Masked language modeling helps representation learning
+  long_range_distance: 0.8   # Global 3D structure learning (reduced for protein-ligand complexity)
 
 mlm_mask_ratio: 0.15
 temperature: 0.1
 
-lr: 0.0005
+lr: 0.0005  # Match working model exactly
 early_stopping_patience: 30
-optimiser_weight_decay: 0.001
+optimiser_weight_decay: 0.0000000001  # Match working model exactly
 
 # Optimized batch size for LBA (smaller due to larger molecules)
 batch_size: 16
@@ -107,7 +106,7 @@ preserve_universal_blocks: true
 fast_dev_run: false
 accelerator: auto
 devices: auto
-precision: bf16-mixed
+precision: bfloat16
 
 # Disable sanity check for faster startup
 num_sanity_val_steps: 0

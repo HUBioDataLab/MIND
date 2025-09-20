@@ -5,7 +5,7 @@ This directory contains the main training pipeline, model definitions,
 and data loading utilities that are actively developed and modified.
 """
 
-from .models_pretrain import PretrainingESAModel, create_pretraining_config, PretrainingConfig
+from .pretraining_model import PretrainingESAModel, create_pretraining_config, PretrainingConfig
 from .train_pretrain import main as train_main
 
 __all__ = [
