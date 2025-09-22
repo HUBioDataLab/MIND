@@ -26,14 +26,9 @@ from esa.utils.reporting import (
     get_regr_metrics_pt,
 )
 
-# Positional encodings - make optional for universal pretraining
-try:
-    from esa.utils.posenc_encoders.laplace_pos_encoder import LapPENodeEncoder
-    from esa.utils.posenc_encoders.kernel_pos_encoder import KernelPENodeEncoder
-except ImportError:
-    print("Warning: Positional encoders not available")
-    LapPENodeEncoder = None
-    KernelPENodeEncoder = None
+# Positional encodings - required imports (no fallbacks)
+from esa.utils.posenc_encoders.laplace_pos_encoder import LapPENodeEncoder
+from esa.utils.posenc_encoders.kernel_pos_encoder import KernelPENodeEncoder
 
 
 @dataclass
@@ -106,16 +101,12 @@ class PretrainingConfig:
     
     # Pretraining task configs
     pretraining_tasks: List[str] = None  # ["long_range_distance", "short_range_distance", "mlm", "bond_prediction"]
-    task_weights: Dict[str, float] = None
-    
-
+    task_weights: Dict[str, float] = None  
     
     # Distance prediction
     distance_prediction_weight: float = 1.0
     distance_bins: int = 16  # Match YAML default
-    max_distance: float = 10.0
-    
-
+    max_distance: float = 10.0  
     
     # Masked language modeling
     mlm_weight: float = 1.0
@@ -127,23 +118,6 @@ class PretrainingConfig:
     # Dataset caching control
     use_dataset_cache: bool = True  # Whether to use cached processed datasets
     
-    def __post_init__(self):
-        if self.hidden_dims is None:
-            self.hidden_dims = [512, 512, 512, 512, 512, 512, 512, 512]  # Match YAML default
-        if self.num_heads is None:
-            self.num_heads = [8, 8, 8, 8, 8, 8, 8, 8]  # Match YAML default
-        if self.layer_types is None:
-            self.layer_types = ["M", "S", "S", "M", "S", "M", "S", "P"]  # Match YAML default
-        if self.pretraining_tasks is None:
-            self.pretraining_tasks = ["short_range_distance", "mlm"]  # Match YAML default
-        if self.task_weights is None:
-            self.task_weights = {
-                "short_range_distance": 1.0,  # Match YAML default
-                "mlm": 0.5  # Match YAML default
-            }
-
-
-
 def nearest_multiple_of_8(n):
     return math.ceil(n / 8) * 8
 
@@ -164,8 +138,8 @@ class UniversalMolecularEncoder(nn.Module):
                 K=config.gaussian_kernels,
                 edge_types=config.atom_types * config.atom_types
             )
-            # 5 invariant features + gaussian_kernels edge features
-            self.coordinate_projection = nn.Linear(5 + config.gaussian_kernels, config.hidden_dims[0])
+            # 5 invariant features + 3 simple edge features
+            self.coordinate_projection = nn.Linear(5 + 3, config.hidden_dims[0])
         else:
             self.gaussian_layer = None
             self.coordinate_projection = None
@@ -192,14 +166,15 @@ class UniversalMolecularEncoder(nn.Module):
         )
     
     
-    def forward(self, x, pos=None, batch=None):
+    def forward(self, x, pos=None, batch=None, batch_obj=None):
         """
         Forward pass for universal molecular encoding (domain-agnostic)
         
         Args:
             x: Node features (atomic numbers for all molecular systems)
             pos: 3D coordinates (optional)
-            batch: Batch indices
+            batch: Batch indices (tensor)
+            batch_obj: Full batch object (for accessing edge_index)
         """
         # Handle different input formats
         if x is None:
@@ -215,23 +190,18 @@ class UniversalMolecularEncoder(nn.Module):
         
         # Add 3D geometric features if available
         if pos is not None and self.config.use_3d_coordinates:
-            try:
-                # Expect a 1D batch index vector for to_dense_batch
-                batch_vec = getattr(batch, 'batch', batch)
-                geometric_features = self._compute_geometric_features(x, pos, batch_vec)
-                encoded = encoded + geometric_features
-            except Exception as e:
-                print(f"Warning: Could not compute geometric features: {e}")
-                # Continue without geometric features
-                pass
+            # Expect a 1D batch index vector for to_dense_batch
+            batch_vec = getattr(batch, 'batch', batch) if batch is not None else batch
+            geometric_features = self._compute_geometric_features(x, pos, batch_vec, batch_obj)
+            encoded = encoded + geometric_features
         
         # Add position encodings
-        if self.lap_encoder is not None and hasattr(batch, 'EigVals'):
-            lap_pos_enc = self.lap_encoder(batch.EigVals, batch.EigVecs)
+        if self.lap_encoder is not None and hasattr(batch_obj, 'EigVals'):
+            lap_pos_enc = self.lap_encoder(batch_obj.EigVals, batch_obj.EigVecs)
             encoded = torch.cat((encoded, lap_pos_enc), 1)
         
-        if self.rwse_encoder is not None and hasattr(batch, 'pestat_RWSE'):
-            rwse_pos_enc = self.rwse_encoder(batch.pestat_RWSE)
+        if self.rwse_encoder is not None and hasattr(batch_obj, 'pestat_RWSE'):
+            rwse_pos_enc = self.rwse_encoder(batch_obj.pestat_RWSE)
             encoded = torch.cat((encoded, rwse_pos_enc), 1)
         
         return encoded
@@ -269,148 +239,230 @@ class UniversalMolecularEncoder(nn.Module):
     
     def _compute_chemical_coordination(self, x_dense, batch):
         """Compute true chemical coordination numbers from molecular graph topology"""
-        try:
-            # Get dimensions first (always needed)
-            batch_size = x_dense.size(0)
-            max_nodes = x_dense.size(1)
-            device = x_dense.device
+        # Get dimensions first (always needed)
+        batch_size = x_dense.size(0)
+        max_nodes = x_dense.size(1)
+        device = x_dense.device
+        
+        # Try to get edge_index from batch data
+        if hasattr(batch, 'edge_index') and batch.edge_index is not None:
+            from torch_scatter import scatter_add
             
-            # Try to get edge_index from batch data
-            if hasattr(batch, 'edge_index') and batch.edge_index is not None:
-                from torch_scatter import scatter_add
+            edge_index = batch.edge_index
+            batch_idx = getattr(batch, 'batch', None)
+            
+            if batch_idx is not None:
+                # ✅ ROBUST: Handle bidirectional edges correctly
+                # Only count unique edges by keeping edges where src < dst
+                src, dst = edge_index[0], edge_index[1]
                 
-                edge_index = batch.edge_index
-                batch_idx = getattr(batch, 'batch', None)
+                # Create unique edge mask (avoid double counting)
+                unique_edge_mask = src < dst  # Only count edge (i,j) if i < j
+                if unique_edge_mask.sum() == 0:
+                    # If no edges satisfy src < dst, edges might be unidirectional already
+                    unique_edge_mask = torch.ones_like(src, dtype=torch.bool)
                 
-                if batch_idx is not None:
-                    # ✅ ROBUST: Handle bidirectional edges correctly
-                    # Only count unique edges by keeping edges where src < dst
-                    src, dst = edge_index[0], edge_index[1]
-                    
-                    # Create unique edge mask (avoid double counting)
-                    unique_edge_mask = src < dst  # Only count edge (i,j) if i < j
-                    if unique_edge_mask.sum() == 0:
-                        # If no edges satisfy src < dst, edges might be unidirectional already
-                        unique_edge_mask = torch.ones_like(src, dtype=torch.bool)
-                    
-                    unique_src = src[unique_edge_mask]
-                    unique_dst = dst[unique_edge_mask]
-                    
-                    # Count coordination for each node
-                    num_nodes = len(batch_idx)
-                    coordination_sparse = torch.zeros(num_nodes, device=device, dtype=torch.float)
-                    
-                    # Each unique edge contributes 1 to both src and dst coordination
-                    coordination_sparse.scatter_add_(0, unique_src, torch.ones_like(unique_src, dtype=torch.float))
-                    coordination_sparse.scatter_add_(0, unique_dst, torch.ones_like(unique_dst, dtype=torch.float))
-                    
-                    # Convert to dense format [batch_size, max_nodes]
-                    coordination_dense = torch.zeros(batch_size, max_nodes, device=device)
-                    
-                    # Fill dense tensor using batch indices
-                    node_idx = 0
-                    for graph_idx in range(batch_size):
-                        nodes_in_graph = (batch_idx == graph_idx).sum().item()
-                        if nodes_in_graph > 0:
-                            end_idx = node_idx + nodes_in_graph
-                            actual_nodes = min(nodes_in_graph, max_nodes)
-                            coordination_dense[graph_idx, :actual_nodes] = coordination_sparse[node_idx:node_idx + actual_nodes]
-                        node_idx += nodes_in_graph
-                    
-                    return coordination_dense
-                else:
-                    # Single graph case - simpler
-                    src, dst = edge_index[0], edge_index[1]
-                    unique_edge_mask = src < dst
-                    if unique_edge_mask.sum() == 0:
-                        unique_edge_mask = torch.ones_like(src, dtype=torch.bool)
-                    
-                    unique_src = src[unique_edge_mask]
-                    unique_dst = dst[unique_edge_mask]
-                    
-                    coordination = torch.zeros(max_nodes, device=device, dtype=torch.float)
-                    coordination.scatter_add_(0, unique_src, torch.ones_like(unique_src, dtype=torch.float))
-                    coordination.scatter_add_(0, unique_dst, torch.ones_like(unique_dst, dtype=torch.float))
-                    
-                    return coordination.unsqueeze(0).expand(batch_size, -1)
+                unique_src = src[unique_edge_mask]
+                unique_dst = dst[unique_edge_mask]
+                
+                # Count coordination for each node
+                num_nodes = len(batch_idx)
+                coordination_sparse = torch.zeros(num_nodes, device=device, dtype=torch.float)
+                
+                # Each unique edge contributes 1 to both src and dst coordination
+                coordination_sparse.scatter_add_(0, unique_src, torch.ones_like(unique_src, dtype=torch.float))
+                coordination_sparse.scatter_add_(0, unique_dst, torch.ones_like(unique_dst, dtype=torch.float))
+                
+                # Convert to dense format [batch_size, max_nodes]
+                coordination_dense = torch.zeros(batch_size, max_nodes, device=device)
+                
+                # Fill dense tensor using batch indices
+                node_idx = 0
+                for graph_idx in range(batch_size):
+                    nodes_in_graph = (batch_idx == graph_idx).sum().item()
+                    if nodes_in_graph > 0:
+                        end_idx = node_idx + nodes_in_graph
+                        actual_nodes = min(nodes_in_graph, max_nodes)
+                        coordination_dense[graph_idx, :actual_nodes] = coordination_sparse[node_idx:node_idx + actual_nodes]
+                    node_idx += nodes_in_graph
+                
+                return coordination_dense
             else:
-                # No edge information available, return zeros
-                return torch.zeros(batch_size, max_nodes, device=x_dense.device)
+                # Single graph case - simpler
+                src, dst = edge_index[0], edge_index[1]
+                unique_edge_mask = src < dst
+                if unique_edge_mask.sum() == 0:
+                    unique_edge_mask = torch.ones_like(src, dtype=torch.bool)
                 
-        except Exception as e:
-            # Fallback: return zeros if anything goes wrong
-            print(f"Warning: Could not compute chemical coordination: {e}")
-            return torch.zeros(x_dense.size(0), x_dense.size(1), device=x_dense.device)
+                unique_src = src[unique_edge_mask]
+                unique_dst = dst[unique_edge_mask]
+                
+                coordination = torch.zeros(max_nodes, device=device, dtype=torch.float)
+                coordination.scatter_add_(0, unique_src, torch.ones_like(unique_src, dtype=torch.float))
+                coordination.scatter_add_(0, unique_dst, torch.ones_like(unique_dst, dtype=torch.float))
+                
+                return coordination.unsqueeze(0).expand(batch_size, -1)
+        else:
+            # No edge information available, return zeros
+            return torch.zeros(batch_size, max_nodes, device=x_dense.device)
     
-    def _compute_geometric_features(self, x, pos, batch):
-        """Compute SE(3) invariant geometric features"""
+    def _compute_geometric_features(self, x, pos, batch, batch_obj=None):
+        """Compute SE(3) invariant geometric features - FIXED VERSION"""
         # Convert to dense format (let to_dense_batch pick the correct max per-batch)
         x_dense, batch_mask = to_dense_batch(x, batch, fill_value=0)
         pos_dense, _ = to_dense_batch(pos, batch, fill_value=0)
         
         n_graph, n_node = x_dense.size()
+        device = x_dense.device
         
-        # SE(3) INVARIANT: Compute pairwise distances only
-        delta_pos = pos_dense.unsqueeze(1) - pos_dense.unsqueeze(2)
-        dist = delta_pos.norm(dim=-1)  # INVARIANT to rotation/translation
-    
-        # SE(3) INVARIANT: Node-level coordination features
-        # 1. Distance-based neighbors (local environment density)
-        # Use tighter cutoffs that are more chemically meaningful
-        close_cutoff = getattr(self.config, 'close_cutoff', 3.0)   # First coordination shell (~typical bond + van der Waals)
+        # ✅ OPTIMIZED: Use pre-computed edge_index from preprocessing (no redundant computation)
+        # The edge_index is already computed efficiently in cache_to_pyg.py using radius_graph
+        if batch_obj is not None and hasattr(batch_obj, 'edge_index'):
+            edge_index = batch_obj.edge_index
+        else:
+            # Fallback: create empty edge index if no edge information available
+            edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        
+        # Compute distances only for edges (much more efficient)
+        if edge_index.size(1) > 0:
+            # Use pre-computed edge_index with current positions
+            edge_src = pos[edge_index[0]]
+            edge_dst = pos[edge_index[1]]
+            edge_distances = torch.norm(edge_src - edge_dst, dim=1)
+        else:
+            edge_distances = torch.empty(0, device=device)
+        
+        # ✅ FIXED: Compute coordination features efficiently
+        close_cutoff = getattr(self.config, 'close_cutoff', 3.0)
         medium_cutoff = self.config.cutoff_distance if hasattr(self.config, 'cutoff_distance') else 6.0
         
-        # Count neighbors in different shells
-        close_mask = (dist < close_cutoff) & (dist > 0.5)     # Close neighbors (likely bonded)
-        medium_mask = (dist < medium_cutoff) & (dist > 0.5)   # Medium range (environment)
+        # Initialize coordination counters
+        close_coordination = torch.zeros(n_graph, n_node, device=device)
+        medium_coordination = torch.zeros(n_graph, n_node, device=device)
+        min_distances = torch.full((n_graph, n_node), float('inf'), device=device)
+        mean_distances = torch.zeros(n_graph, n_node, device=device)
         
-        close_coordination = close_mask.sum(dim=-1).float()    # [n_graph, n_node]
-        distance_based_coordination = medium_mask.sum(dim=-1).float()  # [n_graph, n_node]
+        # ✅ FIXED: Efficient neighbor counting using pre-computed edge_index
+        if edge_index.size(1) > 0:
+            # Use batch mapping from the data
+            if batch_obj is not None and hasattr(batch_obj, 'batch'):
+                batch_mapping = batch_obj.batch
+                edge_batch_idx = batch_mapping[edge_index[0]]  # Batch index for each edge
+            else:
+                # Fallback: assume all nodes belong to batch 0
+                edge_batch_idx = torch.zeros(edge_index.size(1), dtype=torch.long, device=device)
+            edge_node_src = edge_index[0]
+            edge_node_dst = edge_index[1]
+            
+            # Count neighbors in different distance ranges
+            close_mask = (edge_distances < close_cutoff) & (edge_distances > 0.5)
+            medium_mask = (edge_distances < medium_cutoff) & (edge_distances > 0.5)
+            
+            # Use scatter operations for efficient counting
+            from torch_scatter import scatter_add
+            
+            # Count close neighbors
+            if close_mask.sum() > 0:
+                close_src = edge_node_src[close_mask]
+                close_dst = edge_node_dst[close_mask]
+                close_batch = edge_batch_idx[close_mask]
+                
+                # Count for source nodes
+                close_counts_src = scatter_add(torch.ones_like(close_src, dtype=torch.float), 
+                                             close_batch * n_node + (close_src % n_node), 
+                                             dim=0, dim_size=n_graph * n_node).view(n_graph, n_node)
+                close_coordination += close_counts_src
+                
+                # Count for destination nodes  
+                close_counts_dst = scatter_add(torch.ones_like(close_dst, dtype=torch.float),
+                                             close_batch * n_node + (close_dst % n_node),
+                                             dim=0, dim_size=n_graph * n_node).view(n_graph, n_node)
+                close_coordination += close_counts_dst
+            
+            # Count medium neighbors
+            if medium_mask.sum() > 0:
+                medium_src = edge_node_src[medium_mask]
+                medium_dst = edge_node_dst[medium_mask]
+                medium_batch = edge_batch_idx[medium_mask]
+                
+                medium_counts_src = scatter_add(torch.ones_like(medium_src, dtype=torch.float),
+                                              medium_batch * n_node + (medium_src % n_node),
+                                              dim=0, dim_size=n_graph * n_node).view(n_graph, n_node)
+                medium_coordination += medium_counts_src
+                
+                medium_counts_dst = scatter_add(torch.ones_like(medium_dst, dtype=torch.float),
+                                              medium_batch * n_node + (medium_dst % n_node),
+                                              dim=0, dim_size=n_graph * n_node).view(n_graph, n_node)
+                medium_coordination += medium_counts_dst
+            
+            # ✅ FIXED: Compute distance statistics efficiently
+            if close_mask.sum() > 0:
+                close_dists = edge_distances[close_mask]
+                close_src_nodes = edge_node_src[close_mask]
+                close_dst_nodes = edge_node_dst[close_mask]
+                close_batch_nodes = edge_batch_idx[close_mask]
+                
+                # Min distances using scatter_min
+                from torch_scatter import scatter_min
+                min_vals, _ = scatter_min(close_dists, close_batch_nodes * n_node + (close_src_nodes % n_node),
+                                         dim=0, dim_size=n_graph * n_node)
+                min_vals = min_vals.view(n_graph, n_node)
+                min_distances = torch.minimum(min_distances, min_vals)
+                
+                # Mean distances using scatter_mean
+                from torch_scatter import scatter_mean
+                mean_vals = scatter_mean(close_dists, close_batch_nodes * n_node + (close_src_nodes % n_node),
+                                       dim=0, dim_size=n_graph * n_node).view(n_graph, n_node)
+                mean_distances = torch.where(close_coordination > 0, mean_vals, mean_distances)
         
-        # 2. Chemical bond-based coordination (true molecular graph neighbors)
-        # We'll compute this from the actual molecular graph structure if available
+        # Handle infinite min distances
+        min_distances = torch.where(min_distances == float('inf'), torch.zeros_like(min_distances), min_distances)
+        
+        # ✅ FIXED: Compute chemical coordination (unchanged)
         chemical_coordination = self._compute_chemical_coordination(x_dense, batch)
         
-        # SE(3) INVARIANT: Distance statistics per node
-        # Use close_mask for meaningful distance statistics
-        masked_dist = dist.masked_fill(~close_mask, float('inf'))
-        min_distances = masked_dist.min(dim=-1)[0].masked_fill(close_mask.sum(dim=-1) == 0, 0.0)
+        # ✅ SIMPLIFIED: Use simple distance-based features instead of complex GaussianLayer
+        if edge_index.size(1) > 0:
+            # Simple distance-based edge features
+            # Use scatter operations to aggregate edge distances to nodes
+            from torch_scatter import scatter_add
+            
+            # Aggregate distances to source nodes
+            node_dist_src = scatter_add(edge_distances, edge_batch_idx * n_node + (edge_node_src % n_node),
+                                      dim=0, dim_size=n_graph * n_node).view(n_graph, n_node)
+            
+            # Aggregate distances to destination nodes
+            node_dist_dst = scatter_add(edge_distances, edge_batch_idx * n_node + (edge_node_dst % n_node),
+                                      dim=0, dim_size=n_graph * n_node).view(n_graph, n_node)
+            
+            # Combine and create simple features
+            total_distances = node_dist_src + node_dist_dst
+            avg_distances = total_distances / (close_coordination + medium_coordination + 1e-8)
+            
+            # Create simple edge features: [total_dist, avg_dist, num_edges]
+            aggregated_edge_features = torch.stack([
+                total_distances,  # Sum of all edge distances to this node
+                avg_distances,    # Average edge distance to this node
+                close_coordination + medium_coordination  # Total number of edges
+            ], dim=-1)  # [n_graph, n_node, 3]
+        else:
+            # Fallback: zero features when no edges
+            aggregated_edge_features = torch.zeros(n_graph, n_node, 3, device=device)
         
-        masked_dist_finite = dist.masked_fill(~close_mask, 0.0)
-        mean_distances = masked_dist_finite.sum(dim=-1) / (close_mask.sum(dim=-1) + 1e-8)
-        
-        # SE(3) INVARIANT: Combine features
-        # Shape: [n_graph, n_node, feature_dim]
+        # ✅ FIXED: Combine all features
         invariant_features = torch.stack([
-            chemical_coordination,        # True chemical bonds (sp3≈4, sp2≈3, sp≈2)
-            close_coordination,          # Close spatial neighbors (~3Å, likely bonded)
-            distance_based_coordination,  # Medium range environment (~6Å)
+            chemical_coordination,        # True chemical bonds
+            close_coordination,          # Close spatial neighbors
+            medium_coordination,         # Medium range environment
             min_distances,               # Closest neighbor distance
             mean_distances,              # Average close neighbor distance
         ], dim=-1)  # [n_graph, n_node, 5]
         
-        # Apply Gaussian basis functions to distances for richer representation
-        if self.gaussian_layer is not None:
-            edge_type = x_dense.view(n_graph, n_node, 1) * self.config.atom_types + x_dense.view(n_graph, 1, n_node)
-            gbf_feature = self.gaussian_layer(dist, edge_type)
-        else:
-            # Fallback: use simple distance features
-            gbf_feature = dist.unsqueeze(-1)  # [n_graph, n_node, n_node, 1]
-        
-        # Mask padding
-        padding_mask = x_dense.eq(0)
-        edge_features = gbf_feature.masked_fill(
-            padding_mask.unsqueeze(1).unsqueeze(-1), 0.0
-        )
-        
-        # Aggregate edge features (sum over neighbors is permutation invariant)
-        aggregated_edge_features = edge_features.sum(dim=-2)  # [n_graph, n_node, feature_dim]
-        
         # Combine invariant node features with aggregated edge features
         combined_features = torch.cat([
             invariant_features,  # [n_graph, n_node, 5]
-            aggregated_edge_features  # [n_graph, n_node, feature_dim]
-        ], dim=-1)  # [n_graph, n_node, 5 + feature_dim]
+            aggregated_edge_features  # [n_graph, n_node, K or 1]
+        ], dim=-1)  # [n_graph, n_node, 5 + K]
         
         # Project to hidden dimension
         geometric_features = self.coordinate_projection(combined_features)
@@ -698,7 +750,7 @@ class PretrainingESAModel(pl.LightningModule):
             raise ValueError("Batch must have either 'x' or 'z' attribute")
         
         # Encode nodes (universal approach)
-        node_embeddings = self.encoder(x, pos, batch)
+        node_embeddings = self.encoder(x, pos, batch, batch)
         
         # Debug check
         if node_embeddings is None:
@@ -817,6 +869,25 @@ class PretrainingESAModel(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """Training step"""
+        # Debug: Calculate average node size per batch
+        if hasattr(batch, 'z'):
+            num_atoms = batch.z.size(0)
+        elif hasattr(batch, 'x'):
+            num_atoms = batch.x.size(0)
+        else:
+            num_atoms = 0
+            
+        if hasattr(batch, 'batch'):
+            batch_size = batch.batch.max().item() + 1
+            avg_nodes_per_molecule = num_atoms / batch_size if batch_size > 0 else 0
+        else:
+            batch_size = 1
+            avg_nodes_per_molecule = num_atoms
+            
+        # Log debug info every 50 steps
+        if batch_idx % 50 == 0:
+            print(f"🔍 Batch {batch_idx}: {batch_size} molecules, {num_atoms} total atoms, avg {avg_nodes_per_molecule:.1f} atoms/molecule")
+        
         graph_embeddings, node_embeddings = self.forward(batch)
         
         losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
@@ -910,45 +981,15 @@ def create_pretraining_config(**kwargs) -> PretrainingConfig:
     
     # Update with provided kwargs
     for key, value in kwargs.items():
-        # Accept all keys to avoid noisy warnings; attach as attributes if unknown
-        try:
-            setattr(config, key, value)
-        except Exception:
-            pass
+        # Set all keys as attributes - will fail if invalid
+        setattr(config, key, value)
     
     return config
 
 
 # Example usage and configuration
 if __name__ == "__main__":
-    # Example configuration for universal molecular pretraining
-    config = create_pretraining_config(
-        # Model architecture
-        num_features=128,
-        graph_dim=256,
-        hidden_dims=[256, 256, 256, 256],
-        num_heads=[8, 8, 8, 8],
-        layer_types=["S", "S", "S", "P"],
-        
-        # Pretraining tasks
-        pretraining_tasks=[
-            "long_range_distance",
-            "short_range_distance",
-            "mlm"
-        ],
-        
-        # Task weights
-        task_weights={
-            "long_range_distance": 1.5,
-            "short_range_distance": 1.0,
-            "mlm": 0.3
-        },
-        
-        # Training parameters
-        batch_size=32,
-        lr=0.001,
-        early_stopping_patience=30
-    )
+    config = create_pretraining_config()
     
     # Create model
     model = PretrainingESAModel(config)

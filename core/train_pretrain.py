@@ -20,8 +20,13 @@ from pytorch_lightning.loggers import WandbLogger
 # Imports from this project
 sys.path.append(os.path.realpath("."))
 
-from core.models_pretrain import PretrainingESAModel, PretrainingConfig, create_pretraining_config
-from data_loading.cache_to_pyg import OptimizedUniversalDataset, OptimizedUniversalQM9Dataset, OptimizedUniversalLBADataset
+# Add parent directory to path for imports (relative to current file)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
+from core.pretraining_model import PretrainingESAModel, PretrainingConfig, create_pretraining_config
+from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes
 from torch_geometric.transforms import Compose
 
@@ -53,36 +58,54 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
     
     # Create transform
     transforms = create_pretraining_data_transforms(config)
-
-    # Define the arguments dictionary ONCE. This will be used for all datasets.
-    # This ensures consistent behavior for all data types.
-    loader_args = {
-        'root': dataset_dir,  # We pass the clean path directly from the config.
-        'universal_cache_path': getattr(config, 'universal_cache_path', None),
-        'max_samples': getattr(config, 'max_samples', None),
-        'cutoff_distance': getattr(config, 'cutoff_distance', 5.0),
-        'max_neighbors': getattr(config, 'max_neighbors', 32),
-        'transform': transforms
-    }
     
-    # Step 1: Select the correct Dataset Class based on the dataset name
+    # Load optimized universal dataset (with efficient tensor caching!)
     if dataset_name.upper() == 'QM9':
-        DatasetClass = OptimizedUniversalQM9Dataset
-        print(f"📊 Loading up to {loader_args['max_samples'] or 'all'} QM9 samples...")
+        # Get max_samples from config
+        max_samples = getattr(config, 'max_samples', 50000)  # Default to 50K for training
+        print(f"📊 Loading {max_samples} samples from universal cache...")
+        
+        full_dataset = OptimizedUniversalQM9Dataset(
+            root=os.path.join(dataset_dir, 'processed'),
+            universal_cache_path=getattr(config, 'universal_cache_path', None),
+            max_samples=max_samples,
+            molecule_max_atoms=getattr(config, 'molecule_max_atoms', None),
+            cutoff_distance=getattr(config, 'cutoff_distance', 5.0),
+            max_neighbors=getattr(config, 'max_neighbors', 32),
+            transform=transforms
+        )
         
     elif dataset_name.upper() == 'LBA':
-        DatasetClass = OptimizedUniversalLBADataset
-        print(f"📊 Loading up to {loader_args['max_samples'] or 'all'} LBA samples...")
+        from data_loading.cache_to_pyg import OptimizedUniversalLBADataset
         
-    elif dataset_name.upper() in ['PDB', 'PROTEIN']:
-        DatasetClass = OptimizedUniversalDataset
-        print(f"📊 Loading up to {loader_args['max_samples'] or 'all'} Protein samples...")
+        # Get max_samples from config
+        max_samples = getattr(config, 'max_samples', 50000)  # Default to 50K for training
+        print(f"📊 Loading {max_samples} samples from universal cache...")
         
+        full_dataset = OptimizedUniversalLBADataset(
+            root=os.path.join(dataset_dir, 'processed'),
+            universal_cache_path=getattr(config, 'universal_cache_path', None),
+            max_samples=max_samples,
+            molecule_max_atoms=getattr(config, 'molecule_max_atoms', None),
+            cutoff_distance=getattr(config, 'cutoff_distance', 5.0),
+            max_neighbors=getattr(config, 'max_neighbors', 32),
+            transform=transforms
+        )
+    elif dataset_name.upper() == 'PDB':
+        from data_loading.cache_to_pyg import OptimizedUniversalDataset
+        max_samples = getattr(config, 'max_samples', 50000)  # Default to 50K for training
+        
+        full_dataset = OptimizedUniversalDataset(
+            root=os.path.join(dataset_dir, 'processed'),
+            universal_cache_path=getattr(config, 'universal_cache_path', None),
+            max_samples=max_samples,
+            molecule_max_atoms=getattr(config, 'molecule_max_atoms', None),
+            cutoff_distance=getattr(config, 'cutoff_distance', 5.0),
+            max_neighbors=getattr(config, 'max_neighbors', 32),
+            transform=transforms
+        )
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
-    
-    # Step 2: Instantiate the selected class with the prepared arguments
-    full_dataset = DatasetClass(**loader_args)
     
     return full_dataset
 
@@ -279,4 +302,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

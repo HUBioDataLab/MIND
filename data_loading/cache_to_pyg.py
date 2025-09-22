@@ -16,12 +16,8 @@ import os
 import sys
 import torch
 import pickle
-import numpy as np
-import json
-import hashlib
 from typing import List, Dict, Any, Optional, Tuple
 from torch_geometric.data import Data, InMemoryDataset
-from torch_geometric.utils import to_dense_batch
 from tqdm import tqdm
 import warnings
 
@@ -29,17 +25,8 @@ import warnings
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from data_loading.data_types import UniversalMolecule, UniversalBlock, UniversalAtom
 
-# Neighborhood graph constructor (radius graph)
-try:
-    from torch_cluster import radius_graph  # preferred
-except Exception:
-    try:
-        from torch_geometric.nn.pool import radius_graph  # fallback location in some versions
-    except Exception:
-        radius_graph = None
-
+from torch_cluster import radius_graph  # preferred
 warnings.filterwarnings('ignore')
-
 
 class OptimizedUniversalDataset(InMemoryDataset):
     """
@@ -53,6 +40,7 @@ class OptimizedUniversalDataset(InMemoryDataset):
                  root: str,
                  universal_cache_path: str,
                  max_samples: Optional[int] = None,
+                 molecule_max_atoms: Optional[int] = None,
                  cutoff_distance: float = 5.0,
                  max_neighbors: int = 32,
                  transform=None,
@@ -65,6 +53,7 @@ class OptimizedUniversalDataset(InMemoryDataset):
             root: Root directory for processed tensor cache
             universal_cache_path: Path to cached universal representations (.pkl file)
             max_samples: Maximum number of samples to load (None for all)
+            molecule_max_atoms: Maximum number of atoms per molecule (None for no limit)
             cutoff_distance: Distance cutoff for edge construction
             max_neighbors: Maximum number of neighbors per atom
             transform: Transform to apply to each sample
@@ -73,6 +62,7 @@ class OptimizedUniversalDataset(InMemoryDataset):
         """
         self.universal_cache_path = universal_cache_path
         self.max_samples = max_samples
+        self.molecule_max_atoms = molecule_max_atoms
         self.cutoff_distance = cutoff_distance
         self.max_neighbors = max_neighbors
         
@@ -81,25 +71,20 @@ class OptimizedUniversalDataset(InMemoryDataset):
         
         super().__init__(root, transform, pre_transform, pre_filter)
         
-        # Robust load that works with PyTorch >=2.6 (weights_only default) and older versions
+        # Check if processed file exists for current configuration
         processed_path = self.processed_paths[0]
-        try:
-            self.data, self.slices = torch.load(processed_path, map_location='cpu', weights_only=False)
-        except TypeError:
-            # Older torch without weights_only
-            self.data, self.slices = torch.load(processed_path, map_location='cpu')
-        
-        # After initial load, ensure cache matches current raw and config; if not, rebuild
-        try:
-            if not self._cache_is_fresh():
-                print("⚠️  Cache metadata mismatch or raw changed. Rebuilding universal processed cache...")
-                self.process()
-                try:
-                    self.data, self.slices = torch.load(processed_path, map_location='cpu', weights_only=False)
-                except TypeError:
-                    self.data, self.slices = torch.load(processed_path, map_location='cpu')
-        except Exception:
-            # If anything goes wrong, proceed with whatever is loaded
+        if os.path.exists(processed_path):
+            print(f"✅ Loading cached processed dataset: {os.path.basename(processed_path)}")
+            # Robust load that works with PyTorch >=2.6 (weights_only default) and older versions
+            try:
+                self.data, self.slices = torch.load(processed_path, map_location='cpu', weights_only=False)
+            except TypeError:
+                # Older torch without weights_only
+                self.data, self.slices = torch.load(processed_path, map_location='cpu')
+            print(f"✅ Loaded {len(self)} samples from processed cache")
+        else:
+            print(f"🔄 No processed cache found for current configuration. Will process from universal cache...")
+            # This will trigger process() in the parent class
             pass
 
     @property
@@ -113,6 +98,8 @@ class OptimizedUniversalDataset(InMemoryDataset):
         cache_name = os.path.basename(self.universal_cache_path).replace('.pkl', '')
         if self.max_samples:
             cache_name += f"_samples_{self.max_samples}"
+        if self.molecule_max_atoms:
+            cache_name += f"_maxatoms_{self.molecule_max_atoms}"
         config_sig = f"cutoff_{self.cutoff_distance}_neighbors_{self.max_neighbors}"
         return [f"optimized_{cache_name}_{config_sig}.pt"]
 
@@ -130,53 +117,28 @@ class OptimizedUniversalDataset(InMemoryDataset):
         
         This is the expensive operation that happens ONCE, then tensors are cached!
         """
-        # If processed exists, reuse cache
-        if os.path.exists(self.processed_paths[0]):
-            print(f"✅ Using cached processed dataset at: {self.processed_paths[0]}")
-            return
-
         print(f"🔄 Processing universal representations to PyTorch Geometric tensors...")
-        print(f"📂 Loading from: {self.universal_cache_path}")
+        print(f"📂 Loading from pickle cache: {self.universal_cache_path}")
+        print(f"💾 Will save processed tensors to: {self.processed_paths[0]}")
         
         # Load universal representations with backward compatibility
-        import sys
         import types
         
-        # Add minimal compatibility for old cache files
-        old_modules = {}
+        # Create compatibility module for pickle loading
+        from data_loading.data_types import UniversalMolecule, UniversalBlock, UniversalAtom
+        data_types_module = types.ModuleType('data_types')
+        data_types_module.UniversalMolecule = UniversalMolecule
+        data_types_module.UniversalBlock = UniversalBlock
+        data_types_module.UniversalAtom = UniversalAtom
+        sys.modules['data_types'] = data_types_module
+        
         try:
-            # Save current modules that might conflict
-            for module_name in ['data_types', 'universal']:
-                if module_name in sys.modules:
-                    old_modules[module_name] = sys.modules[module_name]
-            
-            # Create compatibility modules for old import paths
-            from data_loading.data_types import UniversalMolecule, UniversalBlock, UniversalAtom
-            
-            # Handle 'data_types' direct import (newer caches)
-            data_types_module = types.ModuleType('data_types')
-            data_types_module.UniversalMolecule = UniversalMolecule
-            data_types_module.UniversalBlock = UniversalBlock
-            data_types_module.UniversalAtom = UniversalAtom
-            sys.modules['data_types'] = data_types_module
-            
-            # Handle 'universal.data_types' import (older caches)
-            universal_module = types.ModuleType('universal')
-            universal_module.data_types = data_types_module
-            sys.modules['universal'] = universal_module
-            sys.modules['universal.data_types'] = data_types_module
-            
             with open(self.universal_cache_path, 'rb') as f:
                 universal_molecules = pickle.load(f)
-                
         finally:
-            # Restore original modules
-            for module_name in ['data_types', 'universal', 'universal.data_types']:
-                if module_name in sys.modules:
-                    if module_name in old_modules:
-                        sys.modules[module_name] = old_modules[module_name]
-                    else:
-                        del sys.modules[module_name]
+            # Clean up the temporary module
+            if 'data_types' in sys.modules:
+                del sys.modules['data_types']
         
         # Limit samples if requested
         if self.max_samples is not None:
@@ -187,47 +149,43 @@ class OptimizedUniversalDataset(InMemoryDataset):
         
         # Convert to PyTorch Geometric format
         data_list = []
+        filtered_count = 0
         print("🔄 Converting to PyTorch Geometric format...")
         
         for i, mol in enumerate(tqdm(universal_molecules, desc="Converting molecules")):
             try:
+                # Check filtering before expensive conversion
+                atoms = mol.get_all_atoms()
+                if self.molecule_max_atoms is not None and len(atoms) > self.molecule_max_atoms:
+                    filtered_count += 1
+                    continue
+                    
                 pyg_data = self._universal_to_pyg(mol)
-                if pyg_data is not None:
-                    # Apply pre_filter if provided
-                    if self.pre_filter is not None and not self.pre_filter(pyg_data):
-                        continue
+                if pyg_data is None:
+                    continue
                     
-                    # Apply pre_transform if provided  
-                    if self.pre_transform is not None:
-                        pyg_data = self.pre_transform(pyg_data)
-                    
-                    data_list.append(pyg_data)
+                # Apply pre_filter if provided
+                if self.pre_filter is not None and not self.pre_filter(pyg_data):
+                    continue
+                
+                # Apply pre_transform if provided  
+                if self.pre_transform is not None:
+                    pyg_data = self.pre_transform(pyg_data)
+                
+                data_list.append(pyg_data)
             except Exception as e:
                 print(f"⚠️ Skipping molecule {i} due to conversion error: {e}")
                 continue
         
         print(f"✅ Converted {len(data_list)} molecules to PyTorch Geometric format")
+        if self.molecule_max_atoms is not None and filtered_count > 0:
+            print(f"🔍 Filtered out {filtered_count} molecules with more than {self.molecule_max_atoms} atoms")
         
         # Efficiently collate and save
         data, slices = self.collate(data_list)
         torch.save((data, slices), self.processed_paths[0])
         
-        print(f"✅ Processed {len(data_list)} molecules")
-        print(f"💾 Saved to: {self.processed_paths[0]}")
-        
-        # Save cache metadata fingerprint for fast reuse
-        try:
-            meta = {
-                'raw_count': self._raw_count(),
-                'raw_hash': self._raw_fingerprint(),
-                'config_sig': self._config_signature(),
-            }
-            os.makedirs(self.processed_dir, exist_ok=True)
-            meta_path = os.path.join(self.processed_dir, f'optimized_universal_meta_{self.max_samples or "all"}.json')
-            with open(meta_path, 'w') as f:
-                json.dump(meta, f)
-        except Exception:
-            pass
+        print(f"✅ Processing complete! Saved {len(data_list)} molecules to: {os.path.basename(self.processed_paths[0])}")
 
     def _universal_to_pyg(self, mol: UniversalMolecule) -> Optional[Data]:
         """
@@ -255,12 +213,8 @@ class OptimizedUniversalDataset(InMemoryDataset):
             
             atomic_numbers = torch.tensor(atomic_numbers, dtype=torch.long)
             
-            # Create node features (one-hot encoding of atomic numbers)
-            max_atomic_num = 118  # Support up to atomic number 118 (GET vocabulary)
-            node_features = torch.zeros(len(atoms), max_atomic_num)
-            for i, atomic_num in enumerate(atomic_numbers):
-                if atomic_num < max_atomic_num:
-                    node_features[i, atomic_num] = 1.0
+            # Note: Removed wasteful one-hot encoding (was 118*N bytes per molecule)
+            # We only need atomic numbers (z) which our model actually uses
             
             # Extract block information for hierarchical structure
             block_indices = torch.tensor([atom.block_idx for atom in atoms], dtype=torch.long)
@@ -294,9 +248,10 @@ class OptimizedUniversalDataset(InMemoryDataset):
             
             # Create PyTorch Geometric Data object
             data = Data(
-                x=node_features,  # Node features
+                # Note: Removed x=node_features (wasteful one-hot encoding)
+                # Only keeping z=atomic_numbers which is what the model actually uses
                 pos=positions,    # 3D coordinates
-                z=atomic_numbers, # Atomic numbers
+                z=atomic_numbers, # Atomic numbers (this is all we need!)
                 edge_index=edge_index,
                 edge_attr=edge_attr,
                 
@@ -320,15 +275,14 @@ class OptimizedUniversalDataset(InMemoryDataset):
             return None
     
     def _element_to_atomic_number(self, element: str) -> int:
-        """Convert element symbol to atomic number"""
-        element_to_z = {
-            'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8, 
-            'F': 9, 'Ne': 10, 'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15, 
-            'S': 16, 'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20, 'Sc': 21, 'Ti': 22, 
-            'V': 23, 'Cr': 24, 'Mn': 25, 'Fe': 26, 'Co': 27, 'Ni': 28, 'Cu': 29, 
-            'Zn': 30, 'Ga': 31, 'Ge': 32, 'As': 33, 'Se': 34, 'Br': 35, 'Kr': 36,
-        }
-        return element_to_z.get(element, 6)  # Default to Carbon if unknown
+        """Convert element symbol to atomic number using RDKit only"""
+        try:
+            from rdkit import Chem
+            atomic_num = Chem.GetPeriodicTable().GetAtomicNumber(element)
+            return atomic_num
+        except Exception:
+            # Default to Carbon for any unknown/invalid elements
+            return 6
     
     def _calculate_edge_features(self, positions: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """Calculate edge features (distances) between connected atoms"""
@@ -336,47 +290,6 @@ class OptimizedUniversalDataset(InMemoryDataset):
         diff = positions[row] - positions[col]
         distances = torch.norm(diff, dim=1, keepdim=True)
         return distances
-
-    def _raw_count(self) -> int:
-        """Count raw files"""
-        try:
-            return 1 if os.path.exists(os.path.join(self.raw_dir, self.raw_file_names[0])) else 0
-        except Exception:
-            return 0
-
-    def _raw_fingerprint(self) -> str:
-        """Compute a lightweight fingerprint of the raw universal cache file."""
-        import hashlib
-        h = hashlib.sha256()
-        try:
-            raw_path = os.path.join(self.raw_dir, self.raw_file_names[0])
-            if os.path.exists(raw_path):
-                st = os.stat(raw_path)
-                h.update(f"{self.raw_file_names[0]}|{st.st_size}|{int(st.st_mtime)}".encode('utf-8'))
-            return h.hexdigest()
-        except Exception:
-            return ""
-
-    def _config_signature(self) -> str:
-        """Create signature for current configuration"""
-        return f"max_samples={self.max_samples};cutoff={self.cutoff_distance};max_neighbors={self.max_neighbors}"
-
-    def _cache_is_fresh(self) -> bool:
-        """Compare stored metadata with current raw fingerprint and config."""
-        meta_path = os.path.join(self.processed_dir, f'optimized_universal_meta_{self.max_samples or "all"}.json')
-        try:
-            with open(meta_path, 'r') as f:
-                meta = json.load(f)
-            if meta.get('config_sig') != self._config_signature():
-                return False
-            if meta.get('raw_count') != self._raw_count():
-                return False
-            if meta.get('raw_hash') != self._raw_fingerprint():
-                return False
-            print("✅ Using cached processed universal dataset (fingerprint matched)")
-            return True
-        except Exception:
-            return False
 
 
 class OptimizedUniversalQM9Dataset(OptimizedUniversalDataset):
@@ -391,6 +304,7 @@ class OptimizedUniversalQM9Dataset(OptimizedUniversalDataset):
                  root: str = None,
                  universal_cache_path: str = None,
                  max_samples: Optional[int] = None,
+                 molecule_max_atoms: Optional[int] = None,
                  cutoff_distance: float = 5.0,
                  max_neighbors: int = 32,
                  transform=None,
@@ -399,19 +313,13 @@ class OptimizedUniversalQM9Dataset(OptimizedUniversalDataset):
         
         # Default root path
         if root is None:
-            root = os.path.join(
-                os.path.dirname(__file__), 
-                '..', 'data_loading_universal', 'cache_tensors', 'qm9_optimized'
-            )
+            root = os.path.join(os.path.dirname(__file__), 'processed', 'qm9_optimized')
         
         # Default cache path for QM9
         if universal_cache_path is None:
-            universal_cache_path = os.path.join(
-                os.path.dirname(__file__), 
-                '..', 'data_loading_universal', 'cache', 'universal_qm9_all.pkl'
-            )
+            universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_qm9_all.pkl')
         
-        super().__init__(root, universal_cache_path, max_samples, cutoff_distance, max_neighbors, 
+        super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors, 
                         transform, pre_transform, pre_filter)
 
 
@@ -427,6 +335,7 @@ class OptimizedUniversalLBADataset(OptimizedUniversalDataset):
                  root: str = None,
                  universal_cache_path: str = None,
                  max_samples: Optional[int] = None,
+                 molecule_max_atoms: Optional[int] = None,
                  cutoff_distance: float = 5.0,
                  max_neighbors: int = 32,
                  transform=None,
@@ -435,22 +344,14 @@ class OptimizedUniversalLBADataset(OptimizedUniversalDataset):
         
         # Default root path
         if root is None:
-            root = os.path.join(
-                os.path.dirname(__file__), 
-                '..', 'data_loading_universal', 'cache_tensors', 'lba_optimized'
-            )
+            root = os.path.join(os.path.dirname(__file__), 'processed', 'lba_optimized')
         
         # Default cache path for LBA
         if universal_cache_path is None:
-            universal_cache_path = os.path.join(
-                os.path.dirname(__file__), 
-                '..', 'data_loading_universal', 'cache', 'universal_lba_all.pkl'
-            )
+            universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_lba_all.pkl')
         
-        super().__init__(root, universal_cache_path, max_samples, cutoff_distance, max_neighbors, 
+        super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors, 
                         transform, pre_transform, pre_filter)
-
-
 
 
 if __name__ == "__main__":

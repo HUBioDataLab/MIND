@@ -16,7 +16,7 @@ class UniversalAtom:
     position: Tuple[float, float, float]  # 3D coordinates: (x, y, z)
     pos_code: str                   # Position within block: 'CA', 'CB', 'sm', etc.
     block_idx: int                  # Which block this atom belongs to
-    atom_idx_in_block: int          # Index within the block
+    atom_idx_in_block: int          # Index within the block #! Bu kısım için proteinlere bak.
     entity_idx: int                 # Which molecular entity (0=protein, 1=ligand, etc.)
 
 @dataclass
