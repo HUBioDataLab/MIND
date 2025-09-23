@@ -1,114 +1,117 @@
+# ===================================================================
+# MIND Project - Protein Pretraining Configuration (40k Test Set)
+# ===================================================================
+
+# -------------------------
+# Genel ve Çıktı Ayarları
+# -------------------------
 seed: 42
-dataset: QM9
-dataset_download_dir: ./data_loading
-out_path: ./outputs/universal_pretrain
-wandb_project_name: esa-universal-pretraining
-wandb_run_name: universal-PROTEIN-pretraining-clean
-max_epochs: 100
-gradient_clip_val: 0.5
-monitor_loss_name: train_total_loss
+out_path: "outputs/protein_pretrain_40k" # Eğitilmiş modellerin en iyi versiyonlarının kaydedileceği yol
+wandb_project_name: "MIND-Project-Pretraining"
+wandb_run_name: "protein-test-40k-run-1"
 
-num_workers: 4
-molecule_max_atoms: 2000  # Proteins typically have more atoms than small molecules
-
-
-# Optimized batch size for node attention
-batch_size: 64
-# Dataset size limit (for testing)
-max_samples: 130000
-
-# Universal representation specific settings
+# -------------------------
+# Veri Seti Ayarları
+# -------------------------
+dataset: PDB
+universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
+dataset_download_dir: "../data/proteins/processed_graphs_40k" # .pt dosyaları bunun içinde /processed_40k gibi bir yere kaydedilecek
+num_workers: 8
+max_samples: 40000 # Test seti için 40k ile sınırla
 use_universal_cache: true
-universal_cache_path: "/home/yusuf/MIND/data_loading/cache/universal_pdb_all.pkl"
 
+# -------------------------
+# Eğitim Parametreleri
+# -------------------------
+max_epochs: 30
+batch_size: 8
+lr: 0.0005
+early_stopping_patience: 15 # Early stopping patience (patience: 30, means 30 epochs without improvement, the model will stop training.)
+gradient_clip_val: 0.5 
+optimiser_weight_decay: 1.0e-10
+monitor_loss_name: "train_total_loss" # The loss to monitor for early stopping or something else.
+use_bfloat16: false 
+accelerator: auto
+devices: auto
+precision: 16 #! 16 düşürülebilir. 
+num_sanity_val_steps: 0
+fast_dev_run: false
+
+# -------------------------
+# Model Mimarisi (ESA)
+# -------------------------
 apply_attention_on: node
-graph_dim: 512
+graph_dim: 256
 edge_dim: 64
-hidden_dims: [512, 512, 512, 512,512,512,512,512]
-num_heads: [8, 8, 8, 8,8,8,8,8]
-layer_types: ["M", "S", "S", "M","S","M","S","P"]
-xformers_or_torch_attn: xformers
+hidden_dims: [256, 256, 256, 256, 256, 256, 256, 256]
+num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
+layer_types: ["M", "S", "M", "S", "M", "S", "P", "P"]
+xformers_or_torch_attn: torch
 norm_type: LN
 use_3d_coordinates: true
+set_max_items: 0 # 0, dinamik olarak ayarlanmasını sağlar
+triu_attn_mask: false
 
-use_hierarchical_features: true
-block_embedding_dim: 32
-position_embedding_dim: 16
-entity_embedding_dim: 8
-max_block_types: 150  # GET vocabulary size (4 special + 20 AA + 8 bases + 118 atoms)
-max_position_types: 15  # GET position codes (15 total)
-max_entity_types: 6  # protein, ligand, DNA, RNA, small molecule, other
-
-# MLP config
+# -------------------------
+# MLP Ayarları
+# -------------------------
 use_mlps: true
 mlp_hidden_size: 512
 num_mlp_layers: 3
-
-# Hardcoded values that are now configurable
-max_atomic_num: 118  # GET atomic elements vocabulary (118 chemical elements from h to og)
-rwse_dim: 24  # RWSE positional encoding dimension
-lap_dim: 4  # LapPE positional encoding dimension
-mlp_inter_dim: 128  # MLP intermediate dimension
-pma_num_outputs: 32  # PMA (Pooling by Multihead Attention) outputs
-max_node_items: 100  # Maximum nodes for attention
-max_edge_items: 1000  # Maximum edges for attention
-output_dim: 1  # Output dimension for final predictions
 mlp_type: standard
 mlp_dropout: 0.0
 use_mlp_ln: false
 pre_or_post: pre
-use_bfloat16: false
 
-# Dropout settings
+# -------------------------
+# Dropout Ayarları
+# -------------------------
 sab_dropout: 0.0
 mab_dropout: 0.0
 pma_dropout: 0.0
 attn_residual_dropout: 0.0
 pma_residual_dropout: 0.0
 
-# ESA optimizations
-set_max_items: 0
-triu_attn_mask: false
-
-# Positional encoding
-use_posenc: false  # Set to true to enable RWSE+LapPE positional encoders
-
+# -------------------------
+# 3D Geometrik Parametreler
+# -------------------------
+molecule_max_atoms: 2000 # protein_max_residues yerine
 gaussian_kernels: 128
-cutoff_distance: 5.0
-max_neighbors: 16
-max_distance: 10.0  # Appropriate for small molecules
-distance_bins: 16  # Fewer bins for easier learning
+cutoff_distance: 6.0
+max_neighbors: 64 #! Max neighbors for protein is 64 can be changed.
+max_distance: 80.0
+distance_bins: 80
 
-# Pretraining tasks matching working model
-pretraining_tasks: ["short_range_distance", "mlm", "long_range_distance"]
+# -------------------------
+# Ön-Eğitim Görevleri
+# -------------------------
+pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
 task_weights:
-  long_range_distance: 1.0  # Global 3D structure learning
-  short_range_distance: 1.0  # Local chemical bond learning
-  mlm: 0.5  # Masked language modeling helps representation learning
-  
-
+  long_range_distance: 1.5
+  short_range_distance: 1.0
+  mlm: 0.3
 mlm_mask_ratio: 0.15
-temperature: 0.1
+temperature: 0.2
 
-lr: 0.0005  # Match working model exactly
-early_stopping_patience: 30
-optimiser_weight_decay: 0.0000000001  # Match working model exactly
-
-
-# Memory efficient settings
+# -------------------------
+# Yeni Kod Yapısı İçin Gerekli Diğer Parametreler
+# -------------------------
+max_block_types: 150
+max_position_types: 15
+max_entity_types: 6
+block_embedding_dim: 32
+position_embedding_dim: 16
+entity_embedding_dim: 8
+use_hierarchical_features: false # Bizim adaptörümüz bunu üretmediği için false
+max_atomic_num: 118
+rwse_dim: 24
+lap_dim: 4
+mlp_inter_dim: 128
+pma_num_outputs: 32
+max_node_items: 2000
+max_edge_items: 4000
+output_dim: 1
+posenc: null
 use_memory_efficient_attention: true
 attention_dropout: 0.1
-
-# Universal representation features
-# Note: Hierarchical blocks are ALWAYS available in universal representations
-# They are pre-processed in the adapter, no need for GET processing during training
 preserve_universal_blocks: true
-
-# Fast training optimizations (since data loading is instant)
-fast_dev_run: false
-accelerator: auto
-devices: auto
-precision: bfloat16
-
-# Disable sanity check for faster startup
-num_sanity_val_steps: 0
