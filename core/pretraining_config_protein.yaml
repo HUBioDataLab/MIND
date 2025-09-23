@@ -24,7 +24,7 @@ use_universal_cache: true
 # Eğitim Parametreleri
 # -------------------------
 max_epochs: 30
-batch_size: 8
+batch_size: 32
 lr: 0.0005
 early_stopping_patience: 15 # Early stopping patience (patience: 30, means 30 epochs without improvement, the model will stop training.)
 gradient_clip_val: 0.5 
