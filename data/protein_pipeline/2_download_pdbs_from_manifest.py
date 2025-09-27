@@ -3,7 +3,7 @@
 
 # source /opt/anaconda3/bin/activate
 """ 
-python data_loading/proteins/prepare_dataset.py \
+python data/protein_pipeline/2_download_pdbs_from_manifest.py \
     --manifest-file ../data/proteins/afdb_clusters/manifest_hq_40k.csv \
     --structures-outdir ../data/proteins/raw_structures_hq_40k \
     --workers 16

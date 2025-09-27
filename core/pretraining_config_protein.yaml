@@ -77,9 +77,9 @@ pma_residual_dropout: 0.0
 # -------------------------
 molecule_max_atoms: 2000 # protein_max_residues yerine
 gaussian_kernels: 128
-cutoff_distance: 6.0
-max_neighbors: 64 #! Max neighbors for protein is 64 can be changed.
-max_distance: 80.0
+cutoff_distance: 6.0 #! Max distance for protein is 6.0 angstrom can be changed.
+max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
+max_distance: 80.0 
 distance_bins: 80
 
 # -------------------------

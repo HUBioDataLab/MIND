@@ -14,6 +14,7 @@ import torch
 torch.manual_seed(42)
 from torch_geometric.loader import DataLoader as GeometricDataLoader
 from torch.utils.data import DataLoader
+from torch.utils.data import random_split
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 
@@ -66,7 +67,7 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         print(f"📊 Loading {max_samples} samples from universal cache...")
         
         full_dataset = OptimizedUniversalQM9Dataset(
-            root=os.path.join(dataset_dir, 'processed'),
+            root=dataset_dir,  # Don't add 'processed' - PyG Dataset will add it
             universal_cache_path=getattr(config, 'universal_cache_path', None),
             max_samples=max_samples,
             molecule_max_atoms=getattr(config, 'molecule_max_atoms', None),
@@ -83,7 +84,7 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         print(f"📊 Loading {max_samples} samples from universal cache...")
         
         full_dataset = OptimizedUniversalLBADataset(
-            root=os.path.join(dataset_dir, 'processed'),
+            root=dataset_dir,  # Don't add 'processed' - PyG Dataset will add it
             universal_cache_path=getattr(config, 'universal_cache_path', None),
             max_samples=max_samples,
             molecule_max_atoms=getattr(config, 'molecule_max_atoms', None),
@@ -96,7 +97,7 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         max_samples = getattr(config, 'max_samples', 50000)  # Default to 50K for training
         
         full_dataset = OptimizedUniversalDataset(
-            root=os.path.join(dataset_dir, 'processed'),
+            root=dataset_dir,  # Don't add 'processed' - PyG Dataset will add it
             universal_cache_path=getattr(config, 'universal_cache_path', None),
             max_samples=max_samples,
             molecule_max_atoms=getattr(config, 'molecule_max_atoms', None),
@@ -113,19 +114,25 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
 def create_data_loaders(dataset, config: PretrainingConfig):
     """Create train/val/test data loaders"""
     print("🔄 Creating data loaders...")
-    
+
     # Calculate splits
-    total = len(dataset)
-    train_size = int(0.8 * total)
-    val_size = int(0.1 * total)
-    
-    # Create splits
-    train_dataset = dataset[:train_size]
-    val_dataset = dataset[train_size:train_size + val_size]
-    test_dataset = dataset[train_size + val_size:]
-    
-    print(f"📊 Data splits: Train={len(train_dataset)}, Val={len(val_dataset)}, Test={len(test_dataset)}")
-    
+    total_samples = len(dataset)
+    train_size = int(0.8 * total_samples)
+    val_size = int(0.1 * total_samples)
+    test_size = total_samples - train_size - val_size
+
+    if train_size + val_size + test_size != total_samples:
+        train_size += total_samples - (train_size + val_size + test_size)
+
+    print(f"📊 Total samples: {total_samples}, Splitting into: Train={train_size}, Val={val_size}, Test={test_size}")
+
+    # Use random_split to avoid materializing slices into memory
+    train_dataset, val_dataset, test_dataset = random_split(
+        dataset,
+        [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(config.seed)
+    )
+
     # Create data loaders
     train_loader = GeometricDataLoader(
         train_dataset,
@@ -133,26 +140,26 @@ def create_data_loaders(dataset, config: PretrainingConfig):
         shuffle=True,
         num_workers=config.num_workers
     )
-    
+
     val_loader = GeometricDataLoader(
         val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers
     )
-    
+
     test_loader = GeometricDataLoader(
         test_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers
     )
-    
+
     print(f"📊 Data loaders created:")
     print(f"   Train batches: {len(train_loader)}")
     print(f"   Val batches: {len(val_loader)}")
     print(f"   Test batches: {len(test_loader)}")
-    
+
     return train_loader, val_loader, test_loader
 
 

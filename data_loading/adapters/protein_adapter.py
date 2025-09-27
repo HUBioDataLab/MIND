@@ -1,4 +1,5 @@
 # data_loading/adapters/protein_adapter.py
+# source /opt/anaconda3/bin/activate
 
 import sys
 import os
@@ -6,102 +7,117 @@ from pathlib import Path
 from typing import List, Any
 from tqdm import tqdm
 
-# Ana proje dizinini path'e ekleyerek diğer modüllere erişimi sağlıyoruz
+# Add project root to sys.path to allow imports like 'data_loading.adapters'
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from data_loading.adapters.base_adapter import BaseAdapter
 from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 
-# BioPython, PDB dosyalarını okumak için
+# BioPython for reading PDB and CIF files
 from Bio.PDB import PDBParser, MMCIFParser, is_aa
 
 class ProteinAdapter(BaseAdapter):
     """
-    Ham PDB/CIF dosyalarını okuyup UniversalMolecule formatına dönüştüren adaptör.
+    Adapter to parse raw PDB/CIF files into the UniversalMolecule format.
+    Can be configured to handle proteins only or protein-heteroatom complexes.
     """
 
-    def __init__(self):
+    def __init__(self, include_hetatms: bool = False): # include_hetatms=False -> only protein, include_hetatms=True -> protein + heteroatoms
         super().__init__("protein")
+        self.include_hetatms = include_hetatms
+        # Initialize parsers with QUIET=True to suppress standard warnings
         self.pdb_parser = PDBParser(QUIET=True)
         self.cif_parser = MMCIFParser(QUIET=True)
 
     def load_raw_data(self, data_path: str, max_samples: int = None) -> List[Path]:
         """
-        Verilen klasördeki tüm .pdb ve .cif dosyalarının yollarını bir liste olarak döndürür.
+        Scans a directory for all .pdb and .cif files and returns a list of their paths.
         """
-        print(f"Protein yapıları taranıyor: {data_path}")
+        print(f"Scanning protein structures: {data_path}")
         if not Path(data_path).is_dir():
-            raise FileNotFoundError(f"Belirtilen data_path bir klasör değil: {data_path}")
+            raise FileNotFoundError(f"Specified data_path is not a directory: {data_path}")
 
         files = sorted(list(Path(data_path).glob("*.pdb")))
         files.extend(sorted(list(Path(data_path).glob("*.cif"))))
 
         if not files:
-            raise FileNotFoundError(f"Klasörde .pdb veya .cif dosyası bulunamadı: {data_path}")
+            raise FileNotFoundError(f"No .pdb or .cif files found in directory: {data_path}")
 
-        print(f"Toplam {len(files):,} adet yapı dosyası bulundu.")
+        print(f"Found {len(files):,} structure files in total.")
         
         if max_samples:
-            print(f"İşlem {max_samples:,} örnek ile sınırlandırıldı.")
+            print(f"Processing limited to {max_samples:,} samples.")
             return files[:max_samples]
         
         return files
 
     def create_blocks(self, raw_item: Path) -> List[UniversalBlock]:
         """
-        Tek bir PDB/CIF dosyasını okur ve UniversalBlock listesine dönüştürür.
-        Bu implementasyonda her amino asit bir "blok" olarak kabul edilir.
+        Parses a single PDB/CIF file into a list of UniversalBlock objects.
+        By default, each amino acid residue is treated as one block. If `include_hetatms`
+        is True, non-standard residues are also treated as blocks.
         """
         try:
             suffix = raw_item.suffix.lower()
             if suffix == ".pdb":
                 structure = self.pdb_parser.get_structure(id=raw_item.stem, file=str(raw_item))
             elif suffix == ".cif":
-                structure = self.cif_parser.get_structure(id=raw_item.stem, file=str(raw_item))
+                structure = self.cif_parser.get_structure(structure_id=raw_item.stem, file=str(raw_item))
             else:
-                return [] # Desteklenmeyen format
+                return [] # Unsupported format
+        # More informative error logging.
         except Exception as e:
-            print(f"UYARI: Dosya okunamadı {raw_item.name}: {e}")
+            print(f"ERROR: File cannot be read {raw_item.name}: {type(e).__name__} - {e}")
             return []
 
         blocks = []
-        atom_count_in_mol = 0
-
+        
+        # Iterate through the hierarchy: model -> chain -> residue
         for model in structure:
             for chain in model:
                 for residue in chain:
-                    # Sadece standart 20 amino asidi ve bilinmeyenleri (UNK) alıyoruz
-                    if residue.get_id()[0] != ' ' and not is_aa(residue, standard=True):
+                    
+                    # --- Filtering Section ---
+                    # Check if the residue is a standard amino acid
+                    is_standard_aa = residue.get_id()[0] == ' ' or is_aa(residue, standard=True) # standard=True -> only standard amino acids
+                    
+                    # Conditionally skip heteroatoms based on the `include_hetatms` flag.
+                    if not self.include_hetatms and not is_standard_aa:
                         continue
-
+                    
+                    # --- Block Creation Section ---
                     block_atoms = []
                     res_name = residue.get_resname()
 
                     for atom in residue:
-                        # Hidrojenleri atla
+                        # Skip hydrogen atoms to reduce complexity
                         element = (atom.element or "C").strip().upper()
                         if element == 'H':
                             continue
                         
-                        # Alternatif konumları atla ('A' veya boş olanı tut)
+                        # Handle alternate locations, keeping only the primary or 'A' location
                         altloc = atom.get_altloc()
                         if altloc not in (" ", "A"):
                             continue
+                        
+                        # Determine entity_idx based on residue type.
+                        # 0 for protein, 1 for heteroatoms (ligands, ions, etc.).
+                        current_entity_idx = 0 if is_standard_aa else 1
 
                         uni_atom = UniversalAtom(
                             element=element,
                             position=tuple(atom.get_coord().tolist()),
-                            pos_code=atom.get_name(), # örn: 'CA', 'CB', 'N'
+                            pos_code=atom.get_name(), # e.g., 'CA', 'CB', 'N'
                             block_idx=len(blocks),
                             atom_idx_in_block=len(block_atoms),
-                            entity_idx=0 # Tek bir molekül olduğu için entity_idx = 0
+                            entity_idx=current_entity_idx # Dynamically set entity_idx
                         )
                         block_atoms.append(uni_atom)
-                        atom_count_in_mol += 1
                     
                     if block_atoms:
+                        # Create a UniversalBlock for the residue if it contains any atoms after filtering.
                         block = UniversalBlock(
-                            symbol=res_name, # örn: 'ALA', 'LYS'
+                            symbol=res_name, # e.g., 'ALA', 'LYS', or 'ZN', 'HEM' for heteroatoms
                             atoms=block_atoms
                         )
                         blocks.append(block)
@@ -110,11 +126,11 @@ class ProteinAdapter(BaseAdapter):
 
     def convert_to_universal(self, raw_item: Path) -> UniversalMolecule:
         """
-        Tek bir PDB/CIF dosya yolunu tam bir UniversalMolecule nesnesine dönüştürür.
+        Wraps the created blocks into a UniversalMolecule object with metadata.
         """
         blocks = self.create_blocks(raw_item)
         return UniversalMolecule(
-            id=raw_item.stem, # Dosya adını ID olarak kullan (örn: '1a2b')
+            id=raw_item.stem, # Use the file stem as the ID (e.g., '1a2b')
             dataset_type=self.dataset_type,
             blocks=blocks,
             properties={}

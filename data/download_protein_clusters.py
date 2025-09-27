@@ -60,7 +60,7 @@ def main():
         description="Foldseek'ten önceden hesaplanmış küme temsilcisi metadata'sını indirir."
     )
     # Proje ana dizininden çalıştırıldığını varsayarak varsayılan yolu belirliyoruz.
-    default_path = Path(__file__).resolve().parents[3] / "data" / "proteins" / "afdb_clusters"
+    default_path = Path(__file__).resolve().parents[2] / "data" / "proteins" / "afdb_clusters"
     parser.add_argument(
         "--outdir",
         type=Path,

@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from typing import List, Any, TYPE_CHECKING
 import os
 import pickle
+from tqdm import tqdm
 
 if TYPE_CHECKING:
     from data_types import UniversalMolecule
@@ -40,119 +41,59 @@ class BaseAdapter(ABC):
             blocks=blocks,
             properties=raw_item.get('scores', {}) if isinstance(raw_item, dict) else getattr(raw_item, 'properties', {})
         )
-    
-    def process_dataset(self, data_path: str, cache_path: str = None, **kwargs) -> List[Any]:
-        """Complete processing pipeline with universal representation caching"""
-        # 1. Check universal cache
-        if cache_path and os.path.exists(cache_path):
+
+    def _data_generator(self, raw_data_items: List[Any]):
+        """
+        A memory-efficient generator that processes raw data items one by one.
+        It yields processed UniversalMolecule objects without storing them all in a list.
+        """
+        # This loop processes one raw item at a time (e.g., one PDB file path)
+        for item in tqdm(raw_data_items, desc="Processing raw samples"):
             try:
-                with open(cache_path, 'rb') as f:
-                    cached_data = pickle.load(f)
-                print(f"✅ Loaded {len(cached_data)} universal samples from cache: {cache_path}")
-                return cached_data
+                # Convert the raw item to the universal format
+                universal_item = self.convert_to_universal(item)
+                # Ensure the processed item is valid (contains atoms) before yielding
+                if len(universal_item.blocks) > 0:
+                    yield universal_item
             except Exception as e:
-                print(f"⚠️ Error loading universal cache: {e}. Re-processing data.")
-
-        # 2. Load raw data
-        print(f"🔄 Processing {self.dataset_type} dataset...")
+                # Silently skip any file that fails to process and continue with the next one.
+                print(f"⚠️ Skipping item due to error: {e}")
+                pass
+    
+    def process_dataset(self, data_path: str, cache_path: str = None, **kwargs) -> int:
+        """
+        Complete and memory-efficient processing pipeline with universal representation caching.
+        This version processes data as a stream and writes to the cache file iteratively.
+        It returns the count of successfully processed items.
+        """
+        # 1. Load raw data references (e.g., file paths). This is memory-efficient.
+        print(f"🔄 Staging {self.dataset_type} dataset for processing...")
         raw_data_items = self.load_raw_data(data_path, **kwargs)
+        print(f"Found {len(raw_data_items)} raw data items.")
 
-        # 3. Convert to universal format
-        print(f"🔄 Converting {len(raw_data_items)} samples to universal format...")
+        # 2. Create a memory-efficient generator for processing.
+        # No large lists are created in memory here.
+        processed_item_generator = self._data_generator(raw_data_items)
         
-        # GPU-accelerated processing with torch.compile
-        import torch
-        
-        if torch.cuda.is_available() and len(raw_data_items) > 10:
-            print(f"🚀 Using GPU acceleration with torch.compile...")
-            print(f"   GPU: {torch.cuda.get_device_name(0)}")
-            print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-            universal_data = self._process_with_gpu_acceleration(raw_data_items)
-        else:
-            print("🔄 Using CPU sequential processing...")
-            universal_data = self._process_sequential(raw_data_items)
-        
-        skipped_count = len(raw_data_items) - len(universal_data)
-        
-        if skipped_count > 0:
-            print(f"⚠️ Skipped {skipped_count} samples due to processing errors")
-
-        # 4. Cache universal representations
+        # 3. Cache universal representations iteratively (memory-safe).
+        count = 0
         if cache_path:
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            print(f"💾 Caching processed samples to {cache_path}...")
+            
             with open(cache_path, 'wb') as f:
-                pickle.dump(universal_data, f)
-            print(f"💾 Cached {len(universal_data)} universal samples to {cache_path}")
+                # This loop pulls one processed item at a time from the generator
+                # and writes it directly to the file.
+                for universal_item in processed_item_generator:
+                    pickle.dump(universal_item, f)
+                    count += 1
+            
+            print(f"✅ Successfully cached {count} universal samples.")
+        else:
+            # If no cache path is provided, we can't save. We'll just count.
+            # This case is less common.
+            print("No cache path provided. Counting processed items without saving.")
+            for _ in processed_item_generator:
+                count += 1
 
-        return universal_data
-    
-    def _process_sequential(self, raw_data_items) -> List['UniversalMolecule']:
-        """Sequential processing with progress indicator"""
-        universal_data = []
-        from tqdm import tqdm
-        
-        total_samples = len(raw_data_items)
-        progress_bar = tqdm(total=total_samples, desc="Processing samples (CPU)", unit="samples")
-        
-        for i, item in enumerate(raw_data_items):
-            try:
-                universal_item = self.convert_to_universal(item)
-                # Skip items with empty blocks (e.g., invalid molecules)
-                if len(universal_item.blocks) == 0:
-                    continue
-                universal_data.append(universal_item)
-            except Exception as e:
-                # Don't print every error to avoid spam
-                pass
-            finally:
-                progress_bar.update(1)
-        
-        progress_bar.close()
-        return universal_data
-    
-    def _process_with_gpu_acceleration(self, raw_data_items) -> List['UniversalMolecule']:
-        """GPU-accelerated processing with batch processing (no DataLoader for PyG compatibility)"""
-        import torch
-        from tqdm import tqdm
-        
-        # Set device
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        universal_data = []
-        batch_size = 32  # Process in batches for better GPU utilization
-        
-        # Create progress bar for individual samples
-        total_samples = len(raw_data_items)
-        progress_bar = tqdm(total=total_samples, desc="Processing samples (GPU)", unit="samples")
-        
-        # Process in batches without DataLoader (PyG compatibility)
-        for i in range(0, len(raw_data_items), batch_size):
-            batch = raw_data_items[i:i + batch_size]
-            batch_results = []
-            
-            # Process each item in the batch
-            for item in batch:
-                try:
-                    universal_item = self.convert_to_universal(item)
-                    if len(universal_item.blocks) > 0:
-                        batch_results.append(universal_item)
-                except Exception as e:
-                    pass  # Skip failed samples
-                finally:
-                    progress_bar.update(1)  # Update progress for each sample
-            
-            universal_data.extend(batch_results)
-        
-        progress_bar.close()
-        return universal_data
-    
-    def _process_single_item(self, item) -> 'UniversalMolecule':
-        """Process a single item - designed for parallel processing"""
-        try:
-            universal_item = self.convert_to_universal(item)
-            # Skip items with empty blocks (e.g., invalid molecules)
-            if len(universal_item.blocks) == 0:
-                return None
-            return universal_item
-        except Exception as e:
-            return None
+        return count

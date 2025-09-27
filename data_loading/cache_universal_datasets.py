@@ -10,7 +10,10 @@ Usage:
     python data_loading/cache_universal_datasets.py --dataset qm9 --max_samples 1000
 
     # Process the custom PDB dataset from a specific folder of raw structures
-    *CUDA_VISIBLE_DEVICES=0* python data_loading/cache_universal_datasets.py --dataset pdb --data-path ../data/proteins/raw_structures_hq_40k
+    python data_loading/cache_universal_datasets.py \
+    --dataset pdb \
+    --data-path ../data/proteins/raw_structures_hq_40k \
+    --cache-dir data_loading/cache
 
     # Process the PDB dataset and save the output cache to a custom location
     python data_loading/cache_universal_datasets.py --dataset pdb \
@@ -84,7 +87,7 @@ def cache_dataset(dataset_name: str, data_path: Path, cache_dir: Path, max_sampl
     start_time = time.time()
     try:
         # The BaseAdapter's process_dataset method is called here
-        universal_data = adapter.process_dataset(
+        processed_count = adapter.process_dataset(
             data_path=str(data_path),
             cache_path=str(cache_path),
             max_samples=max_samples
@@ -93,7 +96,7 @@ def cache_dataset(dataset_name: str, data_path: Path, cache_dir: Path, max_sampl
         end_time = time.time()
         processing_time = end_time - start_time
         
-        print(f"✅ Successfully cached {len(universal_data)} universal samples.")
+        print(f"✅ Successfully cached {processed_count} universal samples.")
         print(f"⏱️  Processing time: {processing_time:.2f} seconds.")
         print(f"💾 Cache file: {cache_path}")
         
