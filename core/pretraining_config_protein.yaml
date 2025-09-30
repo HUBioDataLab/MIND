@@ -23,8 +23,8 @@ use_universal_cache: true
 # -------------------------
 # Eğitim Parametreleri
 # -------------------------
-max_epochs: 30
-batch_size: 32
+max_epochs: 10
+batch_size: 8
 lr: 0.0005
 early_stopping_patience: 15 # Early stopping patience (patience: 30, means 30 epochs without improvement, the model will stop training.)
 gradient_clip_val: 0.5 
@@ -75,18 +75,18 @@ pma_residual_dropout: 0.0
 # -------------------------
 # 3D Geometrik Parametreler
 # -------------------------
-molecule_max_atoms: 2000 # protein_max_residues yerine
+molecule_max_atoms: null #? Used in cache_to_pyg.py
 gaussian_kernels: 128
-cutoff_distance: 6.0 #! Max distance for protein is 6.0 angstrom can be changed.
+cutoff_distance: 5.0 #? Graph representation max distance is n angstrom. (used .pkl -> .pt)
 max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
-max_distance: 80.0 
-distance_bins: 80
+max_distance: 20.0  #? Used in training.
+distance_bins: 5
 
 # -------------------------
 # Ön-Eğitim Görevleri
 # -------------------------
 pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
-task_weights:
+task_weights: #? In training, these weights indicate the importance of the task.
   long_range_distance: 1.5
   short_range_distance: 1.0
   mlm: 0.3

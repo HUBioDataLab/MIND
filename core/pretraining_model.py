@@ -408,7 +408,7 @@ class PretrainingTasks(nn.Module):
         return nn.Sequential(
             nn.Linear(self.config.graph_dim * 2, self.config.graph_dim),
             nn.ReLU(),
-            nn.Linear(self.config.graph_dim, 1)  # Output proximity score
+            nn.Linear(self.config.graph_dim, self.config.distance_bins)  # Output proximity score
         )    
 
 
@@ -434,14 +434,73 @@ class PretrainingTasks(nn.Module):
 
     def long_range_distance_loss(self, node_embeddings, data):
         """
-        Long-range distance loss temporarily disabled.
+        Long-range distance prediction loss for global 3D structure learning.
         
-        TODO: Fix implementation for atom proximity relationships.
+        Predicts distances between all atom pairs (or sampled pairs for large molecular systems)
+        to learn overall molecular geometry. This is completely SE(3) invariant.
         """
-        # Return zero loss to avoid errors while keeping method structure
-        return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)   
-    
-    
+        if not hasattr(data, 'pos') or data.pos is None:
+            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+        
+        pos = data.pos
+        num_atoms = pos.size(0)
+        
+        # For efficiency and memory safety, limit pairs based on batch size
+        max_pairs = min(1000, num_atoms * (num_atoms - 1) // 2)
+        
+        if num_atoms <= 50:
+            # Small molecules: use all pairs
+            i_indices, j_indices = torch.triu_indices(
+                num_atoms, num_atoms, offset=1, device=node_embeddings.device
+            )
+        else:
+            # Large molecules: use simple random sampling to avoid memory issues
+            pairs = set()
+            
+            attempts = 0
+            while len(pairs) < max_pairs and attempts < max_pairs * 3:
+                i, j = torch.randint(0, num_atoms, (2,), device=pos.device).tolist()
+                if i != j:
+                    pair = (min(i, j), max(i, j))
+                    pairs.add(pair)
+                attempts += 1
+            
+            pairs = list(pairs)
+            
+            if pairs:
+                i_indices, j_indices = zip(*pairs)
+                i_indices = torch.tensor(i_indices, device=node_embeddings.device)
+                j_indices = torch.tensor(j_indices, device=node_embeddings.device)
+            else:
+                return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+        
+        if len(i_indices) == 0:
+            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+        
+        # Get node embeddings for pairs
+        emb_i = node_embeddings[i_indices]
+        emb_j = node_embeddings[j_indices]
+        pair_embeddings = torch.cat([emb_i, emb_j], dim=-1)
+        
+        # Predict distance bins using long-range distance head
+        distance_logits = self.long_range_distance_head(pair_embeddings)
+        
+        # True distances (SE(3) invariant ground truth)
+        pos_i = pos[i_indices]
+        pos_j = pos[j_indices]
+        true_distances = torch.norm(pos_i - pos_j, dim=1)
+        
+        # Convert distances to bins
+        # DÜZELTME: Sınır değer hatasını (t == n_classes) önlemek için distance_bins'ten çok küçük bir sayı çıkarıyoruz.
+        distance_bins = (true_distances / self.config.max_distance * (self.config.distance_bins - 1e-6)).long()
+        
+        # Clamp fonksiyonu hala bir güvenlik katmanı olarak kalmalıdır.
+        distance_bins = torch.clamp(distance_bins, 0, self.config.distance_bins - 1)
+        
+        # Use cross-entropy loss
+        loss = F.cross_entropy(distance_logits, distance_bins, reduction='mean')
+        
+        return loss
 
     
 
@@ -454,12 +513,18 @@ class PretrainingTasks(nn.Module):
         logits = self.distance_head(edge_emb)
         
         # Convert distances to bins
-        distance_bins = torch.clamp(
-            (distances / self.config.max_distance * self.config.distance_bins).long(),
-            0, self.config.distance_bins - 1
-        )
+        # DÜZELTME: Sınır değer hatasını (t == n_classes) önlemek için distance_bins'ten çok küçük bir sayı çıkarıyoruz.
+        distance_bins = (distances / self.config.max_distance * (self.config.distance_bins - 1e-6)).long()
         
-        loss = F.cross_entropy(logits[mask], distance_bins[mask], reduction='mean')
+        # Clamp fonksiyonu hala bir güvenlik katmanı olarak kalmalıdır.
+        distance_bins = torch.clamp(distance_bins, 0, self.config.distance_bins - 1)
+        
+        # NaN değerlerine karşı güvenlik kontrolü
+        valid_mask = torch.isfinite(distances) & mask
+        if valid_mask.sum() == 0:
+            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+
+        loss = F.cross_entropy(logits[valid_mask], distance_bins[valid_mask], reduction='mean')
         return loss
     
 
@@ -675,7 +740,7 @@ class PretrainingESAModel(pl.LightningModule):
                 pos = batch.pos
                 distances = torch.norm(pos[edge_index[1]] - pos[edge_index[0]], dim=1)
                 
-                mask = torch.rand(edge_index.size(1)) < 0.15
+                mask = (torch.rand(edge_index.size(1)) < 0.15).to(distances.device)
                 dist_loss = self.pretraining_tasks.short_range_distance_loss(
                     node_embeddings, edge_index, distances, mask
                 )
