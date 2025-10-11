@@ -4,6 +4,56 @@
 
 MIND is a universal foundation model for molecular representation learning, designed to handle diverse biological molecules like DNA, RNA, proteins, and small molecules within a single, unified framework. The model is built upon a Graph Transformer backbone and is trained using a self-supervised strategy to comprehend the universal principles of 3D molecular structure.
 
+## Project Structure and Key Files
+
+This project is organized into several key directories. Here's a summary of the most important files and their roles in the pipeline.
+
+```
+MIND/
+├── core/
+│   ├── pretraining_model.py
+│   ├── train_pretrain.py
+│   └── pretraining_config_protein.yaml
+├── data/
+│   ├── protein_pipeline/
+│   │   ├── 1_filter_and_create_manifest.py
+│   │   └── 2_download_pdbs_from_manifest.py
+│   └── download_protein_clusters.py
+└── data_loading/
+    ├── adapters/
+    │   ├── base_adapter.py
+    │   └── protein_adapter.py
+    ├── cache_universal_datasets.py
+    ├── cache_to_pyg.py
+    └── data_types.py
+```
+
+### `core/` - The Heart of the Model
+
+This directory contains the main logic for the model architecture and the training loop.
+
+-   **`pretraining_model.py`**: Defines the `PretrainingESAModel` architecture, including the `UniversalMolecularEncoder`, the `ESA` backbone, and all pre-training loss functions (`long_range_distance_loss`, `mlm_loss`, etc.).
+-   **`train_pretrain.py`**: The main script used to start a training run. It handles loading the configuration, creating the dataset and data loaders, initializing the model and trainer, and starting the `PyTorch Lightning` training loop.
+-   **`pretraining_config_protein.yaml`**: The YAML configuration file where all hyperparameters for a protein pre-training run are defined, such as learning rate, batch size, model dimensions, and pre-training tasks.
+
+### `data/` - Raw Data Acquisition
+
+This directory contains scripts for downloading and preparing the initial raw data.
+
+-   **`download_protein_clusters.py`**: Downloads the raw metadata file (`representatives_metadata.tsv.gz`) from the AlphaFold DB clusters. This is the very first step.
+-   **`protein_pipeline/1_filter_and_create_manifest.py`**: Reads the large metadata file and creates a smaller, filtered `manifest.csv` file based on user-defined criteria like pLDDT score and protein length.
+-   **`protein_pipeline/2_download_pdbs_from_manifest.py`**: Reads the `manifest.csv` file and downloads the corresponding protein structure files (`.pdb`/`.cif`).
+
+### `data_loading/` - Data Processing and Conversion
+
+This directory is the bridge between raw data and the format required by the model. It handles the memory-intensive data conversion pipeline.
+
+-   **`data_types.py`**: Defines the "Universal Representation" for all molecules (`UniversalMolecule`, `UniversalBlock`, `UniversalAtom`). This is the standardized format used in the intermediate steps.
+-   **`adapters/`**: Contains adapter classes (`ProteinAdapter`, etc.) that are responsible for converting different raw data formats (like `.pdb` files) into the Universal Representation.
+    -   **`base_adapter.py`**: The abstract base class for all adapters. It contains the main logic for processing a dataset and saving it to an iterable `.pkl` cache file.
+-   **`cache_universal_datasets.py`**: An orchestrator script that uses an adapter (e.g., `ProteinAdapter`) to convert a folder of raw files into a memory-efficient, iterable `.pkl` cache file.
+-   **`cache_to_pyg.py`**: The final and most critical processing script. It reads the `.pkl` cache file, converts the data into `PyTorch Geometric` graph objects, builds the graph structure (e.g., `radius_graph`), and saves the final, optimized dataset as a `.pt` file, ready for training. We have extensively modified this file to handle large datasets without running out of RAM.
+
 This guide explains how to set up the environment and run the complete data processing and pre-training pipeline for the protein dataset.
 
 ## Getting Started
