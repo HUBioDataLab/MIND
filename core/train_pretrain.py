@@ -228,19 +228,25 @@ def create_data_loaders(dataset, config: PretrainingConfig):
             num_workers=config.num_workers
         )
 
-    # Val and test loaders (no shuffling needed)
+    # Val and test loaders (no shuffling needed, but apply optimizations)
     val_loader = GeometricDataLoader(
         val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=config.num_workers
+        num_workers=config.num_workers,
+        pin_memory=True,
+        persistent_workers=True if config.num_workers > 0 else False,
+        prefetch_factor=2 if config.num_workers > 0 else None
     )
 
     test_loader = GeometricDataLoader(
         test_dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=config.num_workers
+        num_workers=config.num_workers,
+        pin_memory=True,
+        persistent_workers=True if config.num_workers > 0 else False,
+        prefetch_factor=2 if config.num_workers > 0 else None
     )
 
     print(f"📊 Data loaders created:")
