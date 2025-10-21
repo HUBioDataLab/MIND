@@ -22,7 +22,10 @@ import warnings
 
 # Add universal representation imports
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from data_loading.data_types import UniversalMolecule
+from data_loading.data_types import UniversalMolecule, UniversalAtom, UniversalBlock
+# Make data_types module available for pickle compatibility
+import data_loading.data_types
+sys.modules['data_types'] = data_loading.data_types
 
 from torch_cluster import radius_graph # preferred
 warnings.filterwarnings('ignore')

@@ -93,30 +93,43 @@ def cache_dataset(dataset_name: str, data_path: Path, cache_dir: Path, max_sampl
         print(f"💡 Please provide the correct path using the --data-path argument.")
         return False
     
-    # Handle chunking for manifest-based datasets
+    # Handle chunking for ALL datasets (not just manifest-based)
     chunk_manifest_file = None
-    if manifest_file and num_chunks and chunk_index is not None:
-        import pandas as pd
+    chunk_start_idx = None
+    chunk_end_idx = None
+    
+    if num_chunks and chunk_index is not None:
+        # For manifest-based datasets (PDB)
+        if manifest_file:
+            import pandas as pd
+            
+            print(f"📋 Loading manifest for chunking: {manifest_file}")
+            manifest_df = pd.read_csv(manifest_file)
+            total_samples = len(manifest_df)
+            
+            # Calculate chunk boundaries
+            chunk_size = (total_samples + num_chunks - 1) // num_chunks
+            start_idx = chunk_index * chunk_size
+            end_idx = min(start_idx + chunk_size, total_samples)
+            
+            # Extract this chunk's rows
+            chunk_df = manifest_df.iloc[start_idx:end_idx]
+            
+            # Save temporary chunk manifest
+            chunk_manifest_file = cache_dir / f"temp_manifest_chunk_{chunk_index}.csv"
+            chunk_manifest_file.parent.mkdir(parents=True, exist_ok=True)
+            chunk_df.to_csv(chunk_manifest_file, index=False)
+            
+            print(f"📋 Chunk manifest: {len(chunk_df):,} samples (rows {start_idx}-{end_idx})")
+            max_samples = len(chunk_df)
         
-        print(f"📋 Loading manifest for chunking: {manifest_file}")
-        manifest_df = pd.read_csv(manifest_file)
-        total_samples = len(manifest_df)
-        
-        # Calculate chunk boundaries
-        chunk_size = (total_samples + num_chunks - 1) // num_chunks  # Ceiling division
-        start_idx = chunk_index * chunk_size
-        end_idx = min(start_idx + chunk_size, total_samples)
-        
-        # Extract this chunk's rows
-        chunk_df = manifest_df.iloc[start_idx:end_idx]
-        
-        # Save temporary chunk manifest
-        chunk_manifest_file = cache_dir / f"temp_manifest_chunk_{chunk_index}.csv"
-        chunk_manifest_file.parent.mkdir(parents=True, exist_ok=True)
-        chunk_df.to_csv(chunk_manifest_file, index=False)
-        
-        print(f"📋 Chunk manifest: {len(chunk_df):,} samples (rows {start_idx}-{end_idx})")
-        max_samples = len(chunk_df)  # Override max_samples for this chunk
+        # For non-manifest datasets (QM9, LBA) - use index-based chunking
+        else:
+            # Determine total samples (will be set by adapter)
+            # Pass chunking info to adapter for index-based slicing
+            chunk_start_idx = chunk_index
+            chunk_end_idx = num_chunks
+            print(f"📦 Index-based chunking: Processing chunk {chunk_index + 1}/{num_chunks}")
     
     # Generate cache path with chunk info
     if num_chunks and chunk_index is not None:
@@ -144,7 +157,9 @@ def cache_dataset(dataset_name: str, data_path: Path, cache_dir: Path, max_sampl
             data_path=str(data_path),
             cache_path=str(cache_path),
             max_samples=max_samples,
-            manifest_file=str(chunk_manifest_file) if chunk_manifest_file else (str(manifest_file) if manifest_file else None)
+            manifest_file=str(chunk_manifest_file) if chunk_manifest_file else (str(manifest_file) if manifest_file else None),
+            num_chunks=num_chunks,
+            chunk_index=chunk_index
         )
         
         # Cleanup temporary chunk manifest

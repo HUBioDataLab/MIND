@@ -80,11 +80,14 @@ def process_chunk(chunk_idx, args):
         os.path.join(script_dir, "cache_universal_datasets.py"),
         "--dataset", args.dataset,
         "--data-path", str(args.data_path),
-        "--manifest-file", str(args.manifest_file),
         "--cache-dir", str(args.cache_dir),
         "--num-chunks", str(args.num_chunks),
         "--chunk-index", str(chunk_idx),
     ]
+    
+    # Only add manifest file for PDB dataset
+    if args.dataset == 'pdb' and args.manifest_file:
+        cache_cmd.extend(["--manifest-file", str(args.manifest_file)])
     
     if args.force:
         cache_cmd.append("--force")
@@ -205,8 +208,9 @@ def main():
     if args.data_path is None:
         print("❌ Error: --data-path is required")
         return 1
-    if args.manifest_file is None:
-        print("❌ Error: --manifest-file is required")
+    # Manifest file only required for PDB dataset
+    if args.dataset == 'pdb' and args.manifest_file is None:
+        print("❌ Error: --manifest-file is required for PDB dataset")
         return 1
     if args.output_base is None:
         print("❌ Error: --output-base is required (or 'dataset_download_dir' must be in config)")
@@ -217,7 +221,8 @@ def main():
         print(f"❌ Data path not found: {args.data_path}")
         return 1
     
-    if not args.manifest_file.exists():
+    # Validate manifest file exists (only for PDB)
+    if args.dataset == 'pdb' and args.manifest_file and not args.manifest_file.exists():
         print(f"❌ Manifest file not found: {args.manifest_file}")
         return 1
     
@@ -247,7 +252,10 @@ def main():
     print("="*80)
     print(f"Dataset:        {args.dataset}")
     print(f"Data path:      {args.data_path}")
-    print(f"Manifest:       {args.manifest_file}")
+    if args.manifest_file:
+        print(f"Manifest:       {args.manifest_file}")
+    else:
+        print(f"Manifest:       None (not required for {args.dataset})")
     print(f"Total chunks:   {args.num_chunks}")
     print(f"Processing:     {chunks_to_process}")
     print(f"Cache dir:      {args.cache_dir}")

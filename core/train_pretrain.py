@@ -27,10 +27,12 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from core.pretraining_model import PretrainingESAModel, PretrainingConfig, create_pretraining_config
+from core.batch_statistics_callback import BatchStatisticsCallback
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes
 from data_loading.chunk_sampler import ChunkAwareSampler
 from data_loading.rotational_cache_sampler import RotationalCacheSampler
+from torch_geometric.loader import DynamicBatchSampler  # For atom-based dynamic batching
 from torch_geometric.transforms import Compose
 from glob import glob
 
@@ -88,8 +90,8 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                 continue
             
             chunk_dir = dtype_config.get('chunk_dir', '')
-            if not chunk_dir or not os.path.exists(chunk_dir):
-                print(f"⚠️  {dtype.upper()}: chunk_dir not found: {chunk_dir}")
+            if not chunk_dir:
+                print(f"⚠️  {dtype.upper()}: chunk_dir not specified")
                 continue
             
             # Detect chunk directories for this dataset type
@@ -98,6 +100,21 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             base_name = dataset_dir_path.name
             
             chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
+            
+            # Filter by chunk_range if specified
+            chunk_range = dtype_config.get('chunk_range', None)
+            if chunk_range and len(chunk_range) == 2:
+                start_chunk, end_chunk = chunk_range
+                filtered_chunks = []
+                for chunk_dir in chunk_dirs:
+                    # Extract chunk number from name (e.g., processed_graphs_40k_chunk_3 -> 3)
+                    chunk_name = chunk_dir.name
+                    if '_chunk_' in chunk_name:
+                        chunk_num = int(chunk_name.split('_chunk_')[-1])
+                        if start_chunk <= chunk_num <= end_chunk:
+                            filtered_chunks.append(chunk_dir)
+                chunk_dirs = filtered_chunks
+                print(f"   Filtered to chunks {start_chunk}-{end_chunk}: {len(chunk_dirs)} chunks")
             
             if not chunk_dirs:
                 # Try loading from the directory itself (non-chunked)
@@ -286,7 +303,104 @@ def create_data_loaders(dataset, config: PretrainingConfig):
     multi_domain_config = getattr(config, 'multi_domain', None)
     is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
     
-    if is_lazy_dataset:
+    # Check if using atom-based dynamic batching (NEW OPTIONAL FEATURE)
+    use_dynamic_batching = getattr(config, 'use_dynamic_batching', False)
+    max_atoms_per_batch = getattr(config, 'max_atoms_per_batch', None)
+    
+    if use_dynamic_batching and max_atoms_per_batch:
+        # ⚡ DYNAMIC BATCHING MODE: Fixed atoms per batch (variable molecules)
+        # This is essential for mixed datasets with varying molecule sizes
+        print(f"⚡ Using DynamicBatchSampler with max {max_atoms_per_batch:,} atoms/batch")
+        print(f"   This ensures consistent GPU memory usage across varying molecule sizes")
+        
+        # Estimate number of steps for PyTorch Lightning compatibility
+        avg_atoms_per_molecule = 20  # Conservative estimate for mixed datasets
+        train_steps = max(1, len(train_dataset) * avg_atoms_per_molecule // max_atoms_per_batch)
+        val_steps = max(1, len(val_dataset) * avg_atoms_per_molecule // max_atoms_per_batch)
+        test_steps = max(1, len(test_dataset) * avg_atoms_per_molecule // max_atoms_per_batch)
+        
+        print(f"   Estimated steps per epoch: ~{train_steps}")
+        
+        # Create dynamic batch samplers
+        train_batch_sampler = DynamicBatchSampler(
+            train_dataset,
+            max_num=max_atoms_per_batch,
+            mode='node',
+            shuffle=True,
+            num_steps=train_steps
+        )
+        
+        # Note: We don't use DynamicBatchSampler for val/test
+        # because it causes KeyError with shuffle=False
+        # Instead, we use fixed batch size below
+        
+        # Create dataloaders
+        train_loader = GeometricDataLoader(
+            train_dataset,
+            batch_sampler=train_batch_sampler,
+            num_workers=config.num_workers,
+            pin_memory=True
+        )
+        
+        # For validation and test with LazyUniversalDataset, we MUST use ChunkAwareSampler
+        # Regular batch indexing doesn't work with chunked datasets
+        if is_lazy_dataset:
+            val_batch_size = config.batch_size if config.batch_size else 32
+            test_batch_size = config.batch_size if config.batch_size else 32
+            
+            val_sampler = ChunkAwareSampler(
+                val_dataset,
+                shuffle_chunks=False,
+                shuffle_within_chunk=False
+            )
+            
+            test_sampler = ChunkAwareSampler(
+                test_dataset,
+                shuffle_chunks=False,
+                shuffle_within_chunk=False
+            )
+            
+            val_loader = GeometricDataLoader(
+                val_dataset,
+                batch_size=val_batch_size,
+                sampler=val_sampler,
+                num_workers=config.num_workers,
+                pin_memory=True,
+                persistent_workers=True if config.num_workers > 0 else False,
+                prefetch_factor=2 if config.num_workers > 0 else None
+            )
+            
+            test_loader = GeometricDataLoader(
+                test_dataset,
+                batch_size=test_batch_size,
+                sampler=test_sampler,
+                num_workers=config.num_workers,
+                pin_memory=True,
+                persistent_workers=True if config.num_workers > 0 else False,
+                prefetch_factor=2 if config.num_workers > 0 else None
+            )
+        else:
+            # For non-lazy datasets, use regular batch indexing
+            val_batch_size = 32
+            test_batch_size = 32
+            
+            val_loader = GeometricDataLoader(
+                val_dataset,
+                batch_size=val_batch_size,
+                shuffle=False,
+                num_workers=config.num_workers,
+                pin_memory=True
+            )
+            
+            test_loader = GeometricDataLoader(
+                test_dataset,
+                batch_size=test_batch_size,
+                shuffle=False,
+                num_workers=config.num_workers,
+                pin_memory=True
+            )
+        
+    elif is_lazy_dataset:
         # SAMPLER SELECTION LOGIC
         # 1. Multi-domain + metadata available → RotationalCacheSampler
         # 2. Multi-domain + no metadata → ChunkAwareSampler (with warning)
@@ -408,11 +522,22 @@ def create_data_loaders(dataset, config: PretrainingConfig):
         )
 
     print(f"📊 Data loaders created:")
-    print(f"   Train batches: {len(train_loader)}")
-    print(f"   Val batches: {len(val_loader)}")
-    print(f"   Test batches: {len(test_loader)}")
     
-    if is_lazy_dataset:
+    # Try to get batch count (may not be available for DynamicBatchSampler)
+    try:
+        print(f"   Train batches: {len(train_loader)}")
+        print(f"   Val batches: {len(val_loader)}")
+        print(f"   Test batches: {len(test_loader)}")
+    except ValueError:
+        # DynamicBatchSampler doesn't have a defined length
+        print(f"   Train batches: Variable (dynamic batching)")
+        print(f"   Val batches: Variable (dynamic batching)")
+        print(f"   Test batches: Variable (dynamic batching)")
+    
+    if use_dynamic_batching and max_atoms_per_batch:
+        print(f"   ⚡ DynamicBatchSampler enabled: max {max_atoms_per_batch:,} atoms/batch")
+        print(f"   ⚡ Variable molecules/batch (depends on molecule size)")
+    elif is_lazy_dataset:
         print(f"   ⚡ ChunkAwareSampler enabled")
         print(f"   ⚡ Cache hit rate: ~99.97% (chunk-aware reading)")
         print(f"   ⚡ Expected iteration speed: 3.5-4.0 it/s")
@@ -425,8 +550,8 @@ def create_data_loaders(dataset, config: PretrainingConfig):
         print(f"          --manifest-file <manifest.csv> \\")
         print(f"          --num-chunks 10")
 
-    # Store sampler reference for epoch updates (if using chunked dataset)
-    if is_lazy_dataset:
+    # Store sampler reference for epoch updates (if using chunked dataset and sampler exists)
+    if is_lazy_dataset and not use_dynamic_batching:
         train_loader.sampler_obj = train_sampler  # For set_epoch() calls
 
     return train_loader, val_loader, test_loader
@@ -446,7 +571,6 @@ def train_universal_pretraining(
     print("=" * 60)
     print(f"Dataset: {dataset_name}")
     print(f"Batch size: {config.batch_size}")
-    print(f"Max epochs: {config.max_epochs}")
     print(f"Learning rate: {config.lr}")
     print(f"Tasks: {config.pretraining_tasks}")
     print("=" * 60)
@@ -479,6 +603,9 @@ def train_universal_pretraining(
                     print(f"🔄 ChunkAwareSampler: Epoch {epoch} started")
     
     # Create callbacks
+    # Check if batch statistics should be enabled (for multi-domain training)
+    enable_batch_stats = getattr(config, 'log_batch_statistics', False) or (hasattr(config, 'multi_domain') and config.multi_domain.get('enabled', False))
+    
     callbacks = [
         ModelCheckpoint(
             dirpath=output_dir,
@@ -496,6 +623,7 @@ def train_universal_pretraining(
         ),
         TQDMProgressBar(refresh_rate=10),  # Reduce log clutter
         ChunkSamplerEpochCallback(),  # Update chunk sampler each epoch
+        BatchStatisticsCallback(log_every_n_batches=20, enabled=enable_batch_stats),  # Track batch composition
     ]
     
     # Create wandb logger
@@ -506,8 +634,9 @@ def train_universal_pretraining(
     )
     
     # Create trainer with ESA optimizations
+    max_epochs = getattr(config, 'max_epochs', 100)  # Default to 100 if not specified
     trainer = pl.Trainer(
-        max_epochs=config.max_epochs,
+        max_epochs=max_epochs,
         callbacks=callbacks,
         logger=wandb_logger,
         gradient_clip_val=config.gradient_clip_val,
@@ -521,8 +650,12 @@ def train_universal_pretraining(
     
     print("🚀 Starting training...")
     print(f"📊 Training details:")
-    print(f"   • Total batches per epoch: {len(train_loader)}")
-    print(f"   • Validation batches: {len(val_loader)}")
+    try:
+        print(f"   • Total batches per epoch: {len(train_loader)}")
+        print(f"   • Validation batches: {len(val_loader)}")
+    except ValueError:
+        print(f"   • Total batches per epoch: Variable (dynamic batching)")
+        print(f"   • Validation batches: Variable (dynamic batching)")
     print(f"   • Log every step: Yes")
     print(f"   • Validation every: {trainer.val_check_interval} steps")
     

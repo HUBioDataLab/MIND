@@ -1,0 +1,147 @@
+# ============================================================================
+# QM9 PRETRAINING - FLASH VARLEN + DYNAMIC BATCHING ⚡⚡
+# ============================================================================
+# Mode: Flash Varlen (padding-free) + Atom-Based Dynamic Batching
+# Use case: Mixed datasets (proteins + small molecules + RNA)
+# Memory: Best efficiency, consistent GPU usage regardless of molecule size
+# Speed: Optimized for stability, not raw speed
+# ============================================================================
+# PERFECT FOR: Multi-dataset pretraining where molecules vary from
+#              10 atoms (small molecules) to 1000+ atoms (proteins)
+# ============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERIMENT TRACKING
+# ─────────────────────────────────────────────────────────────────────────────
+seed: 42
+wandb_project_name: esa-universal-pretraining
+wandb_run_name: universal-QM9-flash-varlen-dynamic-batching
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATASET
+# ─────────────────────────────────────────────────────────────────────────────
+dataset: QM9
+dataset_download_dir: ./data_loading
+max_samples: 130000
+use_universal_cache: true
+universal_cache_path: "./data_loading/cache/universal_qm9_130000.pkl"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BATCHING STRATEGY: DYNAMIC (ATOM-BASED) ⚡⚡ ESSENTIAL FOR MIXED DATASETS
+# ─────────────────────────────────────────────────────────────────────────────
+use_dynamic_batching: true               # true = fixed atoms/batch (variable molecules)
+max_atoms_per_batch: 100000                # Target atoms per batch (TUNE THIS FOR YOUR GPU!)
+batch_size: null                         # MUST be null when dynamic batching is true
+molecule_max_atoms: 100                  # Still used for internal padding limits
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ATTENTION BACKEND: FLASH VARLEN ⚡ (PADDING-FREE)
+# ─────────────────────────────────────────────────────────────────────────────
+xformers_or_torch_attn: flash_varlen     # Options: xformers | torch | flash_varlen
+use_bfloat16: true                       # REQUIRED for flash_varlen
+precision: bfloat16                      # REQUIRED for flash_varlen
+apply_attention_on: node                 # Options: node | edge
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODEL ARCHITECTURE
+# ─────────────────────────────────────────────────────────────────────────────
+graph_dim: 512
+edge_dim: 64
+hidden_dims: [512, 512, 512, 512, 512, 512, 512, 512]
+num_heads: [8, 8, 8, 8, 8, 8, 8, 8]
+layer_types: ["M", "S", "S", "M", "S", "M", "S", "P"]  # M=MAB, S=SAB, P=PMA
+norm_type: LN                            # Options: LN | BN
+pre_or_post: pre                         # Options: pre | post
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MLP CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
+use_mlps: true
+mlp_type: standard                       # Options: standard | gated_mlp
+mlp_hidden_size: 512
+mlp_inter_dim: 128
+num_mlp_layers: 3
+use_mlp_ln: false
+mlp_dropout: 0.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DROPOUT SETTINGS
+# ─────────────────────────────────────────────────────────────────────────────
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+attention_dropout: 0.1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EMBEDDINGS & FEATURES
+# ─────────────────────────────────────────────────────────────────────────────
+use_hierarchical_features: true
+block_embedding_dim: 32
+position_embedding_dim: 16
+entity_embedding_dim: 8
+max_block_types: 150
+max_position_types: 15
+max_entity_types: 6
+max_atomic_num: 118
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3D COORDINATE PROCESSING
+# ─────────────────────────────────────────────────────────────────────────────
+use_3d_coordinates: true
+gaussian_kernels: 128
+cutoff_distance: 5.0
+max_neighbors: 16
+max_distance: 10.0
+distance_bins: 16
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POSITIONAL ENCODINGS
+# ─────────────────────────────────────────────────────────────────────────────
+use_posenc: false
+rwse_dim: 24
+lap_dim: 4
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRETRAINING TASKS & LOSS WEIGHTS
+# ─────────────────────────────────────────────────────────────────────────────
+pretraining_tasks: ["short_range_distance", "mlm", "long_range_distance"]
+task_weights:
+  long_range_distance: 1.0               # Global 3D structure learning
+  short_range_distance: 1.0              # Local chemical bond learning
+  mlm: 0.5                               # Masked language modeling
+mlm_mask_ratio: 0.15
+temperature: 0.1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRAINING HYPERPARAMETERS
+# ─────────────────────────────────────────────────────────────────────────────
+max_epochs: 100
+lr: 0.0005
+optimiser_weight_decay: 0.0000000001
+gradient_clip_val: 0.5
+early_stopping_patience: 30
+monitor_loss_name: train_total_loss
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ESA INTERNAL SETTINGS (ADVANCED - DO NOT MODIFY UNLESS NEEDED)
+# ─────────────────────────────────────────────────────────────────────────────
+pma_num_outputs: 32
+max_node_items: 100
+max_edge_items: 1000
+output_dim: 1
+set_max_items: 0
+triu_attn_mask: false
+use_memory_efficient_attention: true
+preserve_universal_blocks: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PYTORCH LIGHTNING SETTINGS
+# ─────────────────────────────────────────────────────────────────────────────
+num_workers: 4
+fast_dev_run: false
+accelerator: auto
+devices: auto
+num_sanity_val_steps: 0
+out_path: ./outputs/universal_pretrain_flash_varlen_dynamic
