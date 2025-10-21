@@ -30,7 +30,9 @@ from core.pretraining_model import PretrainingESAModel, PretrainingConfig, creat
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes
 from data_loading.chunk_sampler import ChunkAwareSampler
+from data_loading.rotational_cache_sampler import RotationalCacheSampler
 from torch_geometric.transforms import Compose
+from glob import glob
 
 warnings.filterwarnings("ignore")
 
@@ -60,11 +62,101 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
     
     Automatically detects chunked datasets and uses LazyUniversalDataset
     for memory-efficient loading.
-    """
-    print(f"🔄 Loading universal representation dataset: {dataset_name}")
     
+    Supports multi-domain training when config.multi_domain.enabled = True
+    """
     # Create transform
     transforms = create_pretraining_data_transforms(config)
+    
+    # Check if multi-domain mode is enabled
+    multi_domain_config = getattr(config, 'multi_domain', None)
+    is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
+    
+    if is_multi_domain:
+        print("=" * 60)
+        print("🌐 MULTI-DOMAIN MODE ENABLED")
+        print("=" * 60)
+        
+        from data_loading.lazy_universal_dataset import LazyUniversalDataset
+        
+        # Collect chunks from all enabled dataset types
+        all_chunk_files = []
+        enabled_types = []
+        
+        for dtype, dtype_config in multi_domain_config['datasets'].items():
+            if not dtype_config.get('enabled', False):
+                continue
+            
+            chunk_dir = dtype_config.get('chunk_dir', '')
+            if not chunk_dir or not os.path.exists(chunk_dir):
+                print(f"⚠️  {dtype.upper()}: chunk_dir not found: {chunk_dir}")
+                continue
+            
+            # Detect chunk directories for this dataset type
+            dataset_dir_path = Path(chunk_dir)
+            parent_dir = dataset_dir_path.parent
+            base_name = dataset_dir_path.name
+            
+            chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
+            
+            if not chunk_dirs:
+                # Try loading from the directory itself (non-chunked)
+                processed_dir = dataset_dir_path / "processed"
+                if processed_dir.exists():
+                    pt_files = [f for f in processed_dir.glob("*.pt") 
+                               if 'pre_filter' not in f.name and 'pre_transform' not in f.name]
+                    if pt_files:
+                        all_chunk_files.append(str(pt_files[0]))
+                        print(f"   ✓ {dtype.upper()}: {pt_files[0].name} (single file)")
+                        enabled_types.append(dtype)
+                else:
+                    print(f"⚠️  {dtype.upper()}: No chunks or processed files found in {chunk_dir}")
+                continue
+            
+            # Collect .pt files from chunks
+            dtype_chunks = []
+            for chunk_dir in chunk_dirs:
+                processed_dir = chunk_dir / "processed"
+                if processed_dir.exists():
+                    pt_files = [f for f in processed_dir.glob("*.pt") 
+                               if 'pre_filter' not in f.name and 'pre_transform' not in f.name]
+                    if pt_files:
+                        dtype_chunks.append(str(pt_files[0]))
+            
+            if dtype_chunks:
+                all_chunk_files.extend(dtype_chunks)
+                enabled_types.append(dtype)
+                print(f"   ✓ {dtype.upper()}: {len(dtype_chunks)} chunks loaded")
+        
+        if not all_chunk_files:
+            raise FileNotFoundError("No chunk files found for any enabled dataset type!")
+        
+        if len(enabled_types) == 1:
+            print(f"\n⚠️  WARNING: Only one dataset type ({enabled_types[0]}) is available.")
+            print(f"   Multi-domain sampling will fall back to single-domain mode.")
+        
+        # Create LazyUniversalDataset with metadata loading
+        load_metadata = len(enabled_types) > 1  # Only load metadata if truly multi-domain
+        
+        full_dataset = LazyUniversalDataset(
+            chunk_pt_files=all_chunk_files,
+            transform=transforms,
+            max_cache_chunks=multi_domain_config.get('max_cache_chunks', 10),
+            verbose=True,
+            load_metadata=load_metadata
+        )
+        
+        print(f"\n✅ Multi-domain dataset loaded:")
+        print(f"   Total chunks: {len(all_chunk_files)}")
+        print(f"   Total samples: {len(full_dataset):,}")
+        print(f"   Dataset types: {', '.join(enabled_types)}")
+        print(f"   Metadata loaded: {full_dataset.metadata_loaded}")
+        print("=" * 60)
+        
+        return full_dataset
+    
+    # SINGLE-DOMAIN MODE (original behavior)
+    print(f"🔄 Loading universal representation dataset: {dataset_name}")
     
     # AUTO-DETECT CHUNKED DATASETS
     dataset_dir_path = Path(dataset_dir)
@@ -96,13 +188,13 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         if not chunk_pt_files:
             raise FileNotFoundError(f"No processed .pt files found in chunk directories")
         
-        # Create LazyUniversalDataset
-        # Cache all chunks to avoid disk I/O during shuffled training
+        # Create LazyUniversalDataset (no metadata for single-domain)
         full_dataset = LazyUniversalDataset(
             chunk_pt_files=chunk_pt_files,
             transform=transforms,
-            max_cache_chunks=3,  # Cache all chunks for maximum speed
-            verbose=True
+            max_cache_chunks=3,
+            verbose=True,
+            load_metadata=False  # No metadata needed for single-domain
         )
         
         print(f"📊 Caching strategy: {len(chunk_pt_files)} chunks will be loaded into RAM")
@@ -190,28 +282,67 @@ def create_data_loaders(dataset, config: PretrainingConfig):
     from data_loading.lazy_universal_dataset import LazyUniversalDataset
     is_lazy_dataset = isinstance(dataset, LazyUniversalDataset)
     
+    # Check multi-domain configuration
+    multi_domain_config = getattr(config, 'multi_domain', None)
+    is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
+    
     if is_lazy_dataset:
-        # Use ChunkAwareSampler for optimal performance with chunked datasets
-        # Benefits:
-        # 1. Sequential chunk reading → optimal disk I/O
-        # 2. Chunk-level + sample-level shuffling → full randomness
-        # 3. Predictable access pattern → prefetching works perfectly
-        print(f"🚀 Using ChunkAwareSampler for chunked dataset:")
-        print(f"   - Shuffle chunk order: Yes (epoch-level randomness)")
-        print(f"   - Shuffle within chunks: Yes (sample-level randomness)")
-        print(f"   - Sequential chunk reading: Yes (optimal disk I/O)")
-        print(f"   - DataLoader optimizations: pin_memory, persistent_workers, prefetch_factor")
+        # SAMPLER SELECTION LOGIC
+        # 1. Multi-domain + metadata available → RotationalCacheSampler
+        # 2. Multi-domain + no metadata → ChunkAwareSampler (with warning)
+        # 3. Single-domain → ChunkAwareSampler
         
-        train_sampler = ChunkAwareSampler(
-            train_dataset,  # Automatically handles Subset from random_split
-            shuffle_chunks=True,
-            shuffle_within_chunk=True
-        )
+        if is_multi_domain and dataset.metadata_loaded:
+            # ✅ OPTIMAL: Multi-domain with metadata
+            print(f"🌐 Using RotationalCacheSampler for multi-domain training:")
+            print(f"   - Atom-aware rotations: Yes")
+            print(f"   - Cross-modal batches: Yes (proteins + small molecules)")
+            print(f"   - Sequential chunk reading: Yes (optimal disk I/O)")
+            print(f"   - LRU cache compatible: Yes")
+            print(f"   - DataLoader optimizations: pin_memory, persistent_workers, prefetch_factor")
+            
+            train_sampler = RotationalCacheSampler(
+                train_dataset,
+                config=multi_domain_config,
+                shuffle=True
+            )
         
+        elif is_multi_domain and not dataset.metadata_loaded:
+            # ⚠️ FALLBACK: Multi-domain but no metadata
+            print(f"⚠️  WARNING: Multi-domain enabled but metadata not loaded!")
+            print(f"   Falling back to ChunkAwareSampler (no cross-modal batching)")
+            print(f"   💡 Run create_chunk_metadata.py to enable RotationalCacheSampler")
+            print(f"")
+            print(f"🚀 Using ChunkAwareSampler (fallback mode):")
+            print(f"   - Shuffle chunk order: Yes")
+            print(f"   - Shuffle within chunks: Yes")
+            print(f"   - Cross-modal batches: ❌ No (chunks segregated by type)")
+            
+            train_sampler = ChunkAwareSampler(
+                train_dataset,
+                shuffle_chunks=True,
+                shuffle_within_chunk=True
+            )
+        
+        else:
+            # ✅ STANDARD: Single-domain
+            print(f"🚀 Using ChunkAwareSampler for chunked dataset:")
+            print(f"   - Shuffle chunk order: Yes (epoch-level randomness)")
+            print(f"   - Shuffle within chunks: Yes (sample-level randomness)")
+            print(f"   - Sequential chunk reading: Yes (optimal disk I/O)")
+            print(f"   - DataLoader optimizations: pin_memory, persistent_workers, prefetch_factor")
+            
+            train_sampler = ChunkAwareSampler(
+                train_dataset,
+                shuffle_chunks=True,
+                shuffle_within_chunk=True
+            )
+        
+        # Create train loader with selected sampler
         train_loader = GeometricDataLoader(
             train_dataset,
             batch_size=config.batch_size,
-            sampler=train_sampler,  # Use custom sampler (no shuffle arg)
+            sampler=train_sampler,
             num_workers=config.num_workers,
             pin_memory=True,
             persistent_workers=True if config.num_workers > 0 else False,
@@ -219,8 +350,6 @@ def create_data_loaders(dataset, config: PretrainingConfig):
         )
     else:
         # Standard loader for non-chunked datasets
-        # NOTE: To use chunked datasets with QM9/LBA, run:
-        # python data_loading/process_chunked_dataset.py --dataset qm9 --num-chunks 10 ...
         train_loader = GeometricDataLoader(
             train_dataset,
             batch_size=config.batch_size,
@@ -347,7 +476,7 @@ def train_universal_pretraining(
                 epoch = trainer.current_epoch
                 trainer.train_dataloader.sampler_obj.set_epoch(epoch)
                 if epoch == 0:
-                    print(f"   🔄 ChunkAwareSampler: Epoch {epoch} started")
+                    print(f"🔄 ChunkAwareSampler: Epoch {epoch} started")
     
     # Create callbacks
     callbacks = [

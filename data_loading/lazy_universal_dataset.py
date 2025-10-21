@@ -22,12 +22,13 @@ Usage:
 """
 
 import torch
+import json
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from torch_geometric.data.separate import separate
 from collections import OrderedDict
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Dict, Any
 from tqdm import tqdm
 
 
@@ -52,7 +53,8 @@ class LazyUniversalDataset(Dataset):
         chunk_pt_files: List[str],
         transform: Optional[Callable] = None,
         max_cache_chunks: int = 3,
-        verbose: bool = True
+        verbose: bool = True,
+        load_metadata: bool = False
     ):
         """
         Initialize LazyUniversalDataset
@@ -62,6 +64,7 @@ class LazyUniversalDataset(Dataset):
             transform: Optional transform to apply to each sample
             max_cache_chunks: Maximum number of chunks to keep in RAM (default: 3)
             verbose: Print loading information
+            load_metadata: If True, load metadata for atom-aware sampling (default: False)
         """
         # Filter out PyG metadata files (pre_transform.pt, pre_filter.pt)
         self.chunk_pt_files = [
@@ -71,12 +74,22 @@ class LazyUniversalDataset(Dataset):
         self.transform = transform
         self.max_cache_chunks = max_cache_chunks
         self.verbose = verbose
+        self.load_metadata = load_metadata
         
         # LRU cache for loaded chunks
         self._cache = OrderedDict()
         
+        # Metadata storage
+        self.metadata_loaded = False
+        self.chunk_metadata = []  # List of metadata dicts (one per chunk)
+        self.sample_metadata_index = []  # Global index -> metadata mapping
+        
         # Build index map: which sample is in which file?
         self._build_index_map()
+        
+        # Load metadata if requested
+        if self.load_metadata:
+            self._load_metadata()
         
         if self.verbose:
             print(f"✅ LazyUniversalDataset initialized:")
@@ -84,6 +97,8 @@ class LazyUniversalDataset(Dataset):
             print(f"   Total samples: {self.total_samples:,}")
             print(f"   Cache size: {self.max_cache_chunks} chunks")
             print(f"   Estimated cache RAM: ~{self._estimate_cache_ram():.0f}MB")
+            if self.load_metadata:
+                print(f"   Metadata loaded: {'✅ Yes' if self.metadata_loaded else '⚠️ No (fallback mode)'}")
     
     def _build_index_map(self):
         """Build index map: (global_idx -> (file_idx, local_idx, pt_file))"""
@@ -230,6 +245,136 @@ class LazyUniversalDataset(Dataset):
     def clear_cache(self):
         """Clear the chunk cache to free memory"""
         self._cache.clear()
+    
+    def _load_metadata(self):
+        """
+        Load metadata from JSON files for all chunks.
+        
+        Metadata files are expected to be in the same directory as .pt files
+        with naming convention: <chunk_name>_metadata.json
+        
+        If metadata is missing for any chunk, gracefully falls back to no metadata mode.
+        """
+        if self.verbose:
+            print("🔄 Loading chunk metadata...")
+        
+        missing_metadata = []
+        
+        for chunk_idx, pt_file in enumerate(self.chunk_pt_files):
+            pt_path = Path(pt_file)
+            metadata_path = pt_path.parent / f"{pt_path.stem}_metadata.json"
+            
+            if not metadata_path.exists():
+                missing_metadata.append(pt_path.name)
+                continue
+            
+            try:
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                    self.chunk_metadata.append(metadata)
+            except Exception as e:
+                if self.verbose:
+                    print(f"⚠️  Failed to load metadata for {pt_path.name}: {e}")
+                missing_metadata.append(pt_path.name)
+        
+        # Check if all metadata loaded successfully
+        if len(self.chunk_metadata) == len(self.chunk_pt_files):
+            self.metadata_loaded = True
+            self._build_metadata_index()
+            
+            if self.verbose:
+                total_atoms = sum(m['total_atoms'] for m in self.chunk_metadata)
+                dataset_types = set(m['dataset_type'] for m in self.chunk_metadata)
+                print(f"✅ Metadata loaded for {len(self.chunk_metadata)} chunks")
+                print(f"   Total atoms: {total_atoms:,}")
+                print(f"   Dataset types: {', '.join(sorted(dataset_types))}")
+        else:
+            # Graceful fallback
+            self.metadata_loaded = False
+            self.chunk_metadata = []
+            self.sample_metadata_index = []
+            
+            if self.verbose:
+                print(f"⚠️  Metadata missing for {len(missing_metadata)} chunks:")
+                for name in missing_metadata[:5]:
+                    print(f"     - {name}")
+                if len(missing_metadata) > 5:
+                    print(f"     ... and {len(missing_metadata) - 5} more")
+                print(f"💡 Tip: Run create_chunk_metadata.py to generate metadata")
+                print(f"🔄 Falling back to standard mode (metadata-free)")
+    
+    def _build_metadata_index(self):
+        """
+        Build global sample index -> metadata mapping.
+        
+        This enables O(1) metadata lookup by global sample index.
+        """
+        self.sample_metadata_index = []
+        
+        for chunk_idx, metadata in enumerate(self.chunk_metadata):
+            for sample_meta in metadata['samples']:
+                self.sample_metadata_index.append({
+                    'chunk_idx': chunk_idx,
+                    'local_idx': sample_meta['idx'],
+                    'num_atoms': sample_meta['num_atoms'],
+                    'num_edges': sample_meta['num_edges'],
+                    'bucket': sample_meta['bucket'],
+                    'dataset_type': metadata['dataset_type']
+                })
+    
+    def get_sample_metadata(self, idx: int) -> Optional[Dict[str, Any]]:
+        """
+        Get metadata for a sample without loading the chunk.
+        
+        Args:
+            idx: Global sample index
+            
+        Returns:
+            Dictionary with metadata or None if metadata not loaded
+        """
+        if not self.metadata_loaded:
+            return None
+        
+        if idx < 0 or idx >= len(self.sample_metadata_index):
+            raise IndexError(f"Index {idx} out of range [0, {len(self.sample_metadata_index)})")
+        
+        return self.sample_metadata_index[idx]
+    
+    def get_chunk_metadata(self, chunk_idx: int) -> Optional[Dict[str, Any]]:
+        """
+        Get metadata for an entire chunk.
+        
+        Args:
+            chunk_idx: Chunk index (0 to num_chunks-1)
+            
+        Returns:
+            Dictionary with chunk metadata or None if metadata not loaded
+        """
+        if not self.metadata_loaded:
+            return None
+        
+        if chunk_idx < 0 or chunk_idx >= len(self.chunk_metadata):
+            raise IndexError(f"Chunk index {chunk_idx} out of range [0, {len(self.chunk_metadata)})")
+        
+        return self.chunk_metadata[chunk_idx]
+    
+    def get_chunks_by_type(self, dataset_type: str) -> List[int]:
+        """
+        Get all chunk indices for a specific dataset type.
+        
+        Args:
+            dataset_type: Dataset type (e.g., 'pdb', 'qm9', 'metabolite')
+            
+        Returns:
+            List of chunk indices
+        """
+        if not self.metadata_loaded:
+            return []
+        
+        return [
+            i for i, meta in enumerate(self.chunk_metadata)
+            if meta['dataset_type'] == dataset_type
+        ]
     
     def get_chunk_indices(self, chunk_idx: int) -> List[int]:
         """
