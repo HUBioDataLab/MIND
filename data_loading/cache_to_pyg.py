@@ -304,11 +304,47 @@ class OptimizedUniversalLBADataset(OptimizedUniversalDataset):
                         transform, pre_transform, pre_filter)
 
 
+class OptimizedUniversalCOCONUTDataset(OptimizedUniversalDataset):
+    """
+    COCONUT Dataset using cached PyTorch Geometric tensors
+    
+    This specialized dataset class for COCONUT provides instant loading by caching
+    converted PyTorch Geometric tensors, eliminating the conversion bottleneck.
+    """
+    
+    def __init__(self, 
+                 root: str = None,
+                 universal_cache_path: str = None,
+                 max_samples: Optional[int] = None,
+                 cutoff_distance: float = 5.0,
+                 max_neighbors: int = 32,
+                 transform=None,
+                 pre_transform=None,
+                 pre_filter=None):
+        
+        # Default root path
+        if root is None:
+            root = os.path.join(
+                os.path.dirname(__file__), 
+                'processed', 'coconut_optimized'
+            )
+        
+        # Default cache path for COCONUT
+        if universal_cache_path is None:
+            universal_cache_path = os.path.join(
+                os.path.dirname(__file__), 
+                'cache', 'universal_coconut_all.pkl'
+            )
+        
+        super().__init__(root, universal_cache_path, max_samples, cutoff_distance, max_neighbors, 
+                        transform, pre_transform, pre_filter)
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Create universal datasets")
-    parser.add_argument("--dataset", choices=["qm9", "lba"], required=True, help="Dataset type")
+    parser.add_argument("--dataset", choices=["qm9", "lba", "coconut"], required=True, help="Dataset type")
     parser.add_argument("--root", default=None, help="Root directory for dataset")
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum samples to process")
     parser.add_argument("--cutoff-distance", type=float, default=5.0, help="Distance cutoff for edges")
@@ -324,3 +360,7 @@ if __name__ == "__main__":
         root_dir = args.root or "./data/optimized_universal_lba"
         dataset = OptimizedUniversalLBADataset(root=root_dir, max_samples=args.max_samples)
         print(f"✅ Created LBA dataset: {len(dataset)} samples")
+    elif args.dataset == "coconut":
+        root_dir = args.root or "./data/optimized_universal_coconut"
+        dataset = OptimizedUniversalCOCONUTDataset(root=root_dir, max_samples=args.max_samples)
+        print(f"✅ Created COCONUT dataset: {len(dataset)} samples")

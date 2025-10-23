@@ -105,6 +105,22 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             max_neighbors=getattr(config, 'max_neighbors', 32),
             transform=transforms
         )
+        
+    elif dataset_name.upper() == 'COCONUT':
+        from data_loading.cache_to_pyg import OptimizedUniversalCOCONUTDataset
+        
+        # Get max_samples from config
+        max_samples = getattr(config, 'max_samples', 50000)  # Default to 50K for training
+        print(f"📊 Loading {max_samples} samples from universal cache...")
+        
+        full_dataset = OptimizedUniversalCOCONUTDataset(
+            root=os.path.join(dataset_dir, 'processed'),
+            universal_cache_path=getattr(config, 'universal_cache_path', None),
+            max_samples=max_samples,
+            cutoff_distance=getattr(config, 'cutoff_distance', 5.0),
+            max_neighbors=getattr(config, 'max_neighbors', 32),
+            transform=transforms
+        )
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
     
