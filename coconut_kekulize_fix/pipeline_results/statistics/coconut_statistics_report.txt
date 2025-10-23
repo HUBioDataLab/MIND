@@ -1,1 +1,0 @@
-Statistics generation failed: No molecular properties calculated
