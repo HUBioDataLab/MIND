@@ -3,7 +3,7 @@
 Universal Dataset Caching System
 
 Caches universal representations for any dataset using the adapter system.
-This script can cache QM9, LBA, COCONUT, PDB, or any future dataset adapters.
+This script can cache QM9, LBA, COCONUT, PDB, RNA or any future dataset adapters.
 
 Usage:
     # Process the first 1000 samples of the QM9 dataset using default paths
@@ -47,6 +47,9 @@ def get_adapter(dataset_name: str):
     elif dataset_name.lower() == 'coconut':
         from data_loading.adapters.coconut_adapter import COCONUTAdapter
         return COCONUTAdapter(), './data'
+    elif dataset_name.lower() == 'rna':
+        from data_loading.adapters.rna_adapter import RNAAdapter
+        return RNAAdapter(), './data/filtered_rna_cifs'
     elif dataset_name.lower() == 'pdb':
         from data_loading.adapters.protein_adapter import ProteinAdapter
         # This is just a default path if the user does not provide one.
@@ -74,7 +77,7 @@ def cache_dataset(dataset_name: str, data_path: Path, cache_dir: Path, max_sampl
     Cache universal representations for a dataset with optional chunking support.
     
     Args:
-        dataset_name: Dataset type (qm9, lba, pdb)
+        dataset_name: Dataset type (qm9, lba, pdb, rna)
         data_path: Path to raw data directory
         cache_dir: Directory to save cache files
         max_samples: Maximum samples to process (optional)
@@ -209,7 +212,7 @@ def main():
         '--dataset', 
         type=str, 
         required=True, 
-        choices=['qm9', 'lba', 'coconut', 'pdb', 'all'],
+        choices=['qm9', 'lba', 'coconut', 'pdb', 'rna', 'all'],
         help='Dataset to cache.'
     )
     
@@ -280,7 +283,7 @@ def main():
         return 1
     
     # The 'all' option includes coconut now.
-    datasets_to_process = ['qm9', 'lba', 'coconut', 'pdb'] if args.dataset == 'all' else [args.dataset]
+    datasets_to_process = ['qm9', 'lba', 'coconut', 'pdb', 'rna'] if args.dataset == 'all' else [args.dataset]
     
     success_all = True
     for ds_name in datasets_to_process:

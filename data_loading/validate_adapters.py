@@ -6,7 +6,7 @@ Comprehensive validation tool for testing data adapters and their universal repr
 Validates that adapters correctly convert raw data to universal format and ensures all components work together.
 
 Features:
-- Tests QM9, LBA, COCONUT, and other dataset adapters
+- Tests QM9, LBA, COCONUT, RNA and other dataset adapters
 - Validates universal data type compatibility
 - Checks entity indexing and block consistency
 - Provides detailed statistics and error reporting
@@ -16,6 +16,7 @@ Usage:
     python validate_adapters.py --adapter lba             # Test LBA adapter
     python validate_adapters.py --adapter qm9             # Test QM9 adapter
     python validate_adapters.py --adapter coconut         # Test COCONUT adapter
+    python validate_adapters.py --adapter rna             # Test RNA adapter
     python validate_adapters.py --adapter all             # Test all available adapters
     python validate_adapters.py --data_path ./custom/path # Custom data path
     python validate_adapters.py --max_samples 5           # Test more samples
@@ -26,7 +27,8 @@ import os
 import argparse
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from data_types import UniversalAtom, UniversalBlock, UniversalMolecule
+#from data_types import UniversalAtom, UniversalBlock, UniversalMolecule
+from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 
 def validate_universal_compatibility(adapter, data_path, adapter_name="Adapter", max_samples=1):
     """Validate that any adapter produces compatible universal representations"""
@@ -203,14 +205,14 @@ def validate_universal_compatibility(adapter, data_path, adapter_name="Adapter",
         # Test entity separation methods
         protein_atoms = universal_mol.get_atoms_by_entity(0)
         ligand_atoms = universal_mol.get_atoms_by_entity(1)
-        print(f"  Protein atoms: {len(protein_atoms)}")
-        print(f"  Ligand atoms: {len(ligand_atoms)}")
+        print(f"  Entity 0 atoms: {len(protein_atoms)}")
+        print(f"  Entity 1 atoms: {len(ligand_atoms)}")
         
         # Test block separation by entity
         protein_blocks = universal_mol.get_blocks_by_entity(0)
         ligand_blocks = universal_mol.get_blocks_by_entity(1)
-        print(f"  Protein blocks: {len(protein_blocks)}")
-        print(f"  Ligand blocks: {len(ligand_blocks)}")
+        print(f"  Entity 0 blocks: {len(protein_blocks)}")
+        print(f"  Entity 1 blocks: {len(ligand_blocks)}")
         
         # Validate entity indexing (flexible for different datasets)
         if len(all_atoms) == 0:
@@ -303,6 +305,9 @@ def get_adapter(adapter_name):
     elif adapter_name.lower() == 'pdb':
         # TODO: Add PDB adapter when available
         raise NotImplementedError("PDB adapter not yet implemented")
+    elif adapter_name.lower() == 'rna':  
+        from adapters.rna_adapter import RNAAdapter  
+        return RNAAdapter() 
     else:
         raise ValueError(f"Unknown adapter: {adapter_name}")
 
@@ -316,6 +321,8 @@ def get_default_data_path(adapter_name):
         return "./data"
     elif adapter_name.lower() == 'pdb':
         return "./data/pdb"
+    elif adapter_name.lower() == 'rna':  
+        return "./data/filtered_rna_cifs"
     else:
         raise ValueError(f"No default path for adapter: {adapter_name}")
 
@@ -355,7 +362,7 @@ def main():
     """Main validation function"""
     parser = argparse.ArgumentParser(description='Validate data adapters and universal representation compatibility')
     parser.add_argument('--adapter', type=str, default='lba',
-                       choices=['lba', 'qm9', 'coconut', 'pdb', 'all'],
+                       choices=['lba', 'qm9', 'coconut', 'pdb', 'rna', 'all'],
                        help='Adapter to test (default: lba)')
     parser.add_argument('--data_path', type=str, default=None,
                        help='Path to dataset data (uses default if not provided)')
@@ -368,7 +375,7 @@ def main():
     
     if args.adapter == 'all':
         # Test all available adapters
-        adapters = ['lba', 'qm9', 'coconut']  # Add more as they become available
+        adapters = ['lba', 'qm9', 'coconut', 'rna']  # Add more as they become available
         all_passed = True
         
         for adapter_name in adapters:

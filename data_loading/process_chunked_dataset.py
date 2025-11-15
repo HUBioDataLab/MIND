@@ -129,7 +129,7 @@ def main():
                         help="Path to YAML config file (parameters can be overridden by CLI args)")
     
     # Dataset parameters
-    parser.add_argument("--dataset", type=str, default=None, choices=["qm9", "lba", "pdb"],
+    parser.add_argument("--dataset", type=str, default=None, choices=["qm9", "lba", "pdb", "rna"],
                         help="Dataset type")
     parser.add_argument("--data-path", type=Path, default=None,
                         help="Path to raw data directory")
