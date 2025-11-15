@@ -1,40 +1,39 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""
+Download protein structure files (PDB/CIF) from URLs in a manifest CSV.
 
-# source /opt/anaconda3/bin/activate
-""" 
-python data/protein_pipeline/2_download_pdbs_from_manifest.py \
-    --manifest-file ../data/proteins/afdb_clusters/manifest_hq_40k.csv \
-    --structures-outdir ../data/proteins/raw_structures_hq_40k \
-    --workers 16
+Usage:
+    python data/protein_pipeline/2_download_pdbs_from_manifest.py \
+        --manifest-file ../data/proteins/afdb_clusters/manifest_hq_40k.csv \
+        --structures-outdir ../data/proteins/raw_structures_hq_40k \
+        --workers 16
 """
 
 import argparse
-from pathlib import Path
+import json
 import time
-from typing import Tuple, Optional
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-
-# ---------------------------- #
-# İndirme yardımcıları 
-# ---------------------------- #
+from tqdm import tqdm
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/118.0 Safari/537.36"
 }
 
-def is_html_error(payload: str) -> bool:
-    """İndirilen metin HTML hata sayfası gibi mi? Çok kaba bir kontrol."""
-    lower = payload.strip().lower()
+
+def is_html_error(content: str) -> bool:
+    """Check if content is an HTML error page."""
+    lower = content.strip().lower()
     return lower.startswith("<!doctype html") or lower.startswith("<html")
 
+
 def download_text(url: str, timeout: int = 60, max_retries: int = 3) -> Optional[str]:
-    """Basit GET indirme (metin). Hata durumunda birkaç kez tekrar dener."""
+    """Download text from URL with retry logic."""
     for attempt in range(1, max_retries + 1):
         try:
             r = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
@@ -42,124 +41,124 @@ def download_text(url: str, timeout: int = 60, max_retries: int = 3) -> Optional
                 text = r.text
                 if text and not is_html_error(text):
                     return text
-            # 200 değilse veya hata varsa kısa bekleyip tekrar dene
         except requests.exceptions.RequestException:
-            pass # Hata durumunda döngü devam edecek ve tekrar deneyecek
-        time.sleep(1.25 * attempt)
+            pass
+        if attempt < max_retries:
+            time.sleep(1.25 * attempt)
     return None
 
-def save_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding='utf-8')
 
-def download_one_structure(uniprot_id: str,
-                           pdb_url: str,
-                           cif_url: str,
-                           out_dir: Path) -> Tuple[str, str]:
-    """Tek bir protein için PDB indir; olmazsa CIF indir."""
+def download_one_structure(
+    uniprot_id: str,
+    pdb_url: str,
+    cif_url: str,
+    out_dir: Path
+) -> Tuple[str, str]:
+    """Download one protein structure (PDB first, then CIF fallback)."""
     pdb_path = out_dir / f"{uniprot_id}.pdb"
     cif_path = out_dir / f"{uniprot_id}.cif"
-
-    # Dosya zaten varsa indirmeyi atla
+    
     if pdb_path.exists() or cif_path.exists():
         return uniprot_id, "SKIPPED_EXIST"
-
-    # Önce PDB
+    
+    # Try PDB first
     text = download_text(pdb_url)
     if text:
-        save_text(pdb_path, text)
+        pdb_path.parent.mkdir(parents=True, exist_ok=True)
+        pdb_path.write_text(text, encoding='utf-8')
         return uniprot_id, "PDB_OK"
-
-    # Fallback: CIF
+    
+    # Fallback to CIF
     text = download_text(cif_url)
     if text:
-        save_text(cif_path, text)
+        cif_path.parent.mkdir(parents=True, exist_ok=True)
+        cif_path.write_text(text, encoding='utf-8')
         return uniprot_id, "CIF_OK"
-
+    
     return uniprot_id, "FAILED"
 
-def parallel_download_from_manifest(manifest_csv: Path,
-                                    out_dir: Path,
-                                    max_workers: int = 8) -> dict:
-    """Manifest CSV'den paralel indirme yap."""
+
+def parallel_download_from_manifest(
+    manifest_csv: Path,
+    out_dir: Path,
+    max_workers: int = 8
+) -> Dict[str, int]:
+    """Download structures from manifest CSV in parallel."""
     try:
         df = pd.read_csv(manifest_csv)
     except Exception as e:
-        print(f"HATA: Manifest dosyası okunamadı: {manifest_csv}\n{e}")
+        print(f"ERROR: Failed to read manifest file: {manifest_csv}\n{e}")
         return {}
-
+    
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"{len(df):,} adet yapı indirilecek. Paralel çalışan sayısı: {max_workers}")
-
+    print(f"Downloading {len(df):,} structures using {max_workers} workers...")
+    
     stats = {"PDB_OK": 0, "CIF_OK": 0, "FAILED": 0, "SKIPPED_EXIST": 0, "TOTAL": len(df)}
     
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            ex.submit(download_one_structure, row.repId, row.pdb_url, row.cif_url, out_dir): row.repId
+            executor.submit(download_one_structure, row.repId, row.pdb_url, row.cif_url, out_dir): row.repId
             for row in df.itertuples(index=False)
         }
         
-        # İlerleme çubuğu için tqdm kullanımı
-        from tqdm import tqdm
-        pbar = tqdm(as_completed(futures), total=len(futures), desc="Proteinler indiriliyor")
-        for fut in pbar:
-            uid, status = fut.result()
+        pbar = tqdm(as_completed(futures), total=len(futures), desc="Downloading structures")
+        for future in pbar:
+            uid, status = future.result()
             stats[status] = stats.get(status, 0) + 1
-            # İlerleme çubuğunda anlık durumu göster
             pbar.set_postfix(
                 PDB=stats['PDB_OK'],
                 CIF=stats['CIF_OK'],
                 FAIL=stats['FAILED'],
                 SKIP=stats['SKIPPED_EXIST']
             )
-            
+    
     return stats
 
-# ---------------------------- #
-# Argparse & main
-# ---------------------------- #
 
 def main():
-    """Ana fonksiyon."""
+    """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Manifest dosyasından PDB/CIF yapılarını paralel olarak indirir."
+        description="Download PDB/CIF structures from manifest CSV in parallel."
     )
     parser.add_argument(
         "--manifest-file",
         type=Path,
         required=True,
-        help="İndirilecek proteinleri listeleyen manifest CSV dosyasının yolu."
+        help="Path to manifest CSV file"
     )
     parser.add_argument(
         "--structures-outdir",
         type=Path,
         required=True,
-        help="İndirilen PDB/CIF dosyalarının kaydedileceği klasör."
+        help="Directory to save downloaded files"
     )
     parser.add_argument(
         "--workers",
         type=int,
         default=8,
-        help="Paralel indirme için kullanılacak iş parçacığı sayısı."
+        help="Number of parallel workers (default: 8)"
     )
     args = parser.parse_args()
-
-    print("--- Paralel İndirme Script'i Başlatıldı ---")
+    
+    print("=" * 60)
+    print("Starting parallel download...")
     start_time = time.time()
     
     stats = parallel_download_from_manifest(
         manifest_csv=args.manifest_file,
         out_dir=args.structures_outdir,
-        max_workers=args.workers,
+        max_workers=args.workers
     )
     
-    end_time = time.time()
-    print("\n--- İndirme İşlemi Tamamlandı ---")
-    print(f"Toplam Süre: {end_time - start_time:.2f} saniye")
-    print("Sonuç Özeti:")
-    import json
+    elapsed_time = time.time() - start_time
+    print("\n" + "=" * 60)
+    print("Download completed")
+    print("=" * 60)
+    print(f"Time: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
+    print("Results:")
     print(json.dumps(stats, indent=2))
-    print(f"Yapılar şu klasöre kaydedildi: {args.structures_outdir}")
+    print(f"\nFiles saved to: {args.structures_outdir}")
+
 
 if __name__ == "__main__":
     main()
