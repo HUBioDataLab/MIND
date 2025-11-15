@@ -19,13 +19,14 @@ MIND/
 │   │   ├── 1_filter_and_create_manifest.py
 │   │   └── 2_download_pdbs_from_manifest.py
 │   └── download_protein_clusters.py
-└── data_loading/
-    ├── adapters/
-    │   ├── base_adapter.py
-    │   └── protein_adapter.py
-    ├── cache_universal_datasets.py
-    ├── cache_to_pyg.py
-    └── data_types.py
+├── data_loading/
+│   ├── adapters/
+│   │   ├── base_adapter.py
+│   │   └── protein_adapter.py
+│   ├── cache_universal_datasets.py
+│   ├── cache_to_pyg.py
+│   └── data_types.py
+└── CODE_DOCUMENTATION.md
 ```
 
 ### `core/` - The Heart of the Model
@@ -41,7 +42,7 @@ This directory contains the main logic for the model architecture and the traini
 This directory contains scripts for downloading and preparing the initial raw data.
 
 -   **`download_protein_clusters.py`**: Downloads the raw metadata file (`representatives_metadata.tsv.gz`) from the AlphaFold DB clusters. This is the very first step.
--   **`protein_pipeline/1_filter_and_create_manifest.py`**: Reads the large metadata file and creates a smaller, filtered `manifest.csv` file based on user-defined criteria like pLDDT score and protein length.
+-   **`protein_pipeline/1_filter_and_create_manifest.py`**: Reads the large metadata file and creates a smaller, filtered `manifest.csv` file based on user-defined criteria like pLDDT score and protein length. Uses the AlphaFold DB API to fetch current download URLs with parallel processing for efficiency.
 -   **`protein_pipeline/2_download_pdbs_from_manifest.py`**: Reads the `manifest.csv` file and downloads the corresponding protein structure files (`.pdb`/`.cif`).
 
 ### `data_loading/` - Data Processing and Conversion
@@ -98,7 +99,7 @@ This will download `representatives_metadata.tsv.gz` into the `data/proteins/afd
 
 ### Step 2: Create a Filtered Manifest
 
-Next, we create a "manifest" file. This is a CSV file that lists the specific proteins we want to use for training, based on quality (pLDDT score) and size (amino acid length).
+Next, we create a "manifest" file. This is a CSV file that lists the specific proteins we want to use for training, based on quality (pLDDT score) and size (amino acid length). The script uses the AlphaFold DB API to fetch current download URLs, ensuring compatibility with the latest database structure.
 
 ```bash
 # This example creates a manifest for 40,000 proteins with a pLDDT score > 70 and fewer than 512 amino acids.
