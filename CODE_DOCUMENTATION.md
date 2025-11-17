@@ -1,7 +1,31 @@
-# Code Documentation: Protein Pipeline
+# Code Documentation: MIND Data Processing Pipeline
 
 ## Overview
-This document provides brief descriptions of each code file in the protein data processing pipeline.
+This document provides brief descriptions of each code file in the data processing pipeline, organized by pipeline stage.
+
+---
+
+## Protein Pipeline
+
+This section covers scripts for downloading and preparing raw protein structure data.
+
+## `data/download_protein_clusters.py`
+
+### Purpose
+Downloads AlphaFold Database cluster representative metadata file from Foldseek. This is the first step in the protein data pipeline.
+
+### Key Functionality
+- Downloads compressed TSV metadata file (`representatives_metadata.tsv.gz`) from AlphaFold DB
+
+### Usage Example
+```bash
+python data/download_protein_clusters.py --outdir ../data/proteins/afdb_clusters
+```
+
+### Notes
+- Default output directory: `data/proteins/afdb_clusters/`
+- Downloads metadata file needed for filtering and manifest creation
+- Used by: `data/protein_pipeline/1_filter_and_create_manifest.py`
 
 ---
 
@@ -128,6 +152,123 @@ python data/protein_pipeline/2_download_pdbs_from_manifest.py \
 
 ---
 
+## Data Loading Pipeline
+
+This section covers scripts for processing raw data into formats suitable for training.
+
+---
+
+## `data_loading/process_chunked_dataset.py`
+
+### Purpose
+Orchestrates the chunked dataset processing pipeline for large-scale datasets. Splits datasets into manageable chunks and processes each chunk through two stages: universal cache creation and PyTorch Geometric conversion.
+
+### Key Functionality
+- Splits manifest file into configurable number of chunks
+- For each chunk, orchestrates two-stage processing:
+  1. Creates universal `.pkl` cache files (via `cache_universal_datasets.py`)
+  2. Converts `.pkl` to PyTorch Geometric `.pt` format (via `cache_to_pyg.py`)
+- Supports processing specific chunk ranges (e.g., `--chunk-range 0-3`)
+- Handles errors gracefully with user prompts for continuation
+- Automatically detects and processes chunks for training via `LazyUniversalDataset`
+
+### Key Functions
+- `load_config()`: Loads configuration from YAML file
+- `parse_chunk_range()`: Parses chunk range strings into list of indices
+- `apply_config_defaults()`: Applies configuration defaults to arguments
+- `validate_arguments()`: Validates all required arguments and paths
+- `process_chunk()`: Processes a single chunk (pkl creation → pt conversion)
+- `run_command()`: Executes subprocess commands with error handling
+- `print_summary()`: Displays final pipeline summary with statistics
+
+### Input/Output
+
+**Input:**
+- Raw data directory (PDB/CIF files)
+- Manifest CSV file (created by `1_filter_and_create_manifest.py`)
+- Optional: YAML config file for default parameters
+
+**Output:**
+- Universal `.pkl` cache files in cache directory
+- PyTorch Geometric `.pt` files in chunked output directories:
+  - `{output_base}_chunk_0/processed/*.pt`
+  - `{output_base}_chunk_1/processed/*.pt`
+  - etc.
+
+### Usage Example
+
+```bash
+# With config file (recommended)
+python data_loading/process_chunked_dataset.py \
+    --config-yaml-path core/pretraining_config_protein.yaml \
+    --data-path ../data/proteins/raw_structures_hq_40k \
+    --manifest-file ../data/proteins/afdb_clusters/manifest_hq_40k.csv \
+    --num-chunks 50
+
+# Process specific chunks only
+python data_loading/process_chunked_dataset.py \
+    --dataset pdb \
+    --data-path ../data/proteins/raw_structures_hq_40k \
+    --manifest-file ../data/proteins/afdb_clusters/manifest_hq_40k.csv \
+    --num-chunks 50 \
+    --chunk-range 0-2 \
+    --cache-dir ../data/proteins/cache_chunked \
+    --output-base ../data/proteins/processed_graphs_40k \
+    --cutoff 5.0 \
+    --max-neighbors 64
+```
+
+### Notes
+- Called by: Users preparing datasets for training
+- Calls: `cache_universal_datasets.py` and `cache_to_pyg.py` as subprocesses
+- Used by: `core/train_pretrain.py` (automatically detects chunked datasets via `LazyUniversalDataset`)
+- Supports all dataset types: QM9, LBA, PDB (protein)
+- Chunked processing enables handling datasets that don't fit in RAM
+- Output directories follow pattern: `{output_base}_chunk_{index}/`
+
+---
+
+## `data_loading/cache_universal_datasets.py`
+
+### Purpose
+Creates universal `.pkl` cache files from raw dataset files using the adapter system. Supports all dataset types (QM9, LBA, COCONUT, PDB, RNA) and handles chunking for large-scale datasets.
+
+### Key Functionality
+- Converts raw data files to universal representation format using dataset-specific adapters
+- Supports chunking via manifest file splitting for parallel processing
+- Memory-efficient processing using generator pattern (handles 500GB+ datasets)
+- Creates `.pkl` cache files that can be converted to PyTorch Geometric format
+
+### Key Functions
+- `get_adapter()`: Returns adapter instance and default data path for dataset type
+- `cache_dataset()`: Main function that orchestrates caching with optional chunking
+- `_create_chunk_manifest()`: Creates temporary manifest file for a specific chunk
+- `_generate_cache_filename()`: Generates cache filename based on parameters
+- `list_cached_datasets()`: Lists all cached datasets in a directory
+
+### Input/Output
+
+**Input:**
+- Raw data directory (PDB/CIF files, QM9 data, etc.)
+- Optional: Manifest CSV file (for chunking protein datasets)
+- Optional: Chunking parameters (`--num-chunks`, `--chunk-index`)
+
+**Output:**
+- Universal `.pkl` cache files:
+  - `universal_{dataset}_{max_samples}.pkl` (with max_samples)
+  - `universal_{dataset}_chunk_{index}.pkl` (with chunking)
+  - `universal_{dataset}_all.pkl` (all samples)
+
+### Notes
+- **RAM Efficiency**: Uses generator pattern via `BaseAdapter._data_generator()` to process one molecule at a time. Each molecule is immediately written to disk via `pickle.dump()`, preventing memory accumulation. Can handle 500GB+ datasets safely.
+- **Chunking**: For large datasets, split manifest file into chunks. Each chunk creates a temporary manifest file (disk-based, not memory), then processes only that chunk's molecules.
+- **Called by**: `process_chunked_dataset.py` (orchestrates chunked processing)
+- **Calls**: Dataset-specific adapters (`protein_adapter.py`, `qm9_adapter.py`, etc.)
+- **Used by**: `cache_to_pyg.py` (reads `.pkl` files to convert to PyG format)
+- Supports all dataset types: QM9, LBA, COCONUT, PDB, RNA
+
+---
+
 ## Pipeline Flow
 
 ```
@@ -143,31 +284,14 @@ python data/protein_pipeline/2_download_pdbs_from_manifest.py \
    └─> data/protein_pipeline/2_download_pdbs_from_manifest.py
        └─> raw_structures_hq_40k/ (PDB/CIF files)
 
-4. Process to universal format
+4. Process to universal format (chunked)
    └─> data_loading/process_chunked_dataset.py
-       └─> processed_graphs_40k_chunk_*/ (PyTorch Geometric format)
+       ├─> Calls cache_universal_datasets.py
+       │   └─> universal_{dataset}_chunk_{index}.pkl (universal cache)
+       └─> Calls cache_to_pyg.py
+           └─> processed_graphs_40k_chunk_*/processed/*.pt (PyTorch Geometric)
 
 5. Train model
    └─> core/train_pretrain.py
+       └─> Uses LazyUniversalDataset (loads chunks on-demand)
 ```
-
----
-
-## Recent Improvements
-
-### API Integration
-- Both scripts now use the AlphaFold DB API to ensure URL compatibility
-- `1_filter_and_create_manifest.py` fetches URLs directly from the API
-- Parallel processing significantly speeds up URL fetching (100 workers)
-
-### Code Quality
-- Clean, maintainable code with English documentation
-- Proper error handling and retry logic
-- Type hints throughout
-- Progress tracking for long-running operations
-
-### Performance
-- Parallel API calls for URL fetching (configurable workers)
-- Parallel downloads with configurable worker count
-- Efficient file existence checking to avoid re-downloads
-
