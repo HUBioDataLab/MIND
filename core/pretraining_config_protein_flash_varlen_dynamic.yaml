@@ -1,0 +1,125 @@
+# ===================================================================
+# MIND Project - Protein Pretraining with Flash Varlen + Dynamic Batching
+# ===================================================================
+# Mode: Flash Varlen (padding-free) + Atom-Based Dynamic Batching
+# Use case: Protein dataset with varying sizes, optimized memory usage
+# Memory: Best efficiency, consistent GPU usage regardless of protein size
+# ===================================================================
+
+# -------------------------
+# Genel ve Çıktı Ayarları
+# -------------------------
+seed: 42
+out_path: "outputs/protein_flash_varlen_dynamic" # Eğitilmiş modellerin en iyi versiyonlarının kaydedileceği yol
+wandb_project_name: "MIND-Project-Pretraining"
+wandb_run_name: "protein-flash-varlen-dynamic-batching"
+
+# -------------------------
+# Veri Seti Ayarları
+# -------------------------
+dataset: PDB
+universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
+dataset_download_dir: "/home/yusuf/data/proteins/processed_graphs_40k" # Chunked dataset path
+num_workers: 0  # Set to 0 for DynamicBatchSampler with LazyUniversalDataset to avoid hanging
+max_samples: 40000 # Test seti için 40k ile sınırla
+use_universal_cache: true
+
+# -------------------------
+# Eğitim Parametreleri
+# -------------------------
+max_epochs: 30
+batch_size: 32  # Used for validation/test (training uses dynamic batching)
+use_dynamic_batching: true  # ⚡ Essential for proteins - enables atom-aware batching
+max_atoms_per_batch: 60000  # Target atoms per batch (reduced to avoid hanging with lazy datasets)
+log_batch_statistics: true  # Print batch composition statistics during training
+batch_stats_log_frequency: 10  # Log batch stats every N batches (default: 20)
+lr: 0.0005
+early_stopping_patience: 15 # Early stopping patience (patience: 30, means 30 epochs without improvement, the model will stop training.)
+gradient_clip_val: 0.5 
+optimiser_weight_decay: 1.0e-10
+monitor_loss_name: "train_total_loss" # The loss to monitor for early stopping or something else.
+use_bfloat16: true  # REQUIRED for flash_varlen
+accelerator: gpu
+devices: 1  # Use single GPU (will be GPU 6 via CUDA_VISIBLE_DEVICES)
+precision: bfloat16  # REQUIRED for flash_varlen 
+num_sanity_val_steps: 0
+fast_dev_run: false
+
+# -------------------------
+# Model Mimarisi (ESA)
+# -------------------------
+apply_attention_on: node
+graph_dim: 256
+edge_dim: 64
+hidden_dims: [256, 256, 256, 256, 256, 256, 256, 256]
+num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
+layer_types: ["M", "S", "M", "S", "M", "S", "P", "P"]
+xformers_or_torch_attn: flash_varlen  # ⚡ Padding-free attention for efficiency
+norm_type: LN
+use_3d_coordinates: true
+set_max_items: 0 # 0, dinamik olarak ayarlanmasını sağlar
+triu_attn_mask: false
+
+# -------------------------
+# MLP Ayarları
+# -------------------------
+use_mlps: true
+mlp_hidden_size: 512
+num_mlp_layers: 3
+mlp_type: standard
+mlp_dropout: 0.0
+use_mlp_ln: false
+pre_or_post: pre
+
+# -------------------------
+# Dropout Ayarları
+# -------------------------
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+
+# -------------------------
+# 3D Geometrik Parametreler
+# -------------------------
+molecule_max_atoms: null #? Used in cache_to_pyg.py
+gaussian_kernels: 128
+cutoff_distance: 5.0 #? Graph representation max distance is n angstrom. (used .pkl -> .pt)
+max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
+max_distance: 20.0  #? Used in training.
+distance_bins: 5
+
+# -------------------------
+# Ön-Eğitim Görevleri
+# -------------------------
+pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
+task_weights: #? In training, these weights indicate the importance of the task.
+  long_range_distance: 1.5
+  short_range_distance: 1.0
+  mlm: 0.3
+mlm_mask_ratio: 0.15
+temperature: 0.2
+
+# -------------------------
+# Yeni Kod Yapısı İçin Gerekli Diğer Parametreler
+# -------------------------
+max_block_types: 150
+max_position_types: 15
+max_entity_types: 6
+block_embedding_dim: 32
+position_embedding_dim: 16
+entity_embedding_dim: 8
+use_hierarchical_features: false # Bizim adaptörümüz bunu üretmediği için false
+max_atomic_num: 118
+rwse_dim: 24
+lap_dim: 4
+mlp_inter_dim: 128
+pma_num_outputs: 32
+max_node_items: 2000
+max_edge_items: 4000
+output_dim: 1
+posenc: null
+use_memory_efficient_attention: true
+attention_dropout: 0.1
+preserve_universal_blocks: true
