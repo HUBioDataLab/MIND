@@ -15,6 +15,7 @@ from torch_geometric.utils import unbatch_edge_index
 
 from esa.utils.norm_layers import BN, LN
 from esa.mha import SAB, PMA
+from esa.mha_flash_varlen import SABFlashVarlen, PMAFlashVarlen
 from esa.mlp_utils import SmallMLP, GatedMLPMulti
 
 
@@ -250,8 +251,12 @@ class SABComplete(nn.Module):
         if dim_in != dim_out:
             self.proj_1 = nn.Linear(dim_in, dim_out)
     
-
-        self.sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
+        # Choose attention implementation based on xformers_or_torch_attn setting
+        # If flash_varlen is specified, use padding-free attention
+        if xformers_or_torch_attn == "flash_varlen":
+            self.sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
+        else:
+            self.sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
 
         if self.idx != 2:
             bn_dim = self.set_max_items
@@ -312,10 +317,30 @@ class SABComplete(nn.Module):
         if self.pre_or_post == "pre":
             X = self.norm(X)
 
-        if self.idx == 1:
-            out_attn = self.sab(X, adj_mask)
+        # Extract sequence lengths for flash_varlen (optional feature)
+        if isinstance(self.sab, SABFlashVarlen):
+            # For flash_varlen: compute actual sequence lengths from batch_mapping
+            # batch_mapping: [total_nodes] where each value is the batch index
+            # We need to count how many nodes each batch has
+            batch_size = X.size(0)
+            # Count nodes per batch using bincount
+            counts = torch.bincount(batch_mapping, minlength=batch_size)
+            seq_lens = counts.to(torch.int32)
+            
+            # Note: adj_mask is not fully supported in flash_varlen mode yet
+            # So we pass None to avoid issues
+            if self.idx == 1:
+                # For MAB (idx=1), we might want adj_mask, but flash_varlen doesn't support it yet
+                # TODO: Implement adj_mask support in flash_varlen or fall back to padded mode
+                out_attn = self.sab(X, seq_lens=seq_lens, adj_mask=None)
+            else:
+                out_attn = self.sab(X, seq_lens=seq_lens, adj_mask=None)
         else:
-            out_attn = self.sab(X, None)
+            # Standard attention (xformers or torch)
+            if self.idx == 1:
+                out_attn = self.sab(X, adj_mask)
+            else:
+                out_attn = self.sab(X, None)
 
         if out_attn.shape[-1] != X.shape[-1]:
             X = self.proj_1(X)
@@ -383,7 +408,11 @@ class PMAComplete(nn.Module):
             self.residual_attn = as_module(num_layers_for_residual)
             self.residual_mlp = as_module(num_layers_for_residual)
 
-        self.pma = PMA(dim_hidden, num_heads, num_outputs, dropout, xformers_or_torch_attn)
+        # Choose PMA implementation based on xformers_or_torch_attn setting
+        if xformers_or_torch_attn == "flash_varlen":
+            self.pma = PMAFlashVarlen(dim_hidden, num_heads, num_outputs, dropout)
+        else:
+            self.pma = PMA(dim_hidden, num_heads, num_outputs, dropout, xformers_or_torch_attn)
 
         if norm_type == "LN":
             self.norm = LN(dim_hidden)
@@ -425,7 +454,15 @@ class PMAComplete(nn.Module):
         if self.pre_or_post == "pre":
             X = self.norm(X)
 
-        out_attn = self.pma(X)
+        # Handle flash_varlen with sequence lengths
+        if isinstance(self.pma, PMAFlashVarlen):
+            batch_size = X.size(0)
+            # ⚠️ CRITICAL: Compute actual sequence lengths from batch_mapping
+            counts = torch.bincount(batch_mapping, minlength=batch_size)
+            seq_lens = counts.to(torch.int32)
+            out_attn = self.pma(X, seq_lens=seq_lens)
+        else:
+            out_attn = self.pma(X)
 
         if self.pre_or_post == "pre" and out_attn.shape[-2] == X.shape[-2]:
             out = X + out_attn
