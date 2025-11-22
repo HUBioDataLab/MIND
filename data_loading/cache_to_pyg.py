@@ -14,7 +14,7 @@ import sys
 import torch
 import pickle
 import shutil
-from typing import List, Optional, Iterator
+from typing import List, Optional, Iterator, Callable
 from itertools import islice
 from torch_geometric.data import Data, InMemoryDataset
 from tqdm import tqdm
@@ -24,12 +24,30 @@ import warnings
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from data_loading.data_types import UniversalMolecule
 
-from torch_cluster import radius_graph # preferred
+from torch_cluster import radius_graph
 warnings.filterwarnings('ignore')
 
-# ADDED: Helper generator function to read a stream of pickled objects
+# Periodic table: element symbol -> atomic number
+ELEMENT_TO_ATOMIC_NUMBER = {
+    'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8,
+    'F': 9, 'Ne': 10, 'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15,
+    'S': 16, 'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20, 'Sc': 21, 'Ti': 22,
+    'V': 23, 'Cr': 24, 'Mn': 25, 'Fe': 26, 'Co': 27, 'Ni': 28, 'Cu': 29,
+    'Zn': 30, 'Ga': 31, 'Ge': 32, 'As': 33, 'Se': 34, 'Br': 35, 'Kr': 36,
+    'Rb': 37, 'Sr': 38, 'Y': 39, 'Zr': 40, 'Nb': 41, 'Mo': 42, 'Tc': 43,
+    'Ru': 44, 'Rh': 45, 'Pd': 46, 'Ag': 47, 'Cd': 48, 'In': 49, 'Sn': 50,
+    'Sb': 51, 'Te': 52, 'I': 53, 'Xe': 54, 'Cs': 55, 'Ba': 56, 'La': 57,
+    'Ce': 58, 'Pr': 59, 'Nd': 60, 'Pm': 61, 'Sm': 62, 'Eu': 63, 'Gd': 64,
+    'Tb': 65, 'Dy': 66, 'Ho': 67, 'Er': 68, 'Tm': 69, 'Yb': 70, 'Lu': 71,
+    'Hf': 72, 'Ta': 73, 'W': 74, 'Re': 75, 'Os': 76, 'Ir': 77, 'Pt': 78,
+    'Au': 79, 'Hg': 80, 'Tl': 81, 'Pb': 82, 'Bi': 83, 'Po': 84, 'At': 85,
+    'Rn': 86
+}
+DEFAULT_ATOMIC_NUMBER = 6  # Carbon
+
+
 def load_molecules_iteratively(file_path: str) -> Iterator[UniversalMolecule]:
-    """A generator to load molecules one by one from a pickle stream."""
+    """Generator to load molecules one by one from a pickle stream."""
     with open(file_path, 'rb') as f:
         while True:
             try:
@@ -43,17 +61,18 @@ class OptimizedUniversalDataset(InMemoryDataset):
     It processes data in chunks to handle large datasets that don't fit in RAM.
     """
 
-    def __init__(self,
-                 root: str,
-                 universal_cache_path: str,
-                 max_samples: Optional[int] = None,
-                 molecule_max_atoms: Optional[int] = None,
-                 cutoff_distance: float = 5.0,
-                 max_neighbors: int = 32,
-                 transform=None,
-                 pre_transform=None,
-                 pre_filter=None
-                ):
+    def __init__(
+        self,
+        root: str,
+        universal_cache_path: str,
+        max_samples: Optional[int] = None,
+        molecule_max_atoms: Optional[int] = None,
+        cutoff_distance: float = 5.0,
+        max_neighbors: int = 32,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None
+    ):
         """
         Initialize Optimized Universal Dataset
 
@@ -74,14 +93,8 @@ class OptimizedUniversalDataset(InMemoryDataset):
         self.cutoff_distance = cutoff_distance
         self.max_neighbors = max_neighbors
 
-        # Ensure root directory exists
         os.makedirs(root, exist_ok=True)
-
-        # The parent constructor handles loading if the processed file exists,
-        # or triggers self.process() if it doesn't.
         super().__init__(root, transform, pre_transform, pre_filter)
-
-        # Load the processed data
         self.data, self.slices = torch.load(self.processed_paths[0], map_location='cpu')
 
     @property
@@ -99,14 +112,14 @@ class OptimizedUniversalDataset(InMemoryDataset):
         config_sig = f"cutoff_{self.cutoff_distance}_neighbors_{self.max_neighbors}"
         return [f"optimized_{cache_name}_{config_sig}.pt"]
 
-    def download(self):
+    def download(self) -> None:
         """Copies the universal .pkl cache to the raw_dir for PyG to find."""
         raw_path = os.path.join(self.raw_dir, self.raw_file_names[0])
         if not os.path.exists(raw_path):
             print(f"📋 Copying universal cache to raw directory...")
             shutil.copy2(self.universal_cache_path, raw_path)
 
-    def process(self):
+    def process(self) -> None:
         """
         Process molecules from .pkl cache and convert to PyG format.
         
@@ -131,20 +144,30 @@ class OptimizedUniversalDataset(InMemoryDataset):
             molecule_iterator = islice(molecule_iterator, self.max_samples)
 
         # 3. Convert all molecules to PyG Data objects
-        data_list = []
+        data_list: List[Data] = []
+        skipped_count = 0
         for mol in tqdm(molecule_iterator, desc="Converting molecules"):
-            pyg_data = self._create_pyg_data_object(mol)
-            if pyg_data is not None:
-                data_list.append(pyg_data)
+            try:
+                pyg_data = self._create_pyg_data_object(mol)
+                if pyg_data is not None:
+                    data_list.append(pyg_data)
+                else:
+                    skipped_count += 1
+            except Exception as e:
+                warnings.warn(f"Skipping molecule {mol.id}: {e}", UserWarning)
+                skipped_count += 1
 
         if not data_list:
-            raise RuntimeError("No molecules were processed successfully. Check data and filters.")
+            raise RuntimeError(
+                f"No molecules were processed successfully. Skipped {skipped_count} molecules."
+            )
 
         # Memory usage info
         ram_mb = len(data_list) * 20 / 1024
         print(f"✅ Converted {len(data_list):,} molecules to PyG format")
+        if skipped_count > 0:
+            print(f"⚠️  Skipped {skipped_count} molecules")
         print(f"💾 Estimated RAM usage: ~{ram_mb:.0f}MB")
-        
         if ram_mb > 2000:
             print(f"⚠️  Large dataset! Consider using smaller chunks for 1M+ proteins.")
 
@@ -160,21 +183,26 @@ class OptimizedUniversalDataset(InMemoryDataset):
             return None
 
         pyg_data = self._universal_to_pyg(mol)
-
-        if pyg_data is None: return None
-        if self.pre_filter is not None and not self.pre_filter(pyg_data): return None
-        if self.pre_transform is not None: pyg_data = self.pre_transform(pyg_data)
-
+        if pyg_data is None:
+            return None
+        if self.pre_filter is not None and not self.pre_filter(pyg_data):
+            return None
+        if self.pre_transform is not None:
+            pyg_data = self.pre_transform(pyg_data)
         return pyg_data
 
     def _universal_to_pyg(self, mol: UniversalMolecule) -> Optional[Data]:
+        """Convert a UniversalMolecule to PyTorch Geometric Data object."""
         try:
             atoms = mol.get_all_atoms()
-            if not atoms: return None
+            if not atoms:
+                return None
 
             positions = torch.tensor([atom.position for atom in atoms], dtype=torch.float32)
-            atomic_numbers = torch.tensor([self._element_to_atomic_number(atom.element) for atom in atoms], dtype=torch.long)
-
+            atomic_numbers = torch.tensor(
+                [self._element_to_atomic_number(atom.element) for atom in atoms],
+                dtype=torch.long
+            )
             block_indices = torch.tensor([atom.block_idx for atom in atoms], dtype=torch.long)
             entity_indices = torch.tensor([atom.entity_idx for atom in atoms], dtype=torch.long)
             pos_codes = [atom.pos_code for atom in atoms]
@@ -206,21 +234,17 @@ class OptimizedUniversalDataset(InMemoryDataset):
                 num_edges=edge_index.size(1),
             )
             return data
-        except Exception:
+        except (ValueError, IndexError, TypeError) as e:
+            warnings.warn(f"Error converting molecule {mol.id}: {e}", UserWarning)
+            return None
+        except Exception as e:
+            warnings.warn(f"Unexpected error converting molecule {mol.id}: {e}", UserWarning)
             return None
 
-    """
-    Suggestion: For performance and to remove the RDKit dependency from this script,
-    a simple dictionary lookup can be used instead.
-    This is a non-critical optimization for later.
-    """
     def _element_to_atomic_number(self, element: str) -> int:
-        """Convert element symbol to atomic number."""
-        try:
-            from rdkit import Chem
-            return Chem.GetPeriodicTable().GetAtomicNumber(element.capitalize())
-        except Exception:
-            return 6 # Default to Carbon if unknown
+        """Convert element symbol to atomic number using dictionary lookup."""
+        element_normalized = element.capitalize() if len(element) <= 2 else element
+        return ELEMENT_TO_ATOMIC_NUMBER.get(element_normalized, DEFAULT_ATOMIC_NUMBER)
 
     def _calculate_edge_features(self, positions: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """Calculate edge features (distances) between connected atoms"""
@@ -231,137 +255,99 @@ class OptimizedUniversalDataset(InMemoryDataset):
 
 
 class OptimizedUniversalQM9Dataset(OptimizedUniversalDataset):
-    """
-    QM9 Dataset using cached PyTorch Geometric tensors
+    """QM9 Dataset using cached PyTorch Geometric tensors."""
 
-    This specialized dataset class for QM9 provides instant loading by caching
-    converted PyTorch Geometric tensors, eliminating the conversion bottleneck.
-    """
-
-    def __init__(self,
-                 root: str = None,
-                 universal_cache_path: str = None,
-                 max_samples: Optional[int] = None,
-                 molecule_max_atoms: Optional[int] = None,
-                 cutoff_distance: float = 5.0,
-                 max_neighbors: int = 32,
-                 transform=None,
-                 pre_transform=None,
-                 pre_filter=None):
-
-        # Default root path
+    def __init__(
+        self,
+        root: Optional[str] = None,
+        universal_cache_path: Optional[str] = None,
+        max_samples: Optional[int] = None,
+        molecule_max_atoms: Optional[int] = None,
+        cutoff_distance: float = 5.0,
+        max_neighbors: int = 32,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None
+    ):
         if root is None:
             root = os.path.join(os.path.dirname(__file__), 'processed', 'qm9_optimized')
 
         # Default cache path for QM9
         if universal_cache_path is None:
             universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_qm9_all.pkl')
-
         super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
                         transform, pre_transform, pre_filter)
 
 
 class OptimizedUniversalLBADataset(OptimizedUniversalDataset):
-    """
-    LBA Dataset using cached PyTorch Geometric tensors
+    """LBA Dataset using cached PyTorch Geometric tensors."""
 
-    This specialized dataset class for LBA provides instant loading by caching
-    converted PyTorch Geometric tensors, eliminating the conversion bottleneck.
-    """
-
-    def __init__(self,
-                 root: str = None,
-                 universal_cache_path: str = None,
-                 max_samples: Optional[int] = None,
-                 molecule_max_atoms: Optional[int] = None,
-                 cutoff_distance: float = 5.0,
-                 max_neighbors: int = 32,
-                 transform=None,
-                 pre_transform=None,
-                 pre_filter=None):
-
-        # Default root path
+    def __init__(
+        self,
+        root: Optional[str] = None,
+        universal_cache_path: Optional[str] = None,
+        max_samples: Optional[int] = None,
+        molecule_max_atoms: Optional[int] = None,
+        cutoff_distance: float = 5.0,
+        max_neighbors: int = 32,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None
+    ):
         if root is None:
             root = os.path.join(os.path.dirname(__file__), 'processed', 'lba_optimized')
-
-        # Default cache path for LBA
         if universal_cache_path is None:
             universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_lba_all.pkl')
-
         super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
                         transform, pre_transform, pre_filter)
 
 
 class OptimizedUniversalCOCONUTDataset(OptimizedUniversalDataset):
-    """
-    COCONUT Dataset using cached PyTorch Geometric tensors
+    """COCONUT Dataset using cached PyTorch Geometric tensors."""
     
-    This specialized dataset class for COCONUT provides instant loading by caching
-    converted PyTorch Geometric tensors, eliminating the conversion bottleneck.
-    """
-    
-    def __init__(self, 
-                 root: str = None,
-                 universal_cache_path: str = None,
-                 max_samples: Optional[int] = None,
-                 cutoff_distance: float = 5.0,
-                 max_neighbors: int = 32,
-                 transform=None,
-                 pre_transform=None,
-                 pre_filter=None):
-        
-        # Default root path
+    def __init__(
+        self,
+        root: Optional[str] = None,
+        universal_cache_path: Optional[str] = None,
+        max_samples: Optional[int] = None,
+        cutoff_distance: float = 5.0,
+        max_neighbors: int = 32,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None
+    ):
         if root is None:
-            root = os.path.join(
-                os.path.dirname(__file__), 
-                'processed', 'coconut_optimized'
-            )
-        
-        # Default cache path for COCONUT
+            root = os.path.join(os.path.dirname(__file__), 'processed', 'coconut_optimized')
         if universal_cache_path is None:
-            universal_cache_path = os.path.join(
-                os.path.dirname(__file__), 
-                'cache', 'universal_coconut_all.pkl'
-            )
-        
-        super().__init__(root, universal_cache_path, max_samples, cutoff_distance, max_neighbors, 
+            universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_coconut_all.pkl')
+        super().__init__(root, universal_cache_path, max_samples, None, cutoff_distance, max_neighbors,
                         transform, pre_transform, pre_filter)
 
 class OptimizedUniversalRNADataset(OptimizedUniversalDataset):
-    """
-    RNA Dataset using cached PyTorch Geometric tensors
+    """RNA Dataset using cached PyTorch Geometric tensors."""
 
-    This specialized dataset class for RNA provides instant loading by caching
-    converted PyTorch Geometric tensors from filtered CIF files.
-    """
-
-    def __init__(self,
-                 root: str = None,
-                 universal_cache_path: str = None,
-                 max_samples: Optional[int] = None,
-                 molecule_max_atoms: Optional[int] = None,
-                 cutoff_distance: float = 6.0,  # RNA-specific: slightly larger
-                 max_neighbors: int = 20,  # RNA-specific: fewer neighbors
-                 transform=None,
-                 pre_transform=None,
-                 pre_filter=None):
-
-        # Default root path for RNA
+    def __init__(
+        self,
+        root: Optional[str] = None,
+        universal_cache_path: Optional[str] = None,
+        max_samples: Optional[int] = None,
+        molecule_max_atoms: Optional[int] = None,
+        cutoff_distance: float = 6.0,  # RNA-specific: slightly larger
+        max_neighbors: int = 20,  # RNA-specific: fewer neighbors
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None
+    ):
         if root is None:
             root = os.path.join(os.path.dirname(__file__), 'processed', 'rna_optimized')
-
-        # Default cache path for RNA
         if universal_cache_path is None:
             universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_rna.pkl')
-
         super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
                         transform, pre_transform, pre_filter)
 
 
-
 if __name__ == "__main__":
     import argparse
-    import sys
 
     parser = argparse.ArgumentParser(description="Convert universal .pkl cache to PyG .pt format")
     parser.add_argument("--input-pkl", required=True, help="Path to input .pkl file")
@@ -387,49 +373,20 @@ if __name__ == "__main__":
             sys.exit(0)
 
     # Create dataset based on type
-    if args.dataset_type == "qm9":
-        dataset = OptimizedUniversalQM9Dataset(
-            root=args.output_dir,
-            universal_cache_path=args.input_pkl,
-            max_samples=args.max_samples,
-            cutoff_distance=args.cutoff,
-            max_neighbors=args.max_neighbors
-        )
-        print(f"✅ Created QM9 dataset: {len(dataset)} samples")
-    elif args.dataset_type == "lba":
-        dataset = OptimizedUniversalLBADataset(
-            root=args.output_dir,
-            universal_cache_path=args.input_pkl,
-            max_samples=args.max_samples,
-            cutoff_distance=args.cutoff,
-            max_neighbors=args.max_neighbors
-        )
-        print(f"✅ Created LBA dataset: {len(dataset)} samples")
-    elif args.dataset_type == "pdb":
-        dataset = OptimizedUniversalDataset(
-            root=args.output_dir,
-            universal_cache_path=args.input_pkl,
-            max_samples=args.max_samples,
-            cutoff_distance=args.cutoff,
-            max_neighbors=args.max_neighbors
-        )
-        print(f"✅ Created PDB dataset: {len(dataset)} samples")
-    elif args.dataset_type == "coconut":
-        dataset = OptimizedUniversalCOCONUTDataset(
-            root=args.output_dir,
-            universal_cache_path=args.input_pkl,
-            max_samples=args.max_samples,
-            cutoff_distance=args.cutoff,
-            max_neighbors=args.max_neighbors
-        )
-        print(f"✅ Created COCONUT dataset: {len(dataset)} samples")
-    elif args.dataset_type == "rna":
-        dataset = OptimizedUniversalRNADataset(
-            root=args.output_dir,
-            universal_cache_path=args.input_pkl,
-            max_samples=args.max_samples,
-            cutoff_distance=args.cutoff,
-            max_neighbors=args.max_neighbors
-        )
-        print(f"✅ Created RNA dataset: {len(dataset)} samples")
-
+    dataset_classes = {
+        "qm9": OptimizedUniversalQM9Dataset,
+        "lba": OptimizedUniversalLBADataset,
+        "pdb": OptimizedUniversalDataset,
+        "coconut": OptimizedUniversalCOCONUTDataset,
+        "rna": OptimizedUniversalRNADataset,
+    }
+    
+    dataset_class = dataset_classes[args.dataset_type]
+    dataset = dataset_class(
+        root=args.output_dir,
+        universal_cache_path=args.input_pkl,
+        max_samples=args.max_samples,
+        cutoff_distance=args.cutoff,
+        max_neighbors=args.max_neighbors
+    )
+    print(f"✅ Created {args.dataset_type.upper()} dataset: {len(dataset)} samples")

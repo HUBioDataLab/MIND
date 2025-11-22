@@ -269,6 +269,48 @@ Creates universal `.pkl` cache files from raw dataset files using the adapter sy
 
 ---
 
+## `data_loading/cache_to_pyg.py`
+
+### Purpose
+Converts universal `.pkl` cache files to PyTorch Geometric `.pt` format for efficient training. Supports all dataset types (QM9, LBA, COCONUT, PDB, RNA) and handles large datasets with memory-efficient processing.
+
+### Key Functionality
+- Converts universal molecular representations to PyTorch Geometric Data objects
+- Constructs edges using radius graph algorithm with configurable cutoff distance
+- Caches processed tensors to disk for instant loading during training
+- Memory-efficient processing using generator pattern (handles terabyte-scale datasets)
+- Supports dataset-specific classes with optimized defaults (QM9, LBA, COCONUT, PDB, RNA)
+
+### Key Functions
+- `load_molecules_iteratively()`: Generator function to load molecules one by one from pickle stream
+- `OptimizedUniversalDataset.process()`: Main processing method that converts molecules to PyG format
+- `OptimizedUniversalDataset._universal_to_pyg()`: Converts single UniversalMolecule to PyG Data object
+- `OptimizedUniversalDataset._element_to_atomic_number()`: Converts element symbols to atomic numbers (dictionary lookup)
+- `OptimizedUniversalDataset._calculate_edge_features()`: Calculates edge distances between connected atoms
+
+### Input/Output
+
+**Input:**
+- Universal `.pkl` cache file (created by `cache_universal_datasets.py`)
+- Optional: Processing parameters (cutoff distance, max neighbors, max samples, max atoms)
+
+**Output:**
+- PyTorch Geometric `.pt` file in `processed/` subdirectory:
+  - `optimized_{cache_name}_{config_sig}.pt` (includes processing parameters in filename)
+- File contains collated PyG Data objects ready for training
+
+### Notes
+- **Memory Efficiency**: Uses generator pattern (`load_molecules_iteratively`) to process molecules one at a time. For datasets >50K molecules, use external chunking via `process_chunked_dataset.py` to split into smaller chunks (recommended: 10K-20K molecules per chunk).
+- **Edge Construction**: Uses `torch_cluster.radius_graph` to construct edges based on distance cutoff. Each atom connects to neighbors within cutoff distance (default: 5.0 Å), up to max_neighbors limit (default: 32).
+- **Caching**: Processed `.pt` files are cached based on processing parameters. Changing cutoff or max_neighbors creates a new cache file automatically.
+- **Called by**: `process_chunked_dataset.py` (orchestrates chunked processing)
+- **Uses**: `data_types.py` (UniversalMolecule, UniversalBlock, UniversalAtom)
+- **Used by**: Training scripts via `LazyUniversalDataset` (loads chunks on-demand)
+- Supports all dataset types: QM9, LBA, COCONUT, PDB, RNA
+- No external dependencies: RDKit removed, uses dictionary lookup for element-to-atomic-number conversion
+
+---
+
 ## Pipeline Flow
 
 ```
