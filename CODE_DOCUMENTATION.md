@@ -262,10 +262,49 @@ Creates universal `.pkl` cache files from raw dataset files using the adapter sy
 ### Notes
 - **RAM Efficiency**: Uses generator pattern via `BaseAdapter._data_generator()` to process one molecule at a time. Each molecule is immediately written to disk via `pickle.dump()`, preventing memory accumulation. Can handle 500GB+ datasets safely.
 - **Chunking**: For large datasets, split manifest file into chunks. Each chunk creates a temporary manifest file (disk-based, not memory), then processes only that chunk's molecules.
+- **Adapter System**: Uses adapter pattern to support multiple dataset types. Each adapter (`protein_adapter.py`, `qm9_adapter.py`, etc.) implements `BaseAdapter` interface with `load_raw_data()` and `create_blocks()` methods. Adapters are instantiated via `get_adapter()` function which returns the appropriate adapter class based on dataset name.
 - **Called by**: `process_chunked_dataset.py` (orchestrates chunked processing)
-- **Calls**: Dataset-specific adapters (`protein_adapter.py`, `qm9_adapter.py`, etc.)
+- **Calls**: Dataset-specific adapters (`protein_adapter.py`, `qm9_adapter.py`, `lba_adapter.py`, `coconut_adapter.py`, `rna_adapter.py`)
 - **Used by**: `cache_to_pyg.py` (reads `.pkl` files to convert to PyG format)
 - Supports all dataset types: QM9, LBA, COCONUT, PDB, RNA
+
+---
+
+## `data_loading/adapters/protein_adapter.py`
+
+### Purpose
+Converts raw PDB/CIF protein structure files to universal molecular representation format. Supports both PDB and CIF formats, with optional filtering via manifest files and configurable heteroatom inclusion.
+
+### Key Functionality
+- Parses PDB and CIF files using BioPython
+- Converts each amino acid residue to a UniversalBlock
+- Supports manifest-based file filtering (AlphaFold naming convention)
+- Configurable heteroatom inclusion (ligands, ions, etc.)
+- Handles alternate atom locations and filters hydrogen atoms
+
+### Key Functions
+- `load_raw_data()`: Loads protein structure files, optionally filtered by manifest CSV
+- `create_blocks()`: Parses PDB/CIF file and converts residues to UniversalBlock objects
+- `convert_to_universal()`: Wraps blocks into UniversalMolecule with metadata
+
+### Input/Output
+
+**Input:**
+- Directory containing .pdb/.cif files
+- Optional: Manifest CSV file with 'repId' column for filtering
+
+**Output:**
+- UniversalMolecule objects with:
+  - Blocks representing amino acid residues (and optionally heteroatoms)
+  - Atoms with positions, element symbols, and entity indices
+
+### Notes
+- **Called by**: `cache_universal_datasets.py` (via `get_adapter()` function)
+- **Implements**: `BaseAdapter` interface (abstract methods: `load_raw_data()`, `create_blocks()`)
+- **File Naming**: Supports AlphaFold naming convention (`AF-{id}-F1-model_v4.pdb`) and direct filename matching
+- **Entity Indexing**: Protein residues have `entity_idx=0`, heteroatoms have `entity_idx=1`
+- **Filtering**: Skips hydrogen atoms and alternate locations (keeps only primary or 'A' location)
+- **Error Handling**: Skips files that cannot be parsed and continues processing
 
 ---
 
