@@ -54,7 +54,8 @@ class LazyUniversalDataset(Dataset):
         transform: Optional[Callable] = None,
         max_cache_chunks: int = 3,
         verbose: bool = True,
-        load_metadata: bool = False
+        load_metadata: bool = False,
+        metadata_search_paths: Optional[List[str]] = None
     ):
         """
         Initialize LazyUniversalDataset
@@ -75,6 +76,7 @@ class LazyUniversalDataset(Dataset):
         self.max_cache_chunks = max_cache_chunks
         self.verbose = verbose
         self.load_metadata = load_metadata
+        self.metadata_search_paths = metadata_search_paths or []
         
         # LRU cache for loaded chunks
         self._cache = OrderedDict()
@@ -264,9 +266,19 @@ class LazyUniversalDataset(Dataset):
             pt_path = Path(pt_file)
             metadata_path = pt_path.parent / f"{pt_path.stem}_metadata.json"
             
+            # If not found in same directory, check alternative search paths
             if not metadata_path.exists():
-                missing_metadata.append(pt_path.name)
-                continue
+                found = False
+                for search_path in self.metadata_search_paths:
+                    alt_path = Path(search_path) / f"{pt_path.stem}_metadata.json"
+                    if alt_path.exists():
+                        metadata_path = alt_path
+                        found = True
+                        break
+                
+                if not found:
+                    missing_metadata.append(pt_path.name)
+                    continue
             
             try:
                 with open(metadata_path, 'r') as f:

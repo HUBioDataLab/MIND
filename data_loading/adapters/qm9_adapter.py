@@ -55,8 +55,12 @@ class QM9Adapter(BaseAdapter):
         except Exception as e:
             raise RuntimeError(f"Failed to initialize GET components: {e}")
 
-    def load_raw_data(self, data_path: str, max_samples: int = None) -> List[Any]:
-        """Load QM9 data using PyTorch Geometric"""
+    def load_raw_data(self, data_path: str, max_samples: int = None, **kwargs) -> List[Any]:
+        """Load QM9 data using PyTorch Geometric with optional chunking support"""
+        
+        # Extract chunking parameters
+        num_chunks = kwargs.get('num_chunks', None)
+        chunk_index = kwargs.get('chunk_index', None)
         
         # Load using PyTorch Geometric (no raw caching - universal format is cached by base adapter)
         print("Loading QM9 data using PyTorch Geometric...")
@@ -64,15 +68,25 @@ class QM9Adapter(BaseAdapter):
             from torch_geometric.datasets import QM9
 
             dataset = QM9(root=data_path)
-            print(f"Found {len(dataset)} QM9 molecules")
-
-            if max_samples:
-                sample_count = min(max_samples, len(dataset))
+            total_samples = len(dataset)
+            print(f"Found {total_samples} QM9 molecules")
+            
+            # Handle chunking (index-based slicing)
+            if num_chunks and chunk_index is not None:
+                chunk_size = (total_samples + num_chunks - 1) // num_chunks
+                start_idx = chunk_index * chunk_size
+                end_idx = min(start_idx + chunk_size, total_samples)
+                
+                print(f"📦 Chunking: Loading samples {start_idx} to {end_idx} (chunk {chunk_index + 1}/{num_chunks})")
+                samples = [dataset[i] for i in range(start_idx, end_idx)]
+            
+            elif max_samples:
+                sample_count = min(max_samples, total_samples)
                 print(f"Loading {sample_count} samples...")
                 samples = [dataset[i] for i in range(sample_count)]
             else:
-                print(f"Loading all {len(dataset)} samples...")
-                samples = [dataset[i] for i in range(len(dataset))]
+                print(f"Loading all {total_samples} samples...")
+                samples = [dataset[i] for i in range(total_samples)]
 
             print(f"Successfully loaded {len(samples)} QM9 samples")
             return samples

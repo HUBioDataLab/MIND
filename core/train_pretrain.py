@@ -27,10 +27,12 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from core.pretraining_model import PretrainingESAModel, PretrainingConfig, create_pretraining_config
+from core.batch_statistics_callback import BatchStatisticsCallback
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes
 from data_loading.chunk_sampler import ChunkAwareSampler
 from data_loading.rotational_cache_sampler import RotationalCacheSampler
+from data_loading.dynamic_chunk_sampler import DynamicChunkAwareBatchSampler
 from torch_geometric.transforms import Compose
 from glob import glob
 
@@ -88,8 +90,8 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                 continue
             
             chunk_dir = dtype_config.get('chunk_dir', '')
-            if not chunk_dir or not os.path.exists(chunk_dir):
-                print(f"⚠️  {dtype.upper()}: chunk_dir not found: {chunk_dir}")
+            if not chunk_dir:
+                print(f"⚠️  {dtype.upper()}: chunk_dir not specified")
                 continue
             
             # Detect chunk directories for this dataset type
@@ -97,7 +99,16 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             parent_dir = dataset_dir_path.parent
             base_name = dataset_dir_path.name
             
-            chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
+            # Check if base directory exists, or if chunk directories exist
+            if not dataset_dir_path.exists():
+                # Base directory doesn't exist, but chunk directories might
+                chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
+                if not chunk_dirs:
+                    print(f"⚠️  {dtype.upper()}: chunk_dir not found: {chunk_dir} (and no chunk directories found)")
+                    continue
+            else:
+                # Base directory exists, look for chunks
+                chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
             
             if not chunk_dirs:
                 # Try loading from the directory itself (non-chunked)
@@ -138,12 +149,19 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         # Create LazyUniversalDataset with metadata loading
         load_metadata = len(enabled_types) > 1  # Only load metadata if truly multi-domain
         
+        # Add metadata search paths (for cases where we can't write to original chunk directories)
+        metadata_search_paths = []
+        metadata_dir = Path(__file__).parent.parent / "metadata" / "proteins"
+        if metadata_dir.exists():
+            metadata_search_paths.append(str(metadata_dir))
+        
         full_dataset = LazyUniversalDataset(
             chunk_pt_files=all_chunk_files,
             transform=transforms,
             max_cache_chunks=multi_domain_config.get('max_cache_chunks', 10),
             verbose=True,
-            load_metadata=load_metadata
+            load_metadata=load_metadata,
+            metadata_search_paths=metadata_search_paths if metadata_search_paths else None
         )
         
         print(f"\n✅ Multi-domain dataset loaded:")
@@ -302,59 +320,54 @@ def create_data_loaders(dataset, config: PretrainingConfig):
     multi_domain_config = getattr(config, 'multi_domain', None)
     is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
     
-    if is_lazy_dataset:
-        # SAMPLER SELECTION LOGIC
-        # 1. Multi-domain + metadata available → RotationalCacheSampler
-        # 2. Multi-domain + no metadata → ChunkAwareSampler (with warning)
-        # 3. Single-domain → ChunkAwareSampler
+    # Check if using atom-based dynamic batching
+    use_dynamic_batching = getattr(config, 'use_dynamic_batching', False)
+    max_atoms_per_batch = getattr(config, 'max_atoms_per_batch', None)
+    
+    # UNIFIED APPROACH: Use DynamicChunkAwareBatchSampler for BOTH single and multi-domain
+    train_sampler = None  # Initialize to avoid UnboundLocalError
+    train_batch_sampler = None  # Initialize to avoid UnboundLocalError
+    
+    if use_dynamic_batching and max_atoms_per_batch and is_lazy_dataset:
+        # Use custom DynamicChunkAwareBatchSampler
+        print(f"⚡ Using DynamicChunkAwareBatchSampler with max {max_atoms_per_batch:,} atoms/batch")
+        print(f"   This ensures consistent GPU memory usage across varying molecule sizes")
         
-        if is_multi_domain and dataset.metadata_loaded:
-            # ✅ OPTIMAL: Multi-domain with metadata
-            print(f"🌐 Using RotationalCacheSampler for multi-domain training:")
-            print(f"   - Atom-aware rotations: Yes")
-            print(f"   - Cross-modal batches: Yes (proteins + small molecules)")
-            print(f"   - Sequential chunk reading: Yes (optimal disk I/O)")
-            print(f"   - LRU cache compatible: Yes")
-            print(f"   - DataLoader optimizations: pin_memory, persistent_workers, prefetch_factor")
-            
-            train_sampler = RotationalCacheSampler(
-                train_dataset,
-                config=multi_domain_config,
-                shuffle=True
-            )
+        # Enable cross-modal batching for multi-domain
+        if is_multi_domain:
+            print(f"   🌐 Multi-domain mode: Enabling cross-modal batching")
+            print(f"   💡 Batches will mix different dataset types (PDB, QM9, etc.)")
         
-        elif is_multi_domain and not dataset.metadata_loaded:
-            # ⚠️ FALLBACK: Multi-domain but no metadata
-            print(f"⚠️  WARNING: Multi-domain enabled but metadata not loaded!")
-            print(f"   Falling back to ChunkAwareSampler (no cross-modal batching)")
-            print(f"   💡 Run create_chunk_metadata.py to enable RotationalCacheSampler")
-            print(f"")
-            print(f"🚀 Using ChunkAwareSampler (fallback mode):")
-            print(f"   - Shuffle chunk order: Yes")
-            print(f"   - Shuffle within chunks: Yes")
-            print(f"   - Cross-modal batches: ❌ No (chunks segregated by type)")
-            
-            train_sampler = ChunkAwareSampler(
-                train_dataset,
-                shuffle_chunks=True,
-                shuffle_within_chunk=True
-            )
+        train_batch_sampler = DynamicChunkAwareBatchSampler(
+            train_dataset,
+            max_atoms_per_batch=max_atoms_per_batch,
+            shuffle_chunks=True,
+            shuffle_within_chunk=True,
+            seed=config.seed,
+            enable_cross_modal_batches=is_multi_domain
+        )
         
-        else:
-            # ✅ STANDARD: Single-domain
-            print(f"🚀 Using ChunkAwareSampler for chunked dataset:")
-            print(f"   - Shuffle chunk order: Yes (epoch-level randomness)")
-            print(f"   - Shuffle within chunks: Yes (sample-level randomness)")
-            print(f"   - Sequential chunk reading: Yes (optimal disk I/O)")
-            print(f"   - DataLoader optimizations: pin_memory, persistent_workers, prefetch_factor")
-            
-            train_sampler = ChunkAwareSampler(
-                train_dataset,
-                shuffle_chunks=True,
-                shuffle_within_chunk=True
-            )
+        # Create DataLoader with batch_sampler
+        train_loader = GeometricDataLoader(
+            train_dataset,
+            batch_sampler=train_batch_sampler,
+            num_workers=getattr(config, 'num_workers', 0),
+            pin_memory=True
+        )
+    
+    elif is_lazy_dataset:
+        # Fallback to ChunkAwareSampler for non-dynamic batching
+        print(f"🚀 Using ChunkAwareSampler for chunked dataset:")
+        print(f"   - Shuffle chunk order: Yes")
+        print(f"   - Sequential chunk reading: Yes (optimal disk I/O)")
         
-        # Create train loader with selected sampler
+        train_sampler = ChunkAwareSampler(
+            train_dataset,
+            shuffle_chunks=True,
+            shuffle_within_chunk=True
+        )
+        
+        # Create train loader with sampler
         train_loader = GeometricDataLoader(
             train_dataset,
             batch_size=config.batch_size,
@@ -443,7 +456,10 @@ def create_data_loaders(dataset, config: PretrainingConfig):
 
     # Store sampler reference for epoch updates (if using chunked dataset)
     if is_lazy_dataset:
-        train_loader.sampler_obj = train_sampler  # For set_epoch() calls
+        if train_batch_sampler is not None:
+            train_loader.batch_sampler_obj = train_batch_sampler  # For dynamic batching
+        elif train_sampler is not None:
+            train_loader.sampler_obj = train_sampler  # For regular chunk-aware sampling
 
     return train_loader, val_loader, test_loader
 
@@ -514,6 +530,15 @@ def train_universal_pretraining(
         ChunkSamplerEpochCallback(),  # Update chunk sampler each epoch
     ]
     
+    # Add batch statistics callback if enabled
+    log_batch_stats = getattr(config, 'log_batch_statistics', False)
+    batch_stats_frequency = getattr(config, 'batch_stats_log_frequency', 10)
+    if log_batch_stats:
+        callbacks.append(BatchStatisticsCallback(
+            log_every_n_batches=batch_stats_frequency,
+            enabled=True
+        ))
+    
     # Create wandb logger
     wandb_logger = WandbLogger(
         project=wandb_project,
@@ -537,10 +562,65 @@ def train_universal_pretraining(
     
     print("🚀 Starting training...")
     print(f"📊 Training details:")
-    print(f"   • Total batches per epoch: {len(train_loader)}")
-    print(f"   • Validation batches: {len(val_loader)}")
+    
+    # Check if dynamic batching is enabled (for proper batch count display)
+    use_dynamic_batching = getattr(config, 'use_dynamic_batching', False)
+    max_atoms_per_batch = getattr(config, 'max_atoms_per_batch', None)
+    
+    if use_dynamic_batching and max_atoms_per_batch:
+        print(f"   • Total batches per epoch: Variable (dynamic batching)")
+        print(f"   • Validation batches: Variable (dynamic batching)")
+    else:
+        print(f"   • Total batches per epoch: {len(train_loader)}")
+        print(f"   • Validation batches: {len(val_loader)}")
+    
     print(f"   • Log every step: Yes")
     print(f"   • Validation every: {trainer.val_check_interval} steps")
+    
+    # CRITICAL FIX: Re-apply batch_sampler before training
+    # PyTorch Lightning sometimes replaces the custom batch_sampler
+    if use_dynamic_batching and max_atoms_per_batch:
+        from data_loading.lazy_universal_dataset import LazyUniversalDataset
+        is_lazy = isinstance(full_dataset, LazyUniversalDataset)
+        
+        if is_lazy:
+            print(f"\n🔧 CRITICAL FIX: Re-applying batch_sampler before training...")
+            print(f"   Current batch_sampler: {type(train_loader.batch_sampler).__name__}")
+            print(f"   Current batch_size: {train_loader.batch_size}")
+            
+            # If batch_sampler is wrong, recreate the DataLoader
+            if not isinstance(train_loader.batch_sampler, DynamicChunkAwareBatchSampler):
+                print(f"   ⚠️  batch_sampler was replaced! Recreating DataLoader...")
+                
+                # Get DataLoader parameters
+                train_dataset = train_loader.dataset
+                num_workers = train_loader.num_workers
+                pin_memory = train_loader.pin_memory
+                
+                # Check if multi-domain
+                multi_domain_config = getattr(config, 'multi_domain', None)
+                is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
+                
+                # Recreate batch sampler
+                train_batch_sampler = DynamicChunkAwareBatchSampler(
+                    train_dataset,
+                    max_atoms_per_batch=max_atoms_per_batch,
+                    shuffle_chunks=True,
+                    shuffle_within_chunk=True,
+                    seed=config.seed,
+                    enable_cross_modal_batches=is_multi_domain
+                )
+                
+                # Recreate DataLoader
+                train_loader = GeometricDataLoader(
+                    train_dataset,
+                    batch_sampler=train_batch_sampler,
+                    num_workers=num_workers,
+                    pin_memory=pin_memory
+                )
+                print(f"   ✅ Recreated DataLoader with DynamicChunkAwareBatchSampler")
+            
+            print(f"   ✅ Final check: batch_sampler = {type(train_loader.batch_sampler).__name__}, batch_size = {train_loader.batch_size}")
     
     # Train the model
     trainer.fit(model, train_loader, val_loader)

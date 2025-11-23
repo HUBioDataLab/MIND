@@ -97,15 +97,16 @@ def validate_arguments(args: argparse.Namespace) -> Tuple[bool, str]:
         return False, "--dataset is required (or must be in config)"
     if args.data_path is None:
         return False, "--data-path is required"
-    if args.manifest_file is None:
-        return False, "--manifest-file is required"
+    # Manifest file only required for PDB dataset
+    if args.dataset == 'pdb' and args.manifest_file is None:
+        return False, "--manifest-file is required for PDB dataset"
     if args.output_base is None:
         return False, "--output-base is required (or 'dataset_download_dir' must be in config)"
     
     if not args.data_path.exists():
         return False, f"Data path not found: {args.data_path}"
     
-    if not args.manifest_file.exists():
+    if args.manifest_file is not None and not args.manifest_file.exists():
         return False, f"Manifest file not found: {args.manifest_file}"
     
     return True, ""
@@ -154,11 +155,14 @@ def process_chunk(chunk_idx: int, args: argparse.Namespace) -> bool:
         str(script_dir / "cache_universal_datasets.py"),
         "--dataset", args.dataset,
         "--data-path", str(args.data_path),
-        "--manifest-file", str(args.manifest_file),
         "--cache-dir", str(args.cache_dir),
         "--num-chunks", str(args.num_chunks),
         "--chunk-index", str(chunk_idx),
     ]
+    
+    # Only add manifest file for PDB dataset
+    if args.dataset == 'pdb' and args.manifest_file:
+        cache_cmd.extend(["--manifest-file", str(args.manifest_file)])
     
     if args.force:
         cache_cmd.append("--force")
