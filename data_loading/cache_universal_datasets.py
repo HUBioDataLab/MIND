@@ -139,7 +139,9 @@ def cache_dataset(dataset_name: str, data_path: Optional[Path], cache_dir: Path,
             data_path=str(data_path),
             cache_path=str(cache_path),
             max_samples=max_samples,
-            manifest_file=manifest_path
+            manifest_file=manifest_path,
+            num_chunks=num_chunks,
+            chunk_index=chunk_index
         )
         
         if chunk_manifest_file and chunk_manifest_file.exists():
