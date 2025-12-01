@@ -13,7 +13,15 @@ Usage:
         --mode analyze \
         --metadata-file ../data/proteins/afdb_clusters/representatives_metadata.tsv.gz
 
-    # Create manifest
+    # Create manifest (all available proteins, no existing files check)
+    python data/protein_pipeline/1_filter_and_create_manifest.py \
+        --mode manifest \
+        --metadata-file ../data/proteins/afdb_clusters/representatives_metadata.tsv.gz \
+        --output ../data/proteins/afdb_clusters/manifest_hq_1m_1024.csv \
+        --plddt 70 \
+        --max-len 1024
+
+    # Create manifest with target count and existing files check
     python data/protein_pipeline/1_filter_and_create_manifest.py \
         --mode manifest \
         --metadata-file ../data/proteins/afdb_clusters/representatives_metadata.tsv.gz \
@@ -23,8 +31,9 @@ Usage:
         --plddt 70 \
         --max-len 512
 
-    Note: --existing-structures-dir prevents re-downloading proteins that have
-    already been downloaded.
+    Note: --target-count and --existing-structures-dir are optional.
+          If --target-count is not provided, all matching proteins will be included.
+          If --existing-structures-dir is not provided, no existing files will be excluded.
 """
 
 import argparse
@@ -184,11 +193,11 @@ def analyze_metadata(metadata_path: Path) -> None:
 
 def create_manifest(
     metadata_path: Path,
-    target_count: int,
     output_path: Path,
-    existing_structures_dir: Path,
     plddt_threshold: int = 70,
-    max_len: int = 512
+    max_len: int = 512,
+    target_count: Optional[int] = None,
+    existing_structures_dir: Optional[Path] = None
 ) -> None:
     """
     Create a download manifest CSV file with filtered protein structures.
@@ -199,14 +208,17 @@ def create_manifest(
     
     Args:
         metadata_path: Path to the metadata file
-        target_count: Target number of proteins to include in manifest
         output_path: Path where manifest CSV will be saved
-        existing_structures_dir: Directory containing already downloaded structures
         plddt_threshold: Minimum pLDDT score (default: 70)
         max_len: Maximum sequence length in amino acids (default: 512)
+        target_count: Target number of proteins to include in manifest (None = all available)
+        existing_structures_dir: Directory containing already downloaded structures (None = skip check)
     """
     # Get existing structure IDs to avoid re-downloading
-    existing_ids = get_existing_structure_ids(existing_structures_dir)
+    if existing_structures_dir is not None:
+        existing_ids = get_existing_structure_ids(existing_structures_dir)
+    else:
+        existing_ids = set()
     
     # Load metadata
     print(f"Loading metadata from: {metadata_path}")
@@ -235,8 +247,11 @@ def create_manifest(
     total_candidates = len(filtered_df)
     print(f"Found {total_candidates:,} new candidates matching criteria")
     
-    # Select target count (or all if fewer available)
-    if total_candidates < target_count:
+    # Select target count (or all if target_count is None or fewer available)
+    if target_count is None:
+        print(f"No target count specified. Using all {total_candidates:,} candidates.")
+        final_df = filtered_df
+    elif total_candidates < target_count:
         print(
             f"WARNING: Only {total_candidates:,} candidates available "
             f"(target: {target_count:,}). Using all available."
@@ -244,6 +259,7 @@ def create_manifest(
         final_df = filtered_df
     else:
         final_df = filtered_df.head(target_count)
+        print(f"Selecting top {target_count:,} proteins by pLDDT score.")
     
     # Generate download URLs from API (parallelized)
     print(f"Fetching URLs from AlphaFold DB API for {len(final_df):,} proteins...")
@@ -324,12 +340,14 @@ def main():
     parser.add_argument(
         "--target-count",
         type=int,
-        help="Target number of proteins for manifest mode"
+        default=None,
+        help="Target number of proteins for manifest mode (default: None = all available)"
     )
     
     parser.add_argument(
         "--output",
         type=Path,
+        required=True,
         help="Output CSV file path for manifest mode"
     )
     
@@ -350,9 +368,10 @@ def main():
     parser.add_argument(
         "--existing-structures-dir",
         type=Path,
+        default=None,
         help=(
             "Directory containing existing PDB/CIF files "
-            "(to exclude from manifest)"
+            "(to exclude from manifest). Optional - if not provided, no existing files will be excluded."
         )
     )
     
@@ -362,20 +381,16 @@ def main():
         analyze_metadata(args.metadata_file)
     
     elif args.mode == 'manifest':
-        required_args = [args.target_count, args.output, args.existing_structures_dir]
-        if not all(required_args):
-            parser.error(
-                "manifest mode requires --target-count, --output, "
-                "and --existing-structures-dir"
-            )
+        if not args.output:
+            parser.error("manifest mode requires --output")
         
         create_manifest(
             metadata_path=args.metadata_file,
-            target_count=args.target_count,
             output_path=args.output,
-            existing_structures_dir=args.existing_structures_dir,
             plddt_threshold=args.plddt,
-            max_len=args.max_len
+            max_len=args.max_len,
+            target_count=args.target_count,
+            existing_structures_dir=args.existing_structures_dir
         )
 
 

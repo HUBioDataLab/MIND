@@ -75,7 +75,7 @@ use_posenc: false  # Set to true to enable RWSE+LapPE positional encoders
 
 gaussian_kernels: 128
 cutoff_distance: 5.0
-max_neighbors: 16
+max_neighbors: 16 #! max neighbors
 max_distance: 10.0  # Appropriate for small molecules
 distance_bins: 16  # Fewer bins for easier learning
 
