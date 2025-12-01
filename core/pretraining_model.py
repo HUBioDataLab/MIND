@@ -99,6 +99,10 @@ class PretrainingConfig:
     # Temperature for softmax (used in distance prediction)
     temperature: float = 0.1
     
+    # Per-type loss tracking (for multi-domain analysis)
+    compute_per_type_losses: bool = False
+    log_per_type_frequency: int = 10
+    
     
 def nearest_multiple_of_8(n):
     return math.ceil(n / 8) * 8
@@ -756,8 +760,157 @@ class PretrainingESAModel(pl.LightningModule):
 
         return losses, total_loss
     
+    def _compute_per_type_losses(self, batch, graph_embeddings, node_embeddings):
+        """
+        Compute losses separately for each dataset type.
+        Uses SAME embeddings from forward pass (no extra computation).
+        
+        Returns:
+            Dict[str, Dict[str, float]]: {dtype: {task: loss_value}}
+        """
+        if not hasattr(batch, 'dataset_type'):
+            return {}
+        
+        type_losses = {}
+        unique_types = set(batch.dataset_type) if isinstance(batch.dataset_type, (list, tuple)) else {batch.dataset_type}
+        
+        # Get device from embeddings (more reliable than batch.x)
+        device = node_embeddings.device
+        
+        for dtype in unique_types:
+            # Create masks for this dataset type
+            if isinstance(batch.dataset_type, (list, tuple)):
+                graph_mask = torch.tensor([dt == dtype for dt in batch.dataset_type], 
+                                         device=device)
+            else:
+                graph_mask = torch.ones(batch.num_graphs, dtype=torch.bool, device=device)
+            
+            graph_indices = torch.where(graph_mask)[0]
+            node_mask = torch.isin(batch.batch, graph_indices)
+            
+            # Skip if no samples of this type
+            if node_mask.sum() == 0:
+                continue
+            
+            dtype_losses = {}
+            dtype_total = 0.0
+            
+            # Short-range distance loss (masked edges)
+            if "short_range_distance" in self.config.pretraining_tasks:
+                if hasattr(batch, 'edge_index') and batch.edge_index is not None and hasattr(batch, 'pos') and batch.pos is not None:
+                    edge_mask = node_mask[batch.edge_index[0]] & node_mask[batch.edge_index[1]]
+                    
+                    if edge_mask.sum() > 0:
+                        masked_edge_index = batch.edge_index[:, edge_mask]
+                        masked_pos = batch.pos[node_mask]
+                        
+                        # Remap node indices for masked graph
+                        node_mapping = torch.zeros(batch.num_nodes, dtype=torch.long, device=device)
+                        node_mapping[node_mask] = torch.arange(node_mask.sum(), device=device)
+                        remapped_edge_index = node_mapping[masked_edge_index]
+                        
+                        # Compute distances
+                        distances = torch.norm(
+                            masked_pos[remapped_edge_index[1]] - masked_pos[remapped_edge_index[0]], 
+                            dim=1
+                        )
+                        
+                        # Random mask (15%)
+                        random_mask = (torch.rand(remapped_edge_index.size(1)) < 0.15).to(distances.device)
+                        
+                        # Compute loss
+                        masked_node_emb = node_embeddings[node_mask]
+                        dist_loss = self.pretraining_tasks.short_range_distance_loss(
+                            masked_node_emb, remapped_edge_index, distances, random_mask
+                        )
+                        dtype_losses['short_range_distance'] = dist_loss
+                        dtype_total += self.config.task_weights['short_range_distance'] * dist_loss
+            
+            # Long-range distance loss (masked nodes)
+            if "long_range_distance" in self.config.pretraining_tasks:
+                if hasattr(batch, 'pos') and batch.pos is not None:
+                    # Create pseudo-batch for this type
+                    masked_batch = batch.__class__()
+                    if hasattr(batch, 'x') and batch.x is not None:
+                        masked_batch.x = batch.x[node_mask]
+                    masked_batch.pos = batch.pos[node_mask]
+                    masked_batch.batch = torch.zeros(node_mask.sum(), dtype=torch.long, device=device)
+                    masked_batch.num_graphs = 1
+                    
+                    masked_node_emb = node_embeddings[node_mask]
+                    long_range_loss = self.pretraining_tasks.long_range_distance_loss(
+                        masked_node_emb, masked_batch
+                    )
+                    dtype_losses['long_range_distance'] = long_range_loss
+                    dtype_total += self.config.task_weights['long_range_distance'] * long_range_loss
+            
+            # MLM loss (masked nodes)
+            if "mlm" in self.config.pretraining_tasks:
+                if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
+                    masked_mlm = batch.mlm_mask[node_mask]
+                    
+                    if masked_mlm.sum() > 0 and hasattr(batch, 'x') and batch.x is not None:
+                        # Create pseudo-batch for this type
+                        masked_batch = batch.__class__()
+                        masked_batch.x = batch.x[node_mask]
+                        masked_batch.mlm_mask = masked_mlm
+                        masked_batch.mlm_labels = batch.mlm_labels[node_mask] if hasattr(batch, 'mlm_labels') and batch.mlm_labels is not None else batch.x[node_mask]
+                        
+                        masked_node_emb = node_embeddings[node_mask]
+                        mlm_loss = self.pretraining_tasks.mlm_loss(masked_node_emb, masked_batch)
+                        dtype_losses['mlm'] = mlm_loss
+                        dtype_total += self.config.task_weights['mlm'] * mlm_loss
+            
+            dtype_losses['total'] = dtype_total
+            type_losses[dtype] = dtype_losses
+        
+        return type_losses
+    
     def training_step(self, batch, batch_idx):
         """Training step"""
+        # Log batch composition every 10 batches
+        if batch_idx % 10 == 0:
+            num_graphs = batch.num_graphs if hasattr(batch, 'num_graphs') else 1
+            num_atoms = batch.num_nodes if hasattr(batch, 'num_nodes') else batch.x.size(0)
+            
+            # Calculate atoms per graph
+            if hasattr(batch, 'batch'):
+                atoms_per_graph = [(batch.batch == i).sum().item() for i in range(num_graphs)]
+                avg_atoms = sum(atoms_per_graph) / len(atoms_per_graph)
+                min_atoms = min(atoms_per_graph)
+                max_atoms = max(atoms_per_graph)
+            else:
+                avg_atoms = num_atoms / num_graphs
+                min_atoms = max_atoms = int(avg_atoms)
+            
+            print(f"\n{'='*80}")
+            print(f"📊 BATCH {batch_idx} | Epoch {self.current_epoch}")
+            print(f"{'='*80}")
+            print(f"  Total Graphs: {num_graphs:4d} | Total Atoms: {num_atoms:6,d}")
+            print(f"  Avg Atoms:    {avg_atoms:6.1f} | Min: {min_atoms:6,d} | Max: {max_atoms:6,d}")
+            
+            # Show dataset composition if available
+            if hasattr(batch, 'dataset_type'):
+                from collections import Counter
+                if isinstance(batch.dataset_type, (list, tuple)):
+                    type_counts = Counter(batch.dataset_type)
+                elif hasattr(batch.dataset_type, 'tolist'):
+                    type_counts = Counter(batch.dataset_type.tolist() if hasattr(batch.dataset_type, 'tolist') else [batch.dataset_type.item()])
+                else:
+                    type_counts = {batch.dataset_type: num_graphs}
+                
+                print(f"  Dataset Mix:")
+                for dtype, count in sorted(type_counts.items()):
+                    pct = count / num_graphs * 100
+                    # Calculate atoms for this dataset type
+                    if hasattr(batch, 'batch') and isinstance(batch.dataset_type, (list, tuple)):
+                        type_atoms = sum(atoms_per_graph[i] for i, dt in enumerate(batch.dataset_type) if dt == dtype)
+                        print(f"    {dtype.upper():12s}: {count:4d} graphs ({pct:5.1f}%) | {type_atoms:6,d} atoms")
+                    else:
+                        print(f"    {dtype.upper():12s}: {count:4d} graphs ({pct:5.1f}%)")
+            
+            print(f"{'='*80}")
+        
         graph_embeddings, node_embeddings = self.forward(batch)
         
         losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
@@ -773,6 +926,22 @@ class PretrainingESAModel(pl.LightningModule):
         
         self.log("train_total_loss", total_loss, prog_bar=True)
         
+        # Per-type loss tracking (optional, minimal overhead)
+        if self.config.compute_per_type_losses and batch_idx % self.config.log_per_type_frequency == 0:
+            type_losses = self._compute_per_type_losses(batch, graph_embeddings, node_embeddings)
+            
+            # Log per-type losses to WandB
+            for dtype, dtype_losses in type_losses.items():
+                for task_name, loss_value in dtype_losses.items():
+                    self.log(f"train_{dtype}_{task_name}_loss", loss_value)
+            
+            # Print per-type summary (optional)
+            if batch_idx % 50 == 0 and type_losses:
+                print(f"\n  📊 Per-Type Losses (Batch {batch_idx}):")
+                for dtype, dtype_losses in type_losses.items():
+                    loss_str = " | ".join([f"{k}: {v:.4f}" for k, v in dtype_losses.items() if k != 'total'])
+                    print(f"    {dtype.upper():12s}: {loss_str} | Total: {dtype_losses['total']:.4f}")
+        
         return total_loss
     
     def validation_step(self, batch, batch_idx):
@@ -787,6 +956,13 @@ class PretrainingESAModel(pl.LightningModule):
         
         self.log("val_total_loss", total_loss)
         
+        # Per-type loss tracking for validation
+        if self.config.compute_per_type_losses:
+            type_losses = self._compute_per_type_losses(batch, graph_embeddings, node_embeddings)
+            for dtype, dtype_losses in type_losses.items():
+                for task_name, loss_value in dtype_losses.items():
+                    self.log(f"val_{dtype}_{task_name}_loss", loss_value)
+        
         return total_loss
     
     def test_step(self, batch, batch_idx):
@@ -800,6 +976,13 @@ class PretrainingESAModel(pl.LightningModule):
             self.log(f"test_{task_name}_loss", loss_value)
         
         self.log("test_total_loss", total_loss)
+        
+        # Per-type loss tracking for test
+        if self.config.compute_per_type_losses:
+            type_losses = self._compute_per_type_losses(batch, graph_embeddings, node_embeddings)
+            for dtype, dtype_losses in type_losses.items():
+                for task_name, loss_value in dtype_losses.items():
+                    self.log(f"test_{dtype}_{task_name}_loss", loss_value)
         
         return total_loss
     
