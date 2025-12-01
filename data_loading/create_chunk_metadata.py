@@ -133,7 +133,6 @@ def create_chunk_metadata(chunk_pt_file: str, overwrite: bool = False) -> Dict[s
     
     # Extract per-sample metadata
     for i in tqdm(range(num_samples), desc="Extracting sample metadata", leave=False):
-        # Calculate atom count from position slices
         start_idx = slices['pos'][i].item()
         end_idx = slices['pos'][i + 1].item()
         num_atoms = int(end_idx - start_idx)

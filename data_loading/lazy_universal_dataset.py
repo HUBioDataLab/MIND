@@ -169,7 +169,7 @@ class LazyUniversalDataset(Dataset):
             raise IndexError(f"Index {idx} out of range [0, {self.total_samples})")
         
         # Find which file contains this sample
-        for start_idx, end_idx, pt_file in self.file_ranges:
+        for chunk_idx, (start_idx, end_idx, pt_file) in enumerate(self.file_ranges):
             if start_idx <= idx < end_idx:
                 local_idx = idx - start_idx
                 
@@ -183,6 +183,23 @@ class LazyUniversalDataset(Dataset):
                 # Extract sample
                 data, slices = self._cache[pt_file]
                 sample = self._extract_sample(data, slices, local_idx)
+                
+                # Add dataset_type for batch statistics
+                if self.metadata_loaded and chunk_idx < len(self.chunk_metadata):
+                    sample.dataset_type = self.chunk_metadata[chunk_idx].get('dataset_type', 'unknown')
+                else:
+                    # Fallback: infer from filename
+                    filename = pt_file.lower()
+                    if 'pdb' in filename or 'protein' in filename:
+                        sample.dataset_type = 'protein'
+                    elif 'qm9' in filename:
+                        sample.dataset_type = 'qm9'
+                    elif 'metabolite' in filename:
+                        sample.dataset_type = 'metabolite'
+                    elif 'rna' in filename:
+                        sample.dataset_type = 'rna'
+                    else:
+                        sample.dataset_type = 'unknown'
                 
                 # Apply transform
                 if self.transform is not None:

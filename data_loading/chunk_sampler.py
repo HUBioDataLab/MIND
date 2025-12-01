@@ -39,11 +39,6 @@ class ChunkAwareSampler(Sampler):
     """
     Sampler that reads chunks sequentially but shuffles chunk order.
     
-    This provides the best balance between:
-    1. Randomness (sufficient for training)
-    2. Disk I/O efficiency (sequential chunk reading)
-    3. Cache efficiency (predictable access pattern)
-    
     How it works:
     - At each epoch, shuffle the order of chunks
     - Within each chunk, optionally shuffle samples

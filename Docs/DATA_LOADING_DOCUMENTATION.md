@@ -5,6 +5,42 @@ This document provides brief descriptions of each code file in the data processi
 
 ---
 
+## Pipeline Flow
+
+```
+1. Download metadata
+   └─> data/download_protein_clusters.py
+       └─> representatives_metadata.tsv.gz
+
+2. Filter and create manifest
+   └─> data/protein_pipeline/1_filter_and_create_manifest.py
+       └─> manifest_hq_40k.csv (with API-fetched URLs)
+
+3. Download structures
+   └─> data/protein_pipeline/2_download_pdbs_from_manifest.py
+       └─> raw_structures_hq_40k/ (PDB/CIF files)
+
+4. Process to universal format (chunked)
+   └─> data_loading/process_chunked_dataset.py
+       ├─> Calls cache_universal_datasets.py
+       │   └─> universal_{dataset}_chunk_{index}.pkl (universal cache)
+       └─> Calls cache_to_pyg.py
+           └─> processed_graphs_40k_chunk_*/processed/*.pt (PyTorch Geometric)
+
+5. Train model
+   └─> core/train_pretrain.py
+       ├─> Single-Domain Training:
+       │   ├─> LazyUniversalDataset (loads chunks on-demand with LRU cache)
+       │   ├─> ChunkAwareSampler (chunk-level shuffling, sequential I/O)
+       │   └─> DataLoader (batches samples efficiently)
+       │
+       └─> Multi-Domain Training (proteins + small molecules + metabolites + RNA):
+           ├─> LazyUniversalDataset (loads chunks + metadata on-demand)
+           ├─> RotationalCacheSampler (atom-balanced rotations, cross-modal mixing)
+           └─> DataLoader (mixed batches with balanced atom distribution)
+```
+---
+
 ## Protein Pipeline
 
 This section covers scripts for downloading and preparing raw protein structure data.
@@ -350,29 +386,224 @@ Converts universal `.pkl` cache files to PyTorch Geometric `.pt` format for effi
 
 ---
 
-## Pipeline Flow
+## Training System: Lazy Loading and Sampling
 
+This section explains how the training system efficiently handles large-scale datasets (1M+ samples) that don't fit in RAM.
+
+---
+
+## `data_loading/lazy_universal_dataset.py`
+
+### Purpose
+Memory-efficient dataset class that loads PyTorch Geometric data on-demand from disk. Enables training on datasets that are too large to fit in RAM (e.g., 1M+ proteins requiring 50GB+ RAM).
+
+### Key Concept: Lazy Loading with LRU Cache
+
+**Problem**: Traditional `InMemoryDataset` loads all data into RAM, which is impossible for large datasets.
+
+**Solution**: `LazyUniversalDataset` uses a **lazy loading** strategy with **LRU (Least Recently Used) cache**: 
+
+1. **Index Building**: On initialization, scans all chunk files to build an index map (which sample is in which file). Only loads slice metadata, not actual data.
+
+2. **On-Demand Loading**: When a sample is requested (`__getitem__`):
+   - Finds which chunk file contains the sample
+   - Checks if chunk is in cache
+   - If not cached: loads chunk from disk, evicts oldest chunk if cache is full
+   - Extracts the specific sample using PyG's `separate()` function
+   - Returns the sample
+
+3. **LRU Cache**: Keeps most recently used chunks in memory (default: 3 chunks). When cache is full, oldest chunk is evicted automatically.
+
+### Key Functions
+
+- `__init__()`: Initializes dataset, builds index map, optionally loads metadata
+- `_build_index_map()`: Scans chunk files to create mapping (global_idx → chunk_file, local_idx)
+- `__getitem__()`: Loads chunk on-demand, extracts sample, applies transform
+- `_load_chunk()`: Loads chunk file into LRU cache (evicts oldest if full)
+- `_extract_sample()`: Uses PyG's `separate()` to extract individual sample from collated data
+- `_load_metadata()`: Loads JSON metadata files for atom-aware sampling (optional)
+
+### Input/Output
+
+**Input:**
+- List of paths to processed `.pt` files (chunks)
+- Optional: Transform function
+- Optional: `max_cache_chunks` (default: 3)
+- Optional: `load_metadata=True` (for multi-domain training)
+
+**Output:**
+- PyTorch Dataset compatible with DataLoader
+- Returns PyG Data objects on-demand
+
+### Notes
+- **Compatible with**: PyTorch DataLoader, `random_split()` for train/val/test splits
+- **Cache Management**: Automatically handles chunk loading/eviction. No manual cache management needed.
+- **Metadata Support**: Optional metadata loading enables atom-aware sampling for multi-domain training
+- **Used by**: Training scripts (`core/train_pretrain.py`)
+- **Works with**: `ChunkAwareSampler` and `RotationalCacheSampler` for optimized sampling
+
+---
+
+## `data_loading/chunk_sampler.py`
+
+### Purpose
+Optimizes disk I/O by reading chunks sequentially while maintaining sufficient randomness for training. Solves the trade-off between randomness and disk efficiency.
+
+### Key Concept: Chunk-Level Shuffling
+
+**Problem**: 
+- Random sampling across all chunks → poor disk I/O (random disk seeks)
+- Sequential chunk reading → no randomness (bad for training)
+
+**Solution**: **Chunk-aware shuffling**:
+- Shuffle **chunk order** at each epoch (epoch-level randomness)
+- Optionally shuffle **samples within each chunk** (sample-level randomness)
+- Read chunks **sequentially** in shuffled order (optimal disk I/O)
+
+### How It Works
+
+**Example Epoch**:
 ```
-1. Download metadata
-   └─> data/download_protein_clusters.py
-       └─> representatives_metadata.tsv.gz
+Epoch 0:
+  Chunk order: [chunk_3, chunk_7, chunk_0, chunk_1, ...]  (shuffled)
+  
+  Process chunk_3 sequentially:
+    - Load chunk_3 into cache
+    - Samples: [12000, 12543, 12111, ..., 15999]  (shuffled within chunk)
+    - Process all samples from chunk_3
+    - Chunk_3 stays in cache (LRU)
+  
+  Process chunk_7 sequentially:
+    - Load chunk_7 into cache
+    - Evict oldest chunk if cache full
+    - Process all samples from chunk_7
+    - ...
 
-2. Filter and create manifest
-   └─> data/protein_pipeline/1_filter_and_create_manifest.py
-       └─> manifest_hq_40k.csv (with API-fetched URLs)
-
-3. Download structures
-   └─> data/protein_pipeline/2_download_pdbs_from_manifest.py
-       └─> raw_structures_hq_40k/ (PDB/CIF files)
-
-4. Process to universal format (chunked)
-   └─> data_loading/process_chunked_dataset.py
-       ├─> Calls cache_universal_datasets.py
-       │   └─> universal_{dataset}_chunk_{index}.pkl (universal cache)
-       └─> Calls cache_to_pyg.py
-           └─> processed_graphs_40k_chunk_*/processed/*.pt (PyTorch Geometric)
-
-5. Train model
-   └─> core/train_pretrain.py
-       └─> Uses LazyUniversalDataset (loads chunks on-demand)
+Epoch 1:
+  Chunk order: [chunk_1, chunk_4, chunk_9, chunk_0, ...]  (different shuffle)
+  - Different chunk order → different training order
+  - Still sequential within each chunk → efficient I/O
 ```
+
+### Benefits
+
+1. **Randomness**: Each epoch sees chunks in different order (sufficient for training)
+2. **Disk Efficiency**: Sequential chunk reading → optimal disk I/O (no random seeks)
+3. **Cache Efficiency**: Predictable access pattern → high cache hit rate
+4. **Memory Efficiency**: Each chunk loaded once per epoch → minimal cache thrashing
+
+### Key Functions
+
+- `__init__()`: Initializes sampler with shuffle options
+- `__iter__()`: Generates sample indices for one epoch (chunk-aware shuffling)
+- `set_epoch()`: Updates epoch number for reproducible shuffling
+
+### Notes
+- **Works with**: `LazyUniversalDataset` and `Subset` (from `random_split`)
+- **Shuffle Strategy**: Epoch-based seed ensures reproducible shuffling
+- **Cache Friendly**: Sequential chunk access maximizes LRU cache efficiency
+- **Used by**: Single-domain training (one dataset type at a time)
+
+---
+
+## `data_loading/rotational_cache_sampler.py`
+
+### Purpose
+Atom-aware rotational sampler for **multi-domain training** (training on mixed molecular datasets: proteins + small molecules + metabolites + RNA). Ensures balanced atom distribution across dataset types while maintaining efficient disk I/O.
+
+### Key Concept: Atom-Balanced Rotations
+
+**Problem**: 
+- Training on mixed datasets (proteins + small molecules) creates imbalanced batches
+- Large proteins dominate small molecules → gradient imbalance
+- Random sampling → poor disk I/O
+
+**Solution**: **Rotational atom-aware sampling**:
+1. Group chunks by dataset type (protein chunks, molecule chunks, etc.)
+2. Create **rotations** where each rotation contains chunks from different types
+3. Balance rotations by **atom count**, not sample count
+4. Shuffle samples within rotation for cross-modal mixing
+
+### How It Works
+
+**Rotation Creation**:
+```
+Target: 50,000 atoms per rotation
+Ratios: 70% proteins, 20% molecules, 10% metabolites
+
+Rotation 0:
+  - Protein chunks: 35,000 atoms (70%)
+  - Molecule chunks: 10,000 atoms (20%)
+  - Metabolite chunks: 5,000 atoms (10%)
+  Total: 50,000 atoms
+
+Rotation 1:
+  - Protein chunks: 35,000 atoms
+  - Molecule chunks: 10,000 atoms
+  - Metabolite chunks: 5,000 atoms
+  ...
+
+Rotation N: (until all chunks consumed)
+```
+
+**Training Process**:
+```
+Epoch 0:
+  Rotation order: [rotation_3, rotation_7, rotation_0, ...]  (shuffled)
+  
+  Process rotation_3:
+    - Load protein chunks (sequential)
+    - Load molecule chunks (sequential)
+    - Load metabolite chunks (sequential)
+    - Shuffle ALL samples from rotation → mixed batches!
+    - Batch 1: [protein_1, molecule_5, protein_2, metabolite_1, ...]
+    - Batch 2: [molecule_3, protein_4, metabolite_2, ...]
+    - Cross-modal mixing achieved!
+  
+  Process rotation_7:
+    - ...
+```
+
+### Atom-Aware Balancing
+
+**Why atom count, not sample count?**
+- Proteins: ~500 atoms per sample
+- Small molecules: ~20 atoms per sample
+- **Sample-based balancing**: 1 protein = 25 molecules → gradient dominated by proteins
+- **Atom-based balancing**: 50K protein atoms + 50K molecule atoms → balanced gradients
+
+### Key Functions
+
+- `__init__()`: Initializes sampler with multi-domain config
+- `_build_chunk_groups()`: Groups chunks by dataset type, collects metadata
+- `_create_atom_based_rotations()`: Creates atom-balanced rotations
+- `__iter__()`: Generates sample indices with cross-modal mixing
+- `set_epoch()`: Updates epoch for reproducible shuffling
+
+### Notes
+- **Requires**: Metadata files (run `create_chunk_metadata.py` first)
+- **Metadata Loading**: Dataset must be initialized with `load_metadata=True`
+- **Cache Validation**: Warns if rotation requires more chunks than cache limit
+- **Cross-Modal Mixing**: Shuffles samples within rotation to ensure mixed batches
+- **Used by**: Multi-domain training (proteins + small molecules + metabolites + RNA)
+
+---
+
+## Training Flow Summary
+
+**Single-Domain Training** (one dataset type):
+```
+1. LazyUniversalDataset: Loads chunks on-demand with LRU cache
+2. ChunkAwareSampler: Shuffles chunk order, reads sequentially
+3. DataLoader: Batches samples efficiently
+4. Training: Each epoch sees different chunk order, sufficient randomness
+```
+
+**Multi-Domain Training** (mixed datasets):
+```
+1. LazyUniversalDataset: Loads chunks on-demand, loads metadata
+2. RotationalCacheSampler: Creates atom-balanced rotations
+3. DataLoader: Batches samples with cross-modal mixing
+4. Training: Balanced atom distribution, mixed batches, efficient I/O
+```
+
