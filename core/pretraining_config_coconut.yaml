@@ -1,15 +1,15 @@
 seed: 42
 dataset: COCONUT
-dataset_download_dir: ./data/COCONUT
+dataset_download_dir: ./data/COCONUT/processed  # Base path for chunk detection (will find processed_chunk_*)
 out_path: ./outputs/universal_pretrain_coconut
 wandb_project_name: esa-universal-pretraining
-wandb_run_name: new-universal-COCONUT-pretraining
-max_epochs: 100
+wandb_run_name: coconut-chunked-pretraining
+max_epochs: 50
 gradient_clip_val: 0.5
 monitor_loss_name: train_total_loss
 
-num_workers: 8
-molecule_max_atoms: 150  # Very conservative limit for COCONUT natural products
+num_workers: 4
+molecule_max_atoms: 100  # Match max_node_items for consistency
 
 # Universal representation specific settings
 use_universal_cache: true
@@ -69,7 +69,7 @@ posenc: null
 
 gaussian_kernels: 128
 cutoff_distance: 5.0
-max_neighbors: 16
+max_neighbors: 64  # Match what was used in PyG conversion
 max_distance: 12.0  # Slightly larger for natural products with extended conformations
 distance_bins: 64
 
@@ -87,11 +87,11 @@ lr: 0.0005  # Match working model exactly
 early_stopping_patience: 30
 optimiser_weight_decay: 0.0000000001  # Match working model exactly
 
-# Optimized batch size for node attention
-batch_size: 3072
+# Batch size (number of molecules per batch)
+batch_size: 256  # Reasonable batch size for small molecules
 
 # Dataset size limit (large natural products database)
-max_samples: 1000  # Scaled up for more comprehensive training
+max_samples: null  # Use all samples in chunks
 
 # Memory efficient settings
 use_memory_efficient_attention: true

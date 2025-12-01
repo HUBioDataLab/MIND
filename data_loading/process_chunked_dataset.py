@@ -15,6 +15,15 @@ Usage:
         --data-path ../data/proteins/raw_structures_hq_40k \
         --manifest-file ../data/proteins/afdb_clusters/manifest_hq_40k_len512.csv \
         --num-chunks 10
+
+    # COCONUT dataset (no manifest needed, reads from SDF)
+    python data_loading/process_chunked_dataset.py \
+        --config-yaml-path core/pretraining_config_coconut.yaml \
+        --dataset coconut \
+        --data-path ./data \
+        --output-base ./data/COCONUT/processed \
+        --num-chunks 10
+        
 """
 
 import argparse
@@ -245,7 +254,7 @@ def main() -> int:
         "--dataset",
         type=str,
         default=None,
-        choices=["qm9", "lba", "pdb", "rna"],
+        choices=["qm9", "lba", "pdb", "rna", "coconut"],
         help="Dataset type"
     )
     parser.add_argument(
