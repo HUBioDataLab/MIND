@@ -86,9 +86,15 @@ use_universal_cache: true
 max_epochs: 30
 batch_size: 32  # Used for validation/test (training uses dynamic batching)
 use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
+use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
 max_atoms_per_batch: 25000  # Target atoms per batch (smart batch ordering eliminates cache thrashing)
 log_batch_statistics: true  # Print batch composition statistics during training
-batch_stats_log_frequency: 10  # Log every N batches  
+batch_stats_log_frequency: 10  # Log every N batches
+
+# Per-Type Loss Tracking (for multi-domain analysis)
+compute_per_type_losses: true   # ✅ Track losses per dataset type (protein, qm9, etc.)
+log_per_type_frequency: 10      # Log per-type losses every N batches (reduce overhead)  
+
 lr: 0.0005
 early_stopping_patience: 15
 gradient_clip_val: 0.5
