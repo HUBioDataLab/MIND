@@ -4,12 +4,12 @@ dataset_download_dir: ./data/COCONUT/processed  # Base path for chunk detection 
 out_path: ./outputs/universal_pretrain_coconut
 wandb_project_name: esa-universal-pretraining
 wandb_run_name: coconut-chunked-pretraining
-max_epochs: 50
+max_epochs: 100
 gradient_clip_val: 0.5
-monitor_loss_name: train_total_loss
+monitor_loss_name: val_total_loss
 
-num_workers: 4
-molecule_max_atoms: 100  # Match max_node_items for consistency
+num_workers: 6
+molecule_max_atoms: 200  # Match max_node_items for consistency
 
 # Universal representation specific settings
 use_universal_cache: true
@@ -19,12 +19,11 @@ apply_attention_on: node
 graph_dim: 512
 edge_dim: 64
 hidden_dims: [512, 512, 512, 512,512,512,512,512]
-num_heads: [8, 8, 8, 8,8,8,8,8]
+num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "S", "M","S","M","S","P"]
 xformers_or_torch_attn: torch
 norm_type: LN
 use_3d_coordinates: true
-
 use_hierarchical_features: true
 block_embedding_dim: 32
 position_embedding_dim: 16
