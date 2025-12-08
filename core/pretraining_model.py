@@ -69,7 +69,7 @@ class PretrainingConfig:
     debug_verbose: bool = False
     
     # Universal molecular configs
-    atom_types: int = 119  # Maximum atom types (universal periodic table)
+    atom_types: int = 121  # Maximum atom types (119 real elements + 1 virtual atom + 1 mask token)
     bond_types: int = 4    # Single, double, triple, aromatic
     molecule_max_atoms: int = 500  # Maximum atoms per molecular system
     
