@@ -29,14 +29,19 @@ This document provides brief descriptions of each code file in the data processi
 
 5. Train model
    └─> core/train_pretrain.py
-       ├─> Single-Domain Training:
+       ├─> Single-Domain Training (no dynamic batching):
        │   ├─> LazyUniversalDataset (loads chunks on-demand with LRU cache)
        │   ├─> ChunkAwareSampler (chunk-level shuffling, sequential I/O)
-       │   └─> DataLoader (batches samples efficiently)
+       │   └─> DataLoader (fixed batch_size=32)
+       │
+       ├─> Single-Domain Training (with dynamic batching):
+       │   ├─> LazyUniversalDataset (loads chunks + metadata)
+       │   ├─> ImprovedDynamicBatchSampler (atom-aware variable batch size)
+       │   └─> DataLoader (max_atoms_per_batch=25000)
        │
        └─> Multi-Domain Training (proteins + small molecules + metabolites + RNA):
            ├─> LazyUniversalDataset (loads chunks + metadata on-demand)
-           ├─> RotationalCacheSampler (atom-balanced rotations, cross-modal mixing)
+           ├─> ImprovedDynamicBatchSampler (cross-modal mixing, atom-balanced)
            └─> DataLoader (mixed batches with balanced atom distribution)
 ```
 ---
@@ -440,7 +445,7 @@ Memory-efficient dataset class that loads PyTorch Geometric data on-demand from 
 - **Cache Management**: Automatically handles chunk loading/eviction. No manual cache management needed.
 - **Metadata Support**: Optional metadata loading enables atom-aware sampling for multi-domain training
 - **Used by**: Training scripts (`core/train_pretrain.py`)
-- **Works with**: `ChunkAwareSampler` and `RotationalCacheSampler` for optimized sampling
+- **Works with**: `ChunkAwareSampler` and `ImprovedDynamicBatchSampler` for optimized sampling
 
 ---
 
@@ -506,104 +511,192 @@ Epoch 1:
 
 ---
 
-## `data_loading/rotational_cache_sampler.py`
+## `data_loading/improved_dynamic_sampler.py`
 
 ### Purpose
-Atom-aware rotational sampler for **multi-domain training** (training on mixed molecular datasets: proteins + small molecules + metabolites + RNA). Ensures balanced atom distribution across dataset types while maintaining efficient disk I/O.
+**Default batch sampler** for atom-aware dynamic batching. Creates batches based on total atom count (not fixed sample count), ensuring consistent GPU memory usage across varying molecule sizes.
 
-### Key Concept: Atom-Balanced Rotations
+### Key Concept: Atom-Based Dynamic Batching
 
-**Problem**: 
-- Training on mixed datasets (proteins + small molecules) creates imbalanced batches
-- Large proteins dominate small molecules → gradient imbalance
-- Random sampling → poor disk I/O
+**Problem with Fixed Batch Size**:
+```
+Fixed batch_size=32:
+  Batch 1: [protein_1 (2000 atoms), ..., protein_32 (1500 atoms)]
+           → Total: ~50,000 atoms → GPU OUT OF MEMORY! 
 
-**Solution**: **Rotational atom-aware sampling**:
-1. Group chunks by dataset type (protein chunks, molecule chunks, etc.)
-2. Create **rotations** where each rotation contains chunks from different types
-3. Balance rotations by **atom count**, not sample count
-4. Shuffle samples within rotation for cross-modal mixing
+  Batch 2: [molecule_1 (20 atoms), ..., molecule_32 (18 atoms)]
+           → Total: ~700 atoms → GPU 1% utilization, inefficient! 
+```
+
+**Solution: Atom-Based Dynamic Batching**:
+```
+max_atoms_per_batch=25,000:
+  Batch 1: [protein_1, protein_2, ..., protein_12]
+           → Total: ~24,500 atoms → Optimal GPU usage 
+           → Sample count: 12 (variable)
+
+  Batch 2: [molecule_1, molecule_2, ..., molecule_1000]
+           → Total: ~24,800 atoms → Optimal GPU usage 
+           → Sample count: 1000 (variable)
+```
 
 ### How It Works
 
-**Rotation Creation**:
+**Batch Creation Flow** (function: `__iter__()`):
 ```
-Target: 50,000 atoms per rotation
-Ratios: 70% proteins, 20% molecules, 10% metabolites
+┌─────────────────────────────────────────────────────────────────┐
+│ Step 1: _organize_samples_by_chunk()                            │
+│   - Group samples by their chunk                                │
+│   - Apply subset filtering (train/val/test split)               │
+│   - Shuffle within chunk if enabled                             │
+│   Output: {chunk_0: [idx1, idx2, ...], chunk_1: [...], ...}     │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              │                               │
+              ▼                               ▼
+┌─────────────────────────┐     ┌─────────────────────────────────┐
+│ enable_cross_modal=False│     │   enable_cross_modal=True       │
+│ _create_batches_standard│     │ _create_batches_cross_modal     │
+│ (single dataset type)   │     │ (mixed dataset types)           │
+└─────────────────────────┘     └─────────────────────────────────┘
+              │                               │
+              └───────────────┬───────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Output: List of batches, each batch is list of sample indices   │
+│   [[idx1, idx2, ...], [idx50, idx51, ...], ...]                │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-Rotation 0:
-  - Protein chunks: 35,000 atoms (70%)
-  - Molecule chunks: 10,000 atoms (20%)
-  - Metabolite chunks: 5,000 atoms (10%)
-  Total: 50,000 atoms
+**Standard Mode** (function: `_create_batches_standard()`):
+```
+Input: samples_by_chunk (grouped by chunk)
 
-Rotation 1:
-  - Protein chunks: 35,000 atoms
-  - Molecule chunks: 10,000 atoms
-  - Metabolite chunks: 5,000 atoms
+Step 1: Shuffle chunk order (if enabled)
+  chunk_order = [chunk_2, chunk_0, chunk_1]  (randomized)
+
+Step 2: Process each chunk sequentially (cache-friendly!)
+  
+  Processing chunk_2:
+    current_batch = [], current_atoms = 0, max_atoms = 25,000
+    
+    sample_200: 1500 atoms → batch=[200], atoms=1500
+    sample_201: 1800 atoms → batch=[200,201], atoms=3300
+    ...
+    sample_215: 1600 atoms → 24500 + 1600 = 26100 > 25000!
+                           → BATCH FULL! Save & start new
+    
+  Processing chunk_0: (same logic, next batches)
+  Processing chunk_1: (same logic, next batches)
+
+Output: All batches maintain chunk locality → ~99% cache hit rate
+```
+
+**Cross-Modal Mode** (function: `_create_batches_cross_modal()`):
+```
+Input: samples_by_chunk (from multiple dataset types)
+
+Step 1: Group chunks by type
+  chunks_by_type = {
+    'protein': [chunk_0, chunk_1],
+    'qm9': [chunk_10, chunk_11, chunk_12],
+    'metabolite': [chunk_20]
+  }
+
+Step 2: Calculate proportions from dataset sizes
+  proportions = {protein: 35%, qm9: 57%, metabolite: 8%}
+
+Step 3: Interleave samples proportionally
+  Round 1: [prot1, prot2, prot3, mol1, mol2, mol3, mol4, mol5, met1]
+  Round 2: [prot4, prot5, prot6, mol6, mol7, mol8, mol9, mol10, met2]
   ...
 
-Rotation N: (until all chunks consumed)
+Step 4: Create batches from mixed stream (same atom-limit logic)
+  Result: Each batch contains mixed molecule types!
 ```
-
-**Training Process**:
-```
-Epoch 0:
-  Rotation order: [rotation_3, rotation_7, rotation_0, ...]  (shuffled)
-  
-  Process rotation_3:
-    - Load protein chunks (sequential)
-    - Load molecule chunks (sequential)
-    - Load metabolite chunks (sequential)
-    - Shuffle ALL samples from rotation → mixed batches!
-    - Batch 1: [protein_1, molecule_5, protein_2, metabolite_1, ...]
-    - Batch 2: [molecule_3, protein_4, metabolite_2, ...]
-    - Cross-modal mixing achieved!
-  
-  Process rotation_7:
-    - ...
-```
-
-### Atom-Aware Balancing
-
-**Why atom count, not sample count?**
-- Proteins: ~500 atoms per sample
-- Small molecules: ~20 atoms per sample
-- **Sample-based balancing**: 1 protein = 25 molecules → gradient dominated by proteins
-- **Atom-based balancing**: 50K protein atoms + 50K molecule atoms → balanced gradients
 
 ### Key Functions
 
-- `__init__()`: Initializes sampler with multi-domain config
-- `_build_chunk_groups()`: Groups chunks by dataset type, collects metadata
-- `_create_atom_based_rotations()`: Creates atom-balanced rotations
-- `__iter__()`: Generates sample indices with cross-modal mixing
+- `__init__()`: Validates dataset has metadata, sets up parameters
+- `_get_atom_count_fast()`: Gets atom count from metadata (no disk access!)
+- `_organize_samples_by_chunk()`: Groups samples by chunk with subset filtering
+- `_create_batches_standard()`: Creates batches for single-domain (chunk-sequential)
+- `_create_batches_cross_modal()`: Creates mixed batches for multi-domain
+- `__iter__()`: Main entry point, yields batches for one epoch
 - `set_epoch()`: Updates epoch for reproducible shuffling
 
+### Why Metadata is Required
+
+```
+Old approach (DynamicChunkAwareBatchSampler):
+  - Get atom count by loading sample from disk
+  - 100,000 samples = 100,000 disk reads
+  - Batch creation time: ~5-10 minutes 
+
+New approach (ImprovedDynamicBatchSampler):
+  - Get atom count from JSON metadata
+  - 100,000 samples = RAM reads only
+  - Batch creation time: ~1-2 seconds 
+```
+
 ### Notes
-- **Requires**: Metadata files (run `create_chunk_metadata.py` first)
-- **Metadata Loading**: Dataset must be initialized with `load_metadata=True`
-- **Cache Validation**: Warns if rotation requires more chunks than cache limit
-- **Cross-Modal Mixing**: Shuffles samples within rotation to ensure mixed batches
-- **Used by**: Multi-domain training (proteins + small molecules + metabolites + RNA)
+- **Requires**: Metadata files (run `python data_loading/create_chunk_metadata.py`)
+- **Default sampler**: Used when `use_dynamic_batching=True` in config
+- **Cache-friendly**: Standard mode processes chunks sequentially
+- **Cross-modal mixing**: Multi-domain mode ensures balanced dataset representation
+- **Used by**: Both single-domain and multi-domain training
+
+---
+
+## `data_loading/dynamic_chunk_sampler.py` (Legacy)
+
+### Purpose
+Legacy batch sampler for dynamic batching. **Superseded by `ImprovedDynamicBatchSampler`** which is faster and more efficient.
+
+### Why It's Legacy
+
+| Feature | DynamicChunkAwareBatchSampler  | ImprovedDynamicBatchSampler |
+|---------|--------------------------------|-----------------------------|
+| Atom count source | Disk access (slow)   | Metadata JSON (fast)        |
+| Batch creation    | ~5-10 minutes        | ~1-2 seconds                |
+| Metadata required | Optional (fallback)  | Required (no fallback)      |
+| Batch reordering  | Complex optimization | Simple, efficient           |
+
+### When to Use
+- **Don't use**: For new training runs
+- **Fallback only**: Set `use_improved_sampler: false` in config if metadata unavailable
+
+### Notes
+- **Status**: Kept for backward compatibility
+- **Config flag**: `use_improved_sampler: false` to enable this sampler
+- **Recommendation**: Generate metadata and use `ImprovedDynamicBatchSampler` instead
 
 ---
 
 ## Training Flow Summary
 
-**Single-Domain Training** (one dataset type):
+**Single-Domain Training (Fixed Batch Size)**:
 ```
 1. LazyUniversalDataset: Loads chunks on-demand with LRU cache
 2. ChunkAwareSampler: Shuffles chunk order, reads sequentially
-3. DataLoader: Batches samples efficiently
-4. Training: Each epoch sees different chunk order, sufficient randomness
+3. DataLoader: Fixed batch_size (e.g., 32 samples per batch)
+4. Training: Simple, good for small molecules with similar sizes
 ```
 
-**Multi-Domain Training** (mixed datasets):
+**Single-Domain Training (Dynamic Batching)**:
 ```
-1. LazyUniversalDataset: Loads chunks on-demand, loads metadata
-2. RotationalCacheSampler: Creates atom-balanced rotations
-3. DataLoader: Batches samples with cross-modal mixing
-4. Training: Balanced atom distribution, mixed batches, efficient I/O
+1. LazyUniversalDataset: Loads chunks + metadata
+2. ImprovedDynamicBatchSampler: Variable batch size based on atoms
+3. DataLoader: max_atoms_per_batch (e.g., 25,000 atoms per batch)
+4. Training: Optimal GPU usage, handles varying molecule sizes
+```
+
+**Multi-Domain Training (Mixed Datasets)**:
+```
+1. LazyUniversalDataset: Loads chunks + metadata from all dataset types
+2. ImprovedDynamicBatchSampler: Cross-modal mixing with proportional sampling
+3. DataLoader: Mixed batches (proteins + molecules + metabolites in same batch)
+4. Training: Balanced gradients, better generalization across domains
 ```
 

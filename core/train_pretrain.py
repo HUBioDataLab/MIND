@@ -31,7 +31,6 @@ from core.batch_statistics_callback import BatchStatisticsCallback
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes
 from data_loading.chunk_sampler import ChunkAwareSampler
-from data_loading.rotational_cache_sampler import RotationalCacheSampler
 from data_loading.dynamic_chunk_sampler import DynamicChunkAwareBatchSampler
 from data_loading.improved_dynamic_sampler import ImprovedDynamicBatchSampler
 from torch_geometric.transforms import Compose
