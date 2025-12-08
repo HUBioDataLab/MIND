@@ -50,8 +50,9 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
     
     # Add MLM transform if MLM is in pretraining tasks
     if "mlm" in config.pretraining_tasks:
+        mask_ratio = getattr(config, 'mlm_mask_ratio', 0.15)
         transforms.append(MaskAtomTypes(
-            mask_ratio=0.15,
+            mask_ratio=mask_ratio,
             mask_token=0  # Assuming 0 is the mask token
         ))
     

@@ -33,6 +33,7 @@ multi_domain:
   # - chunk_dir: Parent directory containing chunked .pt files
   # - atom_ratio: Target percentage of atoms from this dataset type (will be normalized)
   datasets:
+    #! Atom_ratio and chunk_range is not used, maybe we can add it in the future.
     pdb:
       enabled: true
       chunk_dir: "/home/yusuf/data/proteins/processed_graphs_40k"  # Base name (chunks are {this}_chunk_0, etc.)
@@ -40,13 +41,13 @@ multi_domain:
       chunk_range: [0, 9]  # Use chunks 0-9
     
     qm9:
-      enabled: true  # ✅ QM9 chunks ready!
+      enabled: true  # QM9 chunks ready!
       chunk_dir: "/home/arin/tryout_mind/mind_try_merge/MIND/data_loading/qm9_chunks"
       atom_ratio: 30  # 30% of atoms from QM9
       chunk_range: null  # Use all chunks (or specify [0, 4] for chunks 0-4)
     
     metabolite:
-      enabled: false  # ⏳ Not yet available
+      enabled: false  # Not yet available
       chunk_dir: "../data/metabolites/processed_chunks"
       atom_ratio: 10  # 10% of atoms from metabolites
     
@@ -61,7 +62,7 @@ multi_domain:
       atom_ratio: 0
   
   # Rotational Sampling Parameters
-  target_atoms_per_rotation: 50000  # Target total atoms per rotation (adjust based on GPU RAM)
+  target_atoms_per_rotation: 50000  #! Not used anymore. Target total atoms per rotation (adjust based on GPU RAM) 
   max_cache_chunks: 10              # Maximum chunks in LRU cache (adjust based on system RAM)
   fallback_to_single_domain: true   # If metadata missing, fall back to ChunkAwareSampler
 
@@ -101,19 +102,19 @@ gradient_clip_val: 0.5
 optimiser_weight_decay: 1.0e-10
 monitor_loss_name: "train_total_loss"
 use_bfloat16: true  # Required for flash_varlen
-accelerator: gpu
-devices: 1  # Use single GPU (will be GPU 6 via CUDA_VISIBLE_DEVICES)
+accelerator: gpu #! Not used
+devices: 1  # Use single GPU (will be GPU 6 via CUDA_VISIBLE_DEVICES) #! Not used
 precision: bfloat16  # Required for flash_varlen
-num_sanity_val_steps: 0
-val_check_interval: 1.0  # Run validation at end of each epoch
-fast_dev_run: false
+num_sanity_val_steps: 0 
+val_check_interval: 1.0  # Run validation at end of each epoch #! Not used
+fast_dev_run: false #! Not used
 
 # -------------------------
 # Model Mimarisi (ESA)
 # -------------------------
 apply_attention_on: node
 graph_dim: 256
-edge_dim: 64
+edge_dim: 64 #! Not used
 hidden_dims: [256, 256, 256, 256, 256, 256, 256, 256]
 num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "M", "S", "M", "S", "P", "P"]
@@ -121,7 +122,7 @@ xformers_or_torch_attn: flash_varlen  # ⚡ Padding-free for mixed sizes (CORREC
 norm_type: LN
 use_3d_coordinates: true
 set_max_items: 0
-triu_attn_mask: false
+triu_attn_mask: false #! Not used
 
 # -------------------------
 # MLP Ayarları
@@ -146,7 +147,7 @@ pma_residual_dropout: 0.0
 # -------------------------
 # 3D Geometrik Parametreler
 # -------------------------
-molecule_max_atoms: null
+molecule_max_atoms: null #! Not used in chunked datasets.
 gaussian_kernels: 128
 cutoff_distance: 5.0
 max_neighbors: 64
@@ -161,31 +162,24 @@ task_weights:
   long_range_distance: 1.5
   short_range_distance: 1.0
   mlm: 0.3
-mlm_mask_ratio: 0.15
-temperature: 0.2
+mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task
+temperature: 0.2 #! Not used
 
 # -------------------------
 # Yeni Kod Yapısı İçin Gerekli Diğer Parametreler
 # -------------------------
-max_block_types: 150
-max_position_types: 15
-max_entity_types: 6
-block_embedding_dim: 32
-position_embedding_dim: 16
-entity_embedding_dim: 8
-use_hierarchical_features: false
-max_atomic_num: 118
-rwse_dim: 24
-lap_dim: 4
-mlp_inter_dim: 128
-pma_num_outputs: 32
-max_node_items: 2000
-max_edge_items: 4000
-output_dim: 1
-posenc: null
-use_memory_efficient_attention: true
-attention_dropout: 0.1
-preserve_universal_blocks: true
+max_block_types: 150 #! Not used
+max_position_types: 15 #! Not used
+max_entity_types: 6 #! Not used
+block_embedding_dim: 32 #! Not used
+position_embedding_dim: 16 #! Not used
+entity_embedding_dim: 8 #! Not used
+use_hierarchical_features: false #! Not used
+max_atomic_num: 118 #! Not used
+rwse_dim: 24 #! Not used
+lap_dim: 4 #! Not used
+mlp_inter_dim: 128 #! Not used
+pma_num_outputs: 32 #! Not used
 
 # ===================================================================
 # Quick Start Guide

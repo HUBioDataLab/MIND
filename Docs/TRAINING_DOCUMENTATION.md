@@ -49,10 +49,10 @@ CUDA_VISIBLE_DEVICES=6 python -m core.train_pretrain \
    │   - load_metadata=False          │
    │   - max_cache_chunks=3           │ Single-Domain (no dynamic batching):
    └─> Return dataset                 ├─> ChunkAwareSampler
-                                      │   - Sequential chunk reading
-                                      │   - Chunk-level shuffling
-                                      │   - Fixed batch_size=32
-                                      └─> GeometricDataLoader
+   │                                   │   - Sequential chunk reading
+   │                                   │   - Chunk-level shuffling
+   │                                   │   - Fixed batch_size=32
+   │                                   └─> GeometricDataLoader
    │                                   │
    └───────────────────────────────────┘
    │
@@ -144,7 +144,8 @@ data_loading/
 ├── lazy_universal_dataset.py      # Lazy loading dataset
 ├── improved_dynamic_sampler.py    # Improved dynamic batch sampler (default)
 ├── dynamic_chunk_sampler.py       # Legacy dynamic atom-aware batching
-└── chunk_sampler.py               # Single-domain chunk sampler
+├── chunk_sampler.py               # Single-domain chunk sampler
+└── create_chunk_metadata.py       # Generate metadata for atom-aware sampling
 
 esa/
 ├── masked_layers.py               # ESA backbone (Set Transformer)
@@ -186,6 +187,7 @@ Main training script that orchestrates pretraining pipeline. Handles dataset loa
 ```bash
 # Multi-domain training
 CUDA_VISIBLE_DEVICES=6 nohup python -m core.train_pretrain     --config-yaml-path core/pretraining_config_multidomain.yaml > mind_training.log 2>&1 &
+``` 
 
 ### Notes
 - **Called by**: Users via CLI for training
@@ -205,10 +207,12 @@ Defines the pretraining model architecture, including universal molecular encode
 
 ### Key Functionality
 - Universal molecular encoding (works for proteins, small molecules, metabolites, RNA)
-- 3D geometric features via GaussianLayer
+- SE(3) invariant 3D geometric features via GaussianLayer
 - ESA backbone (Set Transformer) for attention-based learning
 - Multiple pretraining tasks: long-range distance, short-range distance, MLM
-- PyTorch Lightning integration (training_step, validation_step, configure_optimizers)
+- Per-type loss tracking for multi-domain analysis
+- PyTorch Lightning integration (training_step, validation_step, test_step, configure_optimizers)
+- 8-bit AdamW optimizer for memory efficiency
 
 ### Key Classes
 
@@ -221,13 +225,38 @@ Defines the pretraining model architecture, including universal molecular encode
 ### Key Functions
 
 - `UniversalMolecularEncoder.forward()`: Encodes nodes with atomic features and 3D geometry
+- `UniversalMolecularEncoder._compute_geometric_features()`: Computes SE(3) invariant features (coordination, distances)
+- `UniversalMolecularEncoder._compute_chemical_coordination()`: Computes true chemical bond coordination numbers
 - `PretrainingESAModel.forward()`: Forward pass (encode → ESA backbone → return embeddings)
 - `PretrainingESAModel.training_step()`: Computes pretraining losses and logs metrics
 - `PretrainingESAModel.validation_step()`: Computes validation losses
-- `PretrainingESAModel.configure_optimizers()`: Sets up optimizer (AdamW) and learning rate scheduler
+- `PretrainingESAModel.test_step()`: Computes test losses
+- `PretrainingESAModel._compute_per_type_losses()`: Computes losses separately per dataset type (multi-domain)
+- `PretrainingESAModel.configure_optimizers()`: Sets up 8-bit AdamW optimizer with cosine LR schedule
 - `PretrainingTasks.long_range_distance_loss()`: Long-range distance prediction loss
 - `PretrainingTasks.short_range_distance_loss()`: Short-range distance prediction loss
 - `PretrainingTasks.mlm_loss()`: Masked language modeling loss
+
+### SE(3) Invariant Geometric Features
+
+The encoder computes rotation and translation invariant features:
+```
+1. Chemical coordination: True bond count from molecular graph (sp3≈4, sp2≈3, sp≈2)
+2. Close coordination: Spatial neighbors within ~3Å (likely bonded)
+3. Distance coordination: Medium range neighbors within cutoff (~6Å)
+4. Min distance: Closest neighbor distance
+5. Mean distance: Average close neighbor distance
+6. Gaussian RBF: Radial basis functions for edge distances
+```
+
+### Per-Type Loss Tracking (Multi-Domain)
+
+For multi-domain training, losses can be tracked separately per dataset type:
+```python
+# Config
+compute_per_type_losses: bool = True
+log_per_type_frequency: int = 10
+```
 
 ### Input/Output
 
@@ -245,4 +274,6 @@ Defines the pretraining model architecture, including universal molecular encode
 - **3D coordinates**: Required for distance prediction tasks, optional for MLM-only training
 - **Universal encoding**: Works across all molecular domains (proteins, small molecules, metabolites, RNA)
 - **Task weights**: Configurable via `config.task_weights` dict
+- **Optimizer**: Uses `bitsandbytes.optim.AdamW8bit` for 8-bit training (memory efficient)
+- **LR Schedule**: Cosine decay with 10% warmup, decays from 1.0 to 0.1
 

@@ -324,9 +324,7 @@ Converts raw PDB/CIF protein structure files to universal molecular representati
 - Handles alternate atom locations and filters hydrogen atoms
 - **14-Atom Uniform Representation** (feature branch: `feature/14-atom-uniform-representation`)
 
-### 14-Atom Uniform Representation (Experimental)
-
-> **Status**: Available in `feature/14-atom-uniform-representation` branch, not yet merged to main.
+### 14-Atom Uniform Representation
 
 **Problem: Sequence Leakage in MLM Training**
 ```
