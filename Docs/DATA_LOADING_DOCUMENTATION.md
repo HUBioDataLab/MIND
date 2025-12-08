@@ -322,6 +322,41 @@ Converts raw PDB/CIF protein structure files to universal molecular representati
 - Supports manifest-based file filtering (AlphaFold naming convention)
 - Configurable heteroatom inclusion (ligands, ions, etc.)
 - Handles alternate atom locations and filters hydrogen atoms
+- **14-Atom Uniform Representation** (feature branch: `feature/14-atom-uniform-representation`)
+
+### 14-Atom Uniform Representation (Experimental)
+
+> **Status**: Available in `feature/14-atom-uniform-representation` branch, not yet merged to main.
+
+**Problem: Sequence Leakage in MLM Training**
+```
+Standard representation:
+  GLY (Glycine):     4 atoms  (N, CA, C, O)
+  ALA (Alanine):     5 atoms  (N, CA, C, O, CB)
+  TRP (Tryptophan): 14 atoms  (N, CA, C, O, CB, CG, CD1, ...)
+
+Problem: During MLM, model can "cheat" by counting atoms to infer residue type!
+```
+
+**Solution: 14-Atom Standardization**
+```
+Every residue = 4 backbone + 10 sidechain = 14 atoms (fixed)
+
+GLY: 4 backbone + 0 real sidechain + 10 virtual atoms → 14 atoms
+ALA: 4 backbone + 1 real sidechain +  9 virtual atoms → 14 atoms
+TRP: 4 backbone + 10 real sidechain + 0 virtual atoms → 14 atoms
+
+Virtual atoms:
+  - Position: CB (or CA for Glycine)
+  - Type: 'V' (generic) - prevents model from inferring residue from virtual type
+  - pos_code: V1, V2, ..., V10
+```
+
+**Key Functions (14-atom mode)**:
+- `_standardize_residue_to_14_atoms()`: Main standardization function
+- `_sort_sidechain_atoms()`: Canonical ordering for consistency
+- `_get_virtual_atom_type()`: Returns generic 'V' to prevent leakage
+- `_get_cb_or_ca_position()`: Position for virtual atoms
 
 ### Key Functions
 - `load_raw_data()`: Loads protein structure files, optionally filtered by manifest CSV
@@ -346,6 +381,7 @@ Converts raw PDB/CIF protein structure files to universal molecular representati
 - **Entity Indexing**: Protein residues have `entity_idx=0`, heteroatoms have `entity_idx=1`
 - **Filtering**: Skips hydrogen atoms and alternate locations (keeps only primary or 'A' location)
 - **Error Handling**: Skips files that cannot be parsed and continues processing
+- **14-Atom Mode**: Enable with `use_14atom_uniform=True` (prevents MLM sequence leakage)
 
 ---
 
