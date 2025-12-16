@@ -149,7 +149,9 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             print(f"   Multi-domain sampling will fall back to single-domain mode.")
         
         # Create LazyUniversalDataset with metadata loading
-        load_metadata = len(enabled_types) > 1  # Only load metadata if truly multi-domain
+        # Load metadata if multi-domain OR if improved sampler is enabled (requires metadata)
+        use_improved_sampler = getattr(config, 'use_improved_sampler', True)
+        load_metadata = len(enabled_types) > 1 or use_improved_sampler
         
         # Add metadata search paths (for cases where we can't write to original chunk directories)
         metadata_search_paths = []
