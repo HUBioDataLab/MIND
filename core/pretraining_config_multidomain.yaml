@@ -36,15 +36,15 @@ multi_domain:
     #! Atom_ratio and chunk_range is not used, maybe we can add it in the future.
     pdb:
       enabled: true
-      chunk_dir: "/home/yusuf/data/proteins/processed_graphs_40k"  # Base name (chunks are {this}_chunk_0, etc.)
-      atom_ratio: 70  # 70% of atoms from proteins
-      chunk_range: [0, 9]  # Use chunks 0-9
+      chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks
+      atom_ratio: 70  
+      chunk_range: [0, 9]  # Use all 10 chunks
     
     qm9:
       enabled: true  # QM9 chunks ready!
       chunk_dir: "/home/arin/tryout_mind/mind_try_merge/MIND/data_loading/qm9_chunks"
-      atom_ratio: 30  # 30% of atoms from QM9
-      chunk_range: null  # Use all chunks (or specify [0, 4] for chunks 0-4)
+      atom_ratio: 30  
+      chunk_range: null
     
     metabolite:
       enabled: false  # Not yet available
@@ -72,7 +72,7 @@ multi_domain:
 # -------------------------
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
-dataset_download_dir: "/home/yusuf/data/proteins/processed_graphs_40k"
+dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform chunks
 
 # -------------------------
 # Data Loading Settings
@@ -88,7 +88,7 @@ max_epochs: 30
 batch_size: 32  # Used for validation/test (training uses dynamic batching)
 use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
 use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
-max_atoms_per_batch: 25000  # Target atoms per batch (smart batch ordering eliminates cache thrashing)
+max_atoms_per_batch: 5000  # Target atoms per batch (smart batch ordering eliminates cache thrashing)
 log_batch_statistics: true  # Print batch composition statistics during training
 batch_stats_log_frequency: 10  # Log every N batches
 

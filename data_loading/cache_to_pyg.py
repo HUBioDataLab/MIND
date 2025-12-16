@@ -41,7 +41,10 @@ ELEMENT_TO_ATOMIC_NUMBER = {
     'Tb': 65, 'Dy': 66, 'Ho': 67, 'Er': 68, 'Tm': 69, 'Yb': 70, 'Lu': 71,
     'Hf': 72, 'Ta': 73, 'W': 74, 'Re': 75, 'Os': 76, 'Ir': 77, 'Pt': 78,
     'Au': 79, 'Hg': 80, 'Tl': 81, 'Pb': 82, 'Bi': 83, 'Po': 84, 'At': 85,
-    'Rn': 86
+    'Rn': 86,
+    # Virtual atom for 14-atom uniform representation
+    # All virtual atoms share the same type to prevent sequence leakage
+    'V': 120,       # Generic virtual atom (used for padding in 14-atom representation)
 }
 DEFAULT_ATOMIC_NUMBER = 6  # Carbon
 
