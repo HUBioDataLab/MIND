@@ -54,7 +54,7 @@ def _get_adapter_factory(dataset_name: str) -> Tuple[type, str]:
         return COCONUTAdapter, './data'
     elif dataset_name == 'rna':
         from data_loading.adapters.rna_adapter import RNAAdapter
-        return RNAAdapter, './data/filtered_rna_cifs'
+        return RNAAdapter, './data/rna/raw_structures'
     elif dataset_name == 'pdb':
         from data_loading.adapters.protein_adapter import ProteinAdapter
         return ProteinAdapter, '../data/proteins/raw_structures_hq'

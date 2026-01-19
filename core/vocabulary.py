@@ -208,6 +208,118 @@ def map_lba_block_symbols_to_get(block_symbol: str) -> str:
     # Return mapped symbol or default to '?' for unknown symbols
     return lba_to_get_mapping.get(block_symbol, '?')
 
+
+def map_rna_block_symbols_to_get(block_symbol: str) -> str:
+    """
+    Map RNA block symbols to GET vocabulary codes
+    
+    Args:
+        block_symbol: RNA block symbol (e.g., 'A', 'U', 'G', 'C', or modified bases)
+        
+    Returns:
+        GET vocabulary code
+    """
+    # Mapping from RNA block symbols to GET vocabulary
+    rna_to_get_mapping = {
+        # Standard RNA bases (single letter to GET RNA codes)
+        'A': 'RA',     # Adenine
+        'U': 'RU',     # Uracil
+        'G': 'RG',     # Guanine
+        'C': 'RC',     # Cytosine
+        
+        # Modified RNA bases (map to closest standard base or keep as-is)
+        'PSU': 'RU',   # Pseudouridine -> Uracil
+        'I': 'RG',     # Inosine -> Guanine
+        '1MA': 'RA',   # 1-methyladenosine -> Adenine
+        '5MC': 'RC',   # 5-methylcytosine -> Cytosine
+        '7MG': 'RG',   # 7-methylguanosine -> Guanine
+        'M2G': 'RG',   # N2-methylguanosine -> Guanine
+        'OMC': 'RC',   # 2'-O-methylcytidine -> Cytosine
+        'OMG': 'RG',   # 2'-O-methylguanosine -> Guanine
+        'YG': 'RG',    # Wybutosine -> Guanine
+        'H2U': 'RU',   # Dihydrouridine -> Uracil
+        
+        # Full names (sometimes present in CIF files)
+        'ADE': 'RA',   # Adenine
+        'URA': 'RU',   # Uracil
+        'GUA': 'RG',   # Guanine
+        'CYT': 'RC',   # Cytosine
+        
+        # DNA bases (in case they appear in RNA structures)
+        'DA': 'RA',    # Deoxyadenosine
+        'DT': 'RU',    # Deoxythymidine (treat as Uracil)
+        'DG': 'RG',    # Deoxyguanosine
+        'DC': 'RC',    # Deoxycytidine
+    }
+    
+    # Return mapped symbol or default to '?' for unknown symbols
+    return rna_to_get_mapping.get(block_symbol, '?')
+
+
+def map_rna_position_codes_to_get(pos_code: str) -> str:
+    """
+    Map RNA position codes to GET vocabulary codes
+    
+    Args:
+        pos_code: RNA position code (e.g., "P", "O5'", "C5'", "N1", etc.)
+        
+    Returns:
+        GET vocabulary code
+    """
+    # RNA nucleotides have a standard structure:
+    # - Phosphate backbone: P, O5', O3', OP1, OP2
+    # - Sugar: C1', C2', C3', C4', C5', O2', O4'
+    # - Base: N1, N2, N3, N4, N6, N7, N9, O2, O4, O6, C2, C4, C5, C6, C8
+    
+    rna_to_get_mapping = {
+        # Phosphate backbone
+        'P': 'A',      # Phosphorus -> A (analogous to N backbone)
+        'OP1': 'A',    # Phosphate oxygen 1
+        'OP2': 'A',    # Phosphate oxygen 2
+        'O5\'': 'B',   # 5' oxygen -> B (analogous to CA)
+        'O3\'': 'B',   # 3' oxygen -> B
+        
+        # Sugar ring
+        'C1\'': 'G',   # Sugar carbon 1' -> G (analogous to C)
+        'C2\'': 'G',   # Sugar carbon 2'
+        'C3\'': 'G',   # Sugar carbon 3'
+        'C4\'': 'G',   # Sugar carbon 4'
+        'C5\'': 'E',   # Sugar carbon 5' -> E (analogous to CB)
+        'O2\'': 'D',   # 2' hydroxyl (RNA-specific) -> D
+        'O4\'': 'D',   # Sugar oxygen 4' -> D
+        
+        # Base atoms - Purines (A, G)
+        'N9': 'Z',     # Base attachment point -> Z
+        'C8': 'Z',     # Purine C8
+        'N7': 'Z',     # Purine N7
+        'C5': 'H',     # Base carbon -> H
+        'C6': 'H',     # Base carbon
+        'N1': 'H',     # Base nitrogen
+        'C2': 'H',     # Base carbon
+        'N3': 'H',     # Base nitrogen
+        'C4': 'H',     # Base carbon
+        'N6': 'P',     # Amino group (A) -> P
+        'O6': 'P',     # Carbonyl (G) -> P
+        'N2': 'P',     # Amino group (G) -> P
+        
+        # Base atoms - Pyrimidines (U, C)
+        'N1': 'Z',     # Base attachment point for pyrimidines
+        'C2': 'H',     # Base carbon
+        'O2': 'D',     # Carbonyl
+        'N3': 'H',     # Base nitrogen
+        'C4': 'H',     # Base carbon
+        'O4': 'D',     # Carbonyl (U)
+        'N4': 'P',     # Amino group (C)
+        'C5': 'H',     # Base carbon
+        'C6': 'H',     # Base carbon
+        
+        # Default fallback
+        '': 'm',       # Empty -> mask
+    }
+    
+    # Return mapped code or default to "'" (base) for unknown RNA-specific codes
+    return rna_to_get_mapping.get(pos_code, "'")
+
 # =============================================================================
 # ENTITY TYPE MAPPINGS
 # =============================================================================
