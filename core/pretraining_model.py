@@ -14,6 +14,7 @@ from esa.utils.norm_layers import BN, LN
 from esa.masked_layers import ESA
 from esa.mlp_utils import SmallMLP, GatedMLPMulti
 from data_loading.gaussian import GaussianLayer
+from torch_scatter import scatter_add, scatter_min
 
 from esa.utils.reporting import (
     get_cls_metrics_binary_pt,
@@ -228,7 +229,7 @@ class UniversalMolecularEncoder(nn.Module):
         
         # Try to get edge_index from batch data
         assert hasattr(batch, 'edge_index') and batch.edge_index is not None, "Edge index is required for chemical coordination computation"
-        from torch_scatter import scatter_add
+        # from torch_scatter import scatter_add
         
         edge_index = batch.edge_index
         batch_idx = getattr(batch, 'batch', None)
@@ -348,7 +349,7 @@ class UniversalMolecularEncoder(nn.Module):
             medium_mask = (edge_distances < self.config.cutoff_distance) & (edge_distances > 0.5)
             
             # Count neighbors per node using scatter operations
-            from torch_scatter import scatter_add
+            # from torch_scatter import scatter_add
             num_nodes = len(x)
             
             # Count close neighbors
@@ -378,7 +379,7 @@ class UniversalMolecularEncoder(nn.Module):
                 close_dists = edge_distances[close_indices]
                 
                 # Min distance per node (scatter_reduce with min operation)
-                from torch_scatter import scatter_min, scatter_add
+                # from torch_scatter import scatter_min, scatter_add
                 min_distances_sparse, _ = scatter_min(close_dists, close_src, dim=0, dim_size=num_nodes)
                 
                 # Mean distance per node
@@ -496,7 +497,7 @@ class UniversalMolecularEncoder(nn.Module):
             edge_rbf = edge_rbf_4d.squeeze(0).squeeze(0)  # [num_edges, gaussian_kernels]
             
             # Vectorized aggregation using scatter operations
-            from torch_scatter import scatter_add
+            # from torch_scatter import scatter_add
             
             # Initialize RBF features for all nodes
             gaussian_kernels = self.config.gaussian_kernels
@@ -812,6 +813,7 @@ class PretrainingESAModel(pl.LightningModule):
             if edge_attr is not None:
                 h = torch.cat((h, edge_attr.float()), dim=1)
 
+            """
             if self.node_edge_mlp is None:
                 self.node_edge_mlp = SmallMLP(
                     in_dim=h.shape[1],
@@ -823,7 +825,64 @@ class PretrainingESAModel(pl.LightningModule):
                 ).to(h.device)
 
             device = node_embeddings.device
-            h = self.node_edge_mlp(h.to(device))
+            h = self.node_edge_mlp(h.to(device)) """
+
+            # ============================================================
+            # HYBRID MLP SELECTION (RNA vs PROTEIN)
+            # ============================================================
+            # 1. RNA/Büyük Molekül Tespiti (Encoder'daki mantığın aynısı)
+            is_rna = False
+            if hasattr(batch, 'dataset_type'):
+                dataset_type = batch.dataset_type
+                if isinstance(dataset_type, (list, tuple)):
+                    is_rna = any(str(dt).upper() == 'RNA' for dt in dataset_type)
+                elif isinstance(dataset_type, str):
+                    is_rna = dataset_type.upper() == 'RNA'
+            
+            # Atom sayısına göre kontrol
+            num_atoms = x.size(0)
+            use_sparse_computation = is_rna or (num_atoms > 500)
+
+            device = node_embeddings.device
+            h = h.to(device)
+
+            # 2. İki Farklı Yol: RNA için Ayrı, Protein için Ayrı MLP
+            if use_sparse_computation:
+                # --- YOL A: RNA & BÜYÜK MOLEKÜLLER (YENİ) ---
+                # RNA için özel "rna_node_edge_mlp" oluşturuyoruz.
+                # Bu, eski checkpointleri bozmaz.
+                if not hasattr(self, 'rna_node_edge_mlp') or self.rna_node_edge_mlp is None:
+                    self.rna_node_edge_mlp = SmallMLP(
+                        in_dim=h.shape[1],
+                        inter_dim=128,
+                        out_dim=self.config.hidden_dims[0],
+                        use_ln=False,
+                        dropout_p=0,
+                        num_layers=max(2, self.config.num_mlp_layers), # RNA için en az 2 katman
+                    ).to(device)
+                
+                h = self.rna_node_edge_mlp(h)
+                
+            else:
+                # --- YOL B: PROTEIN & KÜÇÜK MOLEKÜLLER (ESKİ/LEGACY) ---
+                # Orijinal "node_edge_mlp" ismini koruyoruz.
+                # Böylece eski eğitilmiş modeller hata vermez.
+                if self.node_edge_mlp is None:
+                    # Eski mantık: Katman sayısı config'e bağlı
+                    target_num_layers = self.config.num_mlp_layers if self.config.num_mlp_layers > 1 else self.config.num_mlp_layers + 1
+                    
+                    self.node_edge_mlp = SmallMLP(
+                        in_dim=h.shape[1],
+                        inter_dim=128,
+                        out_dim=self.config.hidden_dims[0],
+                        use_ln=False,
+                        dropout_p=0,
+                        num_layers=target_num_layers,
+                    ).to(device)
+
+                h = self.node_edge_mlp(h)
+            # ============================================================
+
             edge_index = edge_index.to(device)
             batch_mapping = batch_mapping.to(device)
 
