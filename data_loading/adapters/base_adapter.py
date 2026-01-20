@@ -22,7 +22,7 @@ class BaseAdapter(ABC):
     
     @abstractmethod
     def load_raw_data(self, data_path: str, max_samples: int = None, **kwargs) -> List[Any]:
-        """Load raw data from source (QM9, PDB, LBA, etc.)"""
+        """Load raw data from source (QM9, PDB, LBA, RNA etc.)"""
         pass
     
     @abstractmethod

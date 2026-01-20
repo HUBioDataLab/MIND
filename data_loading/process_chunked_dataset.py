@@ -97,9 +97,9 @@ def validate_arguments(args: argparse.Namespace) -> Tuple[bool, str]:
         return False, "--dataset is required (or must be in config)"
     if args.data_path is None:
         return False, "--data-path is required"
-    # Manifest file only required for PDB dataset
-    if args.dataset == 'pdb' and args.manifest_file is None:
-        return False, "--manifest-file is required for PDB dataset"
+    # Manifest file only required for PDB and RNA dataset
+    if args.dataset in ['pdb', 'rna'] and args.manifest_file is None:
+        return False, f"--manifest-file is required for {args.dataset.upper()} dataset"
     if args.output_base is None:
         return False, "--output-base is required (or 'dataset_download_dir' must be in config)"
     
@@ -160,8 +160,8 @@ def process_chunk(chunk_idx: int, args: argparse.Namespace) -> bool:
         "--chunk-index", str(chunk_idx),
     ]
     
-    # Only add manifest file for PDB dataset
-    if args.dataset == 'pdb' and args.manifest_file:
+    # Only add manifest file for PDB and RNA dataset
+    if args.dataset in ['pdb', 'rna'] and args.manifest_file:
         cache_cmd.extend(["--manifest-file", str(args.manifest_file)])
     
     if args.force:

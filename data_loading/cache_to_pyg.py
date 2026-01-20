@@ -327,7 +327,13 @@ class OptimizedUniversalCOCONUTDataset(OptimizedUniversalDataset):
                         transform, pre_transform, pre_filter)
 
 class OptimizedUniversalRNADataset(OptimizedUniversalDataset):
-    """RNA Dataset using cached PyTorch Geometric tensors."""
+    """
+    RNA Dataset using cached PyTorch Geometric tensors.
+    
+    RNA-specific optimizations:
+    - Larger cutoff distance (8.0Å) for base pairing interactions
+    - Fewer max neighbors (32) as RNA has sparser structure than proteins
+    """
 
     def __init__(
         self,
@@ -335,8 +341,8 @@ class OptimizedUniversalRNADataset(OptimizedUniversalDataset):
         universal_cache_path: Optional[str] = None,
         max_samples: Optional[int] = None,
         molecule_max_atoms: Optional[int] = None,
-        cutoff_distance: float = 6.0,  # RNA-specific: slightly larger
-        max_neighbors: int = 20,  # RNA-specific: fewer neighbors
+        cutoff_distance: float = 8.0,  # Changed from 6.0 to 8.0 for base pairing
+        max_neighbors: int = 32,       # Changed from 20 to 32 for consistency
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         pre_filter: Optional[Callable] = None
@@ -344,9 +350,9 @@ class OptimizedUniversalRNADataset(OptimizedUniversalDataset):
         if root is None:
             root = os.path.join(os.path.dirname(__file__), 'processed', 'rna_optimized')
         if universal_cache_path is None:
-            universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_rna.pkl')
-        super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
-                        transform, pre_transform, pre_filter)
+            universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_rna_all.pkl')
+        super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, 
+                        cutoff_distance, max_neighbors, transform, pre_transform, pre_filter)
 
 
 if __name__ == "__main__":

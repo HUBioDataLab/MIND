@@ -1,0 +1,124 @@
+# ===================================================================
+# MIND Project - RNA Pretraining Configuration
+# ===================================================================
+
+# -------------------------
+# Genel ve Çıktı Ayarları
+# -------------------------
+seed: 42
+out_path: "outputs/rna_pretrain"
+wandb_project_name: "MIND-Project-Pretraining"
+wandb_run_name: "rna-pretrain-run-1"
+
+# -------------------------
+# Veri Seti Ayarları
+# -------------------------
+dataset: RNA
+universal_cache_path: "data/rna/cache/universal_rna_all.pkl"
+dataset_download_dir: "data/rna/processed_graphs"
+num_workers: 0 #8
+max_samples: null # Process all RNA structures, set to a number for testing
+use_universal_cache: true
+
+# -------------------------
+# RNA-SPECIFIC: Size filtering to prevent OOM
+# -------------------------
+molecule_max_atoms: 5000  # Filter out extremely large RNA structures (>5000 atoms)
+# 60,769 atoms is too large! This filters that out. 
+# not: burayı daha sonra küçültücem, sonra büyük rna ları datasetten çıkarıcam
+
+# -------------------------
+# Eğitim Parametreleri
+# -------------------------
+max_epochs: 30
+batch_size: 1 #8
+lr: 0.0003 #5
+early_stopping_patience: 15
+gradient_clip_val: 0.5 
+optimiser_weight_decay: 1.0e-10
+monitor_loss_name: "train_total_loss"
+use_bfloat16: false 
+accelerator: auto
+devices: auto
+precision: 16
+num_sanity_val_steps: 0
+fast_dev_run: false
+
+# -------------------------
+# Model Mimarisi (ESA)
+# -------------------------
+apply_attention_on: node
+graph_dim: 192 #[256]
+edge_dim: 96
+hidden_dims: [192, 192, 192, 192, 192, 192] #[256, 256, 256, 256, 256, 256, 256, 256]
+num_heads: [8, 8, 8, 8, 8, 8] #[16, 16, 16, 16, 16, 16, 16, 16]
+layer_types: ["M", "S", "M", "S", "M", "S"] #["M", "S", "M", "S", "M", "S", "P", "P"]
+xformers_or_torch_attn: torch
+norm_type: LN
+use_3d_coordinates: true
+set_max_items: 5000  # CRITICAL FIX: Increased from 1500 to 5000 to handle large RNA #0
+triu_attn_mask: false
+
+# -------------------------
+# MLP Ayarları
+# -------------------------
+use_mlps: true
+mlp_hidden_size: 1024
+num_mlp_layers: 3
+mlp_type: standard
+mlp_dropout: 0.1
+use_mlp_ln: false
+pre_or_post: pre
+
+# -------------------------
+# Dropout Ayarları
+# -------------------------
+sab_dropout: 0.08 #0.1
+mab_dropout: 0.08 #0.1
+pma_dropout: 0.05
+attn_residual_dropout: 0.08 #0.1
+pma_residual_dropout: 0.1
+
+# -------------------------
+# 3D Geometrik Parametreler (RNA-specific adjustments)
+# -------------------------
+# molecule_max_atoms: 3000 #null
+gaussian_kernels: 64 #128
+cutoff_distance: 12.0  # RNA has longer-range interactions (base pairing, stacking) 8
+max_neighbors: 48     # RNA typically has fewer neighbors than proteins 32
+max_distance: 25.0    # Increased for RNA tertiary structure interactions
+distance_bins: 16 #5
+
+# -------------------------
+# Ön-Eğitim Görevleri (RNA-optimized)
+# -------------------------
+pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
+task_weights:
+  long_range_distance: 2.0  # Higher weight for RNA base pairing
+  short_range_distance: 1.0
+  mlm: 0.25  # Slightly lower than protein (4 bases vs 20 amino acids)
+mlm_mask_ratio: 0.25  # Lower masking ratio for RNA (fewer token types) 0.15
+temperature: 0.1 #0.2
+
+# -------------------------
+# Vocabulary and Embedding Parameters
+# -------------------------
+max_block_types: 150      # Same as protein (universal vocabulary)
+max_position_types: 15    # Same as protein
+max_entity_types: 6       # Same as protein
+block_embedding_dim: 32
+position_embedding_dim: 16
+entity_embedding_dim: 8
+use_hierarchical_features: false
+max_atomic_num: 118
+rwse_dim: 24
+lap_dim: 4
+mlp_inter_dim: 128
+pma_num_outputs: 32
+max_node_items: 5000           # RNA structures typically smaller than proteins -1500 1000
+max_edge_items: 10000           # Adjusted proportionally -3000
+output_dim: 1
+posenc: null
+use_memory_efficient_attention: true
+attention_dropout: 0.1
+preserve_universal_blocks: true
