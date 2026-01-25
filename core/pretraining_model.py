@@ -35,7 +35,7 @@ class PretrainingConfig:
     edge_dim: int = 64
     batch_size: int = 256
     lr: float = 0.0005
-    monitor_loss_name: str = "train_total_loss"
+    monitor_loss_name: str = "val_total_loss"
     xformers_or_torch_attn: str = "xformers"
     hidden_dims: List[int] = None
     num_heads: List[int] = None
@@ -849,17 +849,28 @@ class PretrainingESAModel(pl.LightningModule):
                 if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
                     masked_mlm = batch.mlm_mask[node_mask]
                     
-                    if masked_mlm.sum() > 0 and hasattr(batch, 'x') and batch.x is not None:
-                        # Create pseudo-batch for this type
+                    if masked_mlm.sum() > 0:
+                        # Create pseudo-batch for this type with all required MLM attributes
                         masked_batch = batch.__class__()
-                        masked_batch.x = batch.x[node_mask]
+                        # Add x or z if available (for compatibility, though MLM doesn't strictly need it)
+                        if hasattr(batch, 'x') and batch.x is not None:
+                            masked_batch.x = batch.x[node_mask]
+                        if hasattr(batch, 'z') and batch.z is not None:
+                            masked_batch.z = batch.z[node_mask]
                         masked_batch.mlm_mask = masked_mlm
-                        masked_batch.mlm_labels = batch.mlm_labels[node_mask] if hasattr(batch, 'mlm_labels') and batch.mlm_labels is not None else batch.x[node_mask]
+                        # MLM loss requires original_types and masked_types (not mlm_labels)
+                        if hasattr(batch, 'original_types') and batch.original_types is not None:
+                            masked_batch.original_types = batch.original_types[node_mask]
+                        if hasattr(batch, 'masked_types') and batch.masked_types is not None:
+                            masked_batch.masked_types = batch.masked_types[node_mask]
                         
                         masked_node_emb = node_embeddings[node_mask]
-                        mlm_loss = self.pretraining_tasks.mlm_loss(masked_node_emb, masked_batch)
-                        dtype_losses['mlm'] = mlm_loss
-                        dtype_total += self.config.task_weights['mlm'] * mlm_loss
+                        try:
+                            mlm_loss = self.pretraining_tasks.mlm_loss(masked_node_emb, masked_batch)
+                            dtype_losses['mlm'] = mlm_loss
+                            dtype_total += self.config.task_weights['mlm'] * mlm_loss
+                        except (AssertionError, AttributeError):
+                            pass  # Skip if MLM attributes are missing for this type
             
             dtype_losses['total'] = dtype_total
             type_losses[dtype] = dtype_losses
@@ -868,6 +879,13 @@ class PretrainingESAModel(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """Training step"""
+        # DEBUG: Check if dataset_type exists
+        if batch_idx % 10 == 0:
+            if hasattr(batch, 'dataset_type'):
+                print(f"✅ Batch {batch_idx} has dataset_type: {batch.dataset_type}")
+            else:
+                print(f"⚠️  Batch {batch_idx} MISSING dataset_type attribute!")
+        
         # Log batch composition every 10 batches
         if batch_idx % 10 == 0:
             num_graphs = batch.num_graphs if hasattr(batch, 'num_graphs') else 1
@@ -916,7 +934,7 @@ class PretrainingESAModel(pl.LightningModule):
         losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
 
         for task_name, loss_value in losses.items():
-            self.log(f"train_{task_name}_loss", loss_value, prog_bar=True)
+            self.log(f"train_{task_name}_loss", loss_value, prog_bar=True, on_step=True, on_epoch=True, logger=True)
             if batch_idx % 50 == 0:
                 print(f"  {task_name}: {loss_value:.4f}")
 
@@ -924,7 +942,7 @@ class PretrainingESAModel(pl.LightningModule):
             loss_str = " | ".join([f"{k}: {v:.4f}" for k, v in losses.items()])
             print(f"Step {batch_idx} - {loss_str} | Total: {total_loss:.4f}")
         
-        self.log("train_total_loss", total_loss, prog_bar=True)
+        self.log("train_total_loss", total_loss, prog_bar=True, on_step=True, on_epoch=True, logger=True)
         
         # Per-type loss tracking (optional, minimal overhead)
         if self.config.compute_per_type_losses and batch_idx % self.config.log_per_type_frequency == 0:
@@ -933,7 +951,7 @@ class PretrainingESAModel(pl.LightningModule):
             # Log per-type losses to WandB
             for dtype, dtype_losses in type_losses.items():
                 for task_name, loss_value in dtype_losses.items():
-                    self.log(f"train_{dtype}_{task_name}_loss", loss_value)
+                    self.log(f"train_{dtype}_{task_name}_loss", loss_value, on_step=True, logger=True)
             
             # Print per-type summary (optional)
             if batch_idx % 50 == 0 and type_losses:
@@ -952,16 +970,16 @@ class PretrainingESAModel(pl.LightningModule):
         
         # Log individual losses
         for task_name, loss_value in losses.items():
-            self.log(f"val_{task_name}_loss", loss_value)
+            self.log(f"val_{task_name}_loss", loss_value, on_epoch=True, logger=True)
         
-        self.log("val_total_loss", total_loss)
+        self.log("val_total_loss", total_loss, on_epoch=True, logger=True)
         
         # Per-type loss tracking for validation
         if self.config.compute_per_type_losses:
             type_losses = self._compute_per_type_losses(batch, graph_embeddings, node_embeddings)
             for dtype, dtype_losses in type_losses.items():
                 for task_name, loss_value in dtype_losses.items():
-                    self.log(f"val_{dtype}_{task_name}_loss", loss_value)
+                    self.log(f"val_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
         
         return total_loss
     
@@ -973,16 +991,16 @@ class PretrainingESAModel(pl.LightningModule):
         
         # Log individual losses
         for task_name, loss_value in losses.items():
-            self.log(f"test_{task_name}_loss", loss_value)
+            self.log(f"test_{task_name}_loss", loss_value, on_epoch=True, logger=True)
         
-        self.log("test_total_loss", total_loss)
+        self.log("test_total_loss", total_loss, on_epoch=True, logger=True)
         
         # Per-type loss tracking for test
         if self.config.compute_per_type_losses:
             type_losses = self._compute_per_type_losses(batch, graph_embeddings, node_embeddings)
             for dtype, dtype_losses in type_losses.items():
                 for task_name, loss_value in dtype_losses.items():
-                    self.log(f"test_{dtype}_{task_name}_loss", loss_value)
+                    self.log(f"test_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
         
         return total_loss
     

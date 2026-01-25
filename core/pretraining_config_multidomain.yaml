@@ -41,7 +41,7 @@ multi_domain:
       chunk_range: [0, 9]  # Use all 10 chunks
     
     qm9:
-      enabled: true  # QM9 chunks ready!
+      enabled: false  # QM9 chunks ready!
       chunk_dir: "/home/arin/tryout_mind/mind_try_merge/MIND/data_loading/qm9_chunks"
       atom_ratio: 30  
       chunk_range: null
@@ -100,7 +100,7 @@ lr: 0.0005
 early_stopping_patience: 15
 gradient_clip_val: 0.5
 optimiser_weight_decay: 1.0e-10
-monitor_loss_name: "train_total_loss"
+monitor_loss_name: "val_total_loss"
 use_bfloat16: true  # Required for flash_varlen
 accelerator: gpu #! Not used
 devices: 1  # Use single GPU (will be GPU 6 via CUDA_VISIBLE_DEVICES) #! Not used

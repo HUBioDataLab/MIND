@@ -102,8 +102,8 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         """Get atom count from metadata (FAST - no disk access)"""
         try:
             metadata = self.dataset.get_sample_metadata(global_idx)
-            if metadata and 'num_nodes' in metadata:
-                return metadata['num_nodes']
+            if metadata and 'num_atoms' in metadata:
+                return metadata['num_atoms']
         except Exception as e:
             raise RuntimeError(
                 f"Failed to get atom count for sample {global_idx}. "

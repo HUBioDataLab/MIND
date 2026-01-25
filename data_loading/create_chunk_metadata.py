@@ -149,6 +149,7 @@ def create_chunk_metadata(chunk_pt_file: str, overwrite: bool = False) -> Dict[s
         bucket = assign_bucket(num_atoms)
         
         # Append to metadata
+        # Note: num_atoms includes virtual atoms for 14-atom protein representation
         metadata['samples'].append({
             'idx': i,
             'num_atoms': num_atoms,

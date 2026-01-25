@@ -124,8 +124,8 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
             try:
                 global_idx = self.subset_indices[idx] if self.subset_indices is not None else idx
                 metadata = self.dataset.get_sample_metadata(global_idx)
-                if metadata and 'num_nodes' in metadata:
-                    atom_count = metadata['num_nodes']
+                if metadata and 'num_atoms' in metadata:
+                    atom_count = metadata['num_atoms']
                     self._atom_count_cache[idx] = atom_count
                     return atom_count
             except:

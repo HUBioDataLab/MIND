@@ -210,13 +210,17 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         if not chunk_pt_files:
             raise FileNotFoundError(f"No processed .pt files found in chunk directories")
         
-        # Create LazyUniversalDataset (no metadata for single-domain)
+        # Determine if metadata is needed
+        use_improved_sampler = getattr(config, 'use_improved_sampler', True)
+        load_metadata = use_improved_sampler  # ImprovedDynamicBatchSampler requires metadata
+        
+        # Create LazyUniversalDataset
         full_dataset = LazyUniversalDataset(
             chunk_pt_files=chunk_pt_files,
             transform=transforms,
             max_cache_chunks=3,
             verbose=True,
-            load_metadata=False  # No metadata needed for single-domain
+            load_metadata=load_metadata
         )
         
         print(f"📊 Caching strategy: {len(chunk_pt_files)} chunks will be loaded into RAM")
@@ -612,7 +616,7 @@ def train_universal_pretraining(
     callbacks = [
         ModelCheckpoint(
             dirpath=output_dir,
-            filename="best-checkpoint-{epoch:02d}-{train_total_loss:.4f}",
+            filename="best-checkpoint-{epoch:02d}-{val_total_loss:.4f}",
             monitor=config.monitor_loss_name,
             mode="min",
             save_top_k=1,
