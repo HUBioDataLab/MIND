@@ -275,6 +275,25 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                 max_neighbors=getattr(config, 'max_neighbors', 32),
                 transform=transforms
             )
+
+        elif dataset_name.upper() == 'RNA':
+            from data_loading.cache_to_pyg import OptimizedUniversalRNADataset
+            max_samples = getattr(config, 'max_samples', None)
+            
+            if max_samples:
+                print(f"📊 Loading {max_samples:,} RNA samples from universal cache...")
+            else:
+                print(f"📊 Loading all RNA samples from universal cache...")
+            
+            full_dataset = OptimizedUniversalRNADataset(
+                root=dataset_dir,
+                universal_cache_path=getattr(config, 'universal_cache_path', None),
+                max_samples=max_samples,
+                molecule_max_atoms=getattr(config, 'molecule_max_atoms', None),
+                cutoff_distance=getattr(config, 'cutoff_distance', 8.0),  # RNA-specific
+                max_neighbors=getattr(config, 'max_neighbors', 32),       # RNA-specific
+                transform=transforms
+            )
             
         elif dataset_name.upper() == 'COCONUT':
             from data_loading.cache_to_pyg import OptimizedUniversalCOCONUTDataset
