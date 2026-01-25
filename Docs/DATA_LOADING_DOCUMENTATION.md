@@ -241,7 +241,7 @@ Orchestrates the chunked dataset processing pipeline for large-scale datasets. S
 ```bash
 # With config file (recommended)
 python data_loading/process_chunked_dataset.py \
-    --config-yaml-path core/pretraining_config_protein.yaml \
+    --config-yaml-path core/pretraining_config_multidomain.yaml \
     --data-path ../data/proteins/raw_structures_hq_40k \
     --manifest-file ../data/proteins/afdb_clusters/manifest_hq_40k.csv \
     --num-chunks 50
@@ -266,6 +266,27 @@ python data_loading/process_chunked_dataset.py \
 - Supports all dataset types: QM9, LBA, PDB (protein)
 - Chunked processing enables handling datasets that don't fit in RAM
 - Output directories follow pattern: `{output_base}_chunk_{index}/`
+
+### Hybrid Edge Construction (Salad-inspired)
+
+**NEW FEATURE:** MIND now supports hybrid edge construction inspired by the [Salad paper](https://www.nature.com/articles/s42256-025-01100-z) (Nature Machine Intelligence, 2025).
+
+**3-Tier Edge System:**
+- **Tier 1**: Sequence-based edges (backbone connectivity, ±k residues)
+- **Tier 2**: Filtered spatial edges (radius graph with duplicate removal)
+- **Tier 3**: Random long-range edges (inverse distance³ weighting)
+
+**Enable in Config:**
+```yaml
+# pretraining_config_protein.yaml
+use_hybrid_edges: true
+sequence_neighbors_k: 3
+max_spatial_neighbors: 48
+num_random_edges: 8
+random_edge_min_distance: 10.0
+```
+
+**📖 For detailed documentation**, see [HYBRID_EDGE_CONSTRUCTION.md](./HYBRID_EDGE_CONSTRUCTION.md)
 
 ---
 

@@ -88,7 +88,7 @@ max_epochs: 30
 batch_size: 32  # Used for validation/test (training uses dynamic batching)
 use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
 use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
-max_atoms_per_batch: 5000  # Target atoms per batch (smart batch ordering eliminates cache thrashing)
+max_atoms_per_batch: 12500  # Target atoms per batch (smart batch ordering eliminates cache thrashing)
 log_batch_statistics: true  # Print batch composition statistics during training
 batch_stats_log_frequency: 10  # Log every N batches
 
@@ -149,10 +149,23 @@ pma_residual_dropout: 0.0
 # -------------------------
 molecule_max_atoms: null #! Not used in chunked datasets.
 gaussian_kernels: 128
-cutoff_distance: 5.0
-max_neighbors: 64
-max_distance: 20.0
+cutoff_distance: 5.0 #? Graph representation max distance is n angstrom. (used .pkl -> .pt)
+max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
+max_distance: 20.0  #? Used in training.
 distance_bins: 5
+
+# -------------------------
+# Hybrid Edge Construction (Salad-inspired)
+# -------------------------
+# Enables 3-tier hybrid edge construction:
+# Tier 1: Sequence-based edges (backbone connectivity)
+# Tier 2: Spatial edges (filtered to exclude Tier 1)
+# Tier 3: Random long-range edges
+use_hybrid_edges: true
+sequence_neighbors_k: 3          # Tier 1: Connect residue i to i±k neighbors in sequence
+max_spatial_neighbors: 48        # Tier 2: Spatial neighbors (reduced from 64, some covered by Tier 1)
+num_random_edges: 8              # Tier 3: Random long-range edges (scaled for proteins <1024 AA)
+random_edge_min_distance: 10.0   # Tier 3: Minimum distance (Å) for random edges
 
 # -------------------------
 # Ön-Eğitim Görevleri

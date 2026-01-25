@@ -72,6 +72,11 @@ class OptimizedUniversalDataset(InMemoryDataset):
         molecule_max_atoms: Optional[int] = None,
         cutoff_distance: float = 5.0,
         max_neighbors: int = 32,
+        use_hybrid_edges: bool = False,
+        sequence_neighbors_k: int = 3,
+        max_spatial_neighbors: int = 48,
+        num_random_edges: int = 8,
+        random_edge_min_distance: float = 10.0,
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         pre_filter: Optional[Callable] = None
@@ -86,6 +91,11 @@ class OptimizedUniversalDataset(InMemoryDataset):
             molecule_max_atoms: Maximum number of atoms per molecule (None for no limit)
             cutoff_distance: Distance cutoff for edge construction
             max_neighbors: Maximum number of neighbors per atom
+            use_hybrid_edges: Enable Salad-inspired 3-tier hybrid edge construction
+            sequence_neighbors_k: Tier 1: Connect residue i to i±k neighbors
+            max_spatial_neighbors: Tier 2: Max spatial neighbors (filtered)
+            num_random_edges: Tier 3: Number of random long-range edges
+            random_edge_min_distance: Tier 3: Minimum distance for random edges (Å)
             transform: Transform to apply to each sample
             pre_transform: Pre-transform to apply during processing
             pre_filter: Pre-filter to apply during processing
@@ -95,6 +105,11 @@ class OptimizedUniversalDataset(InMemoryDataset):
         self.molecule_max_atoms = molecule_max_atoms
         self.cutoff_distance = cutoff_distance
         self.max_neighbors = max_neighbors
+        self.use_hybrid_edges = use_hybrid_edges
+        self.sequence_neighbors_k = sequence_neighbors_k
+        self.max_spatial_neighbors = max_spatial_neighbors
+        self.num_random_edges = num_random_edges
+        self.random_edge_min_distance = random_edge_min_distance
 
         os.makedirs(root, exist_ok=True)
         super().__init__(root, transform, pre_transform, pre_filter)
@@ -112,7 +127,16 @@ class OptimizedUniversalDataset(InMemoryDataset):
             cache_name += f"_samples_{self.max_samples}"
         if self.molecule_max_atoms:
             cache_name += f"_maxatoms_{self.molecule_max_atoms}"
-        config_sig = f"cutoff_{self.cutoff_distance}_neighbors_{self.max_neighbors}"
+        
+        # Include hybrid edge parameters in cache signature
+        if self.use_hybrid_edges:
+            config_sig = (f"hybrid_seq{self.sequence_neighbors_k}_"
+                         f"spatial{self.max_spatial_neighbors}_"
+                         f"rand{self.num_random_edges}_"
+                         f"mindist{self.random_edge_min_distance}")
+        else:
+            config_sig = f"cutoff_{self.cutoff_distance}_neighbors_{self.max_neighbors}"
+        
         return [f"optimized_{cache_name}_{config_sig}.pt"]
 
     def download(self) -> None:
@@ -194,6 +218,201 @@ class OptimizedUniversalDataset(InMemoryDataset):
             pyg_data = self.pre_transform(pyg_data)
         return pyg_data
 
+    def _build_sequence_edges(
+        self, 
+        block_indices: torch.Tensor, 
+        entity_indices: torch.Tensor, 
+        pos_codes: List[str], 
+        k: int
+    ) -> torch.Tensor:
+        """
+        Build Tier 1: Sequence-based edges (backbone connectivity).
+        Connects residue i to i±1, i±2, ..., i±k neighbors via CA atoms.
+        
+        Args:
+            block_indices: Block (residue) index for each atom
+            entity_indices: Entity (chain) index for each atom
+            pos_codes: Position codes (e.g., 'CA', 'N', 'C', etc.)
+            k: Number of sequence neighbors to connect (±k)
+            
+        Returns:
+            edge_index: [2, num_edges] tensor of sequence-based edges
+        """
+        # Find CA atoms only
+        ca_mask = torch.tensor([code == 'CA' for code in pos_codes], dtype=torch.bool)
+        ca_indices = torch.where(ca_mask)[0]
+        
+        if len(ca_indices) < 2:
+            return torch.empty((2, 0), dtype=torch.long)
+        
+        ca_block_indices = block_indices[ca_indices]
+        ca_entity_indices = entity_indices[ca_indices]
+        
+        edges = []
+        for i, ca_idx in enumerate(ca_indices):
+            current_block = ca_block_indices[i]
+            current_entity = ca_entity_indices[i]
+            
+            # Connect to next k neighbors in sequence
+            for offset in range(1, k + 1):
+                if i + offset < len(ca_indices):
+                    neighbor_block = ca_block_indices[i + offset]
+                    neighbor_entity = ca_entity_indices[i + offset]
+                    
+                    # Only connect within same entity and sequential blocks
+                    if (neighbor_entity == current_entity and 
+                        neighbor_block == current_block + offset):
+                        neighbor_idx = ca_indices[i + offset]
+                        edges.append([ca_idx.item(), neighbor_idx.item()])
+                        edges.append([neighbor_idx.item(), ca_idx.item()])  # Bidirectional
+        
+        if not edges:
+            return torch.empty((2, 0), dtype=torch.long)
+        
+        return torch.tensor(edges, dtype=torch.long).t()
+    
+    def _build_random_edges(
+        self,
+        positions: torch.Tensor,
+        block_indices: torch.Tensor,
+        entity_indices: torch.Tensor,
+        pos_codes: List[str],
+        num_random: int,
+        min_distance: float
+    ) -> torch.Tensor:
+        """
+        Build Tier 3: Random long-range edges with inverse distance³ weighting.
+        
+        Args:
+            positions: Atom positions [N, 3]
+            block_indices: Block index for each atom
+            entity_indices: Entity index for each atom
+            pos_codes: Position codes
+            num_random: Number of random edges to sample per CA atom
+            min_distance: Minimum distance threshold (Å)
+            
+        Returns:
+            edge_index: [2, num_edges] tensor of random long-range edges
+        """
+        # Find CA atoms
+        ca_mask = torch.tensor([code == 'CA' for code in pos_codes], dtype=torch.bool)
+        ca_indices = torch.where(ca_mask)[0]
+        
+        if len(ca_indices) < 2 or num_random == 0:
+            return torch.empty((2, 0), dtype=torch.long)
+        
+        ca_positions = positions[ca_indices]
+        ca_block_indices = block_indices[ca_indices]
+        
+        edges = []
+        for i, ca_idx in enumerate(ca_indices):
+            current_pos = ca_positions[i:i+1]
+            current_block = ca_block_indices[i]
+            
+            # Calculate distances to all other CA atoms
+            distances = torch.norm(ca_positions - current_pos, dim=1)
+            
+            # Filter: exclude self and close neighbors (below min_distance)
+            valid_mask = (distances >= min_distance) & (torch.arange(len(ca_indices)) != i)
+            valid_indices = torch.where(valid_mask)[0]
+            
+            if len(valid_indices) == 0:
+                continue
+            
+            valid_distances = distances[valid_indices]
+            
+            # Inverse distance³ weighting (prevents division by zero with min_distance filter)
+            weights = 1.0 / (valid_distances ** 3 + 1e-6)
+            weights = weights / weights.sum()  # Normalize
+            
+            # Sample random neighbors
+            num_to_sample = min(num_random, len(valid_indices))
+            sampled_idx = torch.multinomial(weights, num_to_sample, replacement=False)
+            sampled_neighbors = valid_indices[sampled_idx]
+            
+            for neighbor_local_idx in sampled_neighbors:
+                neighbor_global_idx = ca_indices[neighbor_local_idx]
+                edges.append([ca_idx.item(), neighbor_global_idx.item()])
+                edges.append([neighbor_global_idx.item(), ca_idx.item()])  # Bidirectional
+        
+        if not edges:
+            return torch.empty((2, 0), dtype=torch.long)
+        
+        return torch.tensor(edges, dtype=torch.long).t()
+    
+    def _filter_duplicate_edges(
+        self, 
+        edge_index_main: torch.Tensor, 
+        edge_index_to_remove: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Remove edges from edge_index_main that exist in edge_index_to_remove.
+        
+        Args:
+            edge_index_main: Main edge set [2, E1]
+            edge_index_to_remove: Edges to exclude [2, E2]
+            
+        Returns:
+            Filtered edge_index [2, E_filtered]
+        """
+        if edge_index_main.size(1) == 0:
+            return edge_index_main
+        if edge_index_to_remove.size(1) == 0:
+            return edge_index_main
+        
+        # Convert to set of tuples for fast lookup
+        edges_to_remove_set = set(
+            zip(edge_index_to_remove[0].tolist(), edge_index_to_remove[1].tolist())
+        )
+        
+        # Filter main edges
+        filtered_edges = [
+            [src, dst] for src, dst in zip(edge_index_main[0].tolist(), edge_index_main[1].tolist())
+            if (src, dst) not in edges_to_remove_set
+        ]
+        
+        if not filtered_edges:
+            return torch.empty((2, 0), dtype=torch.long)
+        
+        return torch.tensor(filtered_edges, dtype=torch.long).t()
+    
+    def _build_hybrid_edges(
+        self,
+        positions: torch.Tensor,
+        block_indices: torch.Tensor,
+        entity_indices: torch.Tensor,
+        pos_codes: List[str]
+    ) -> torch.Tensor:
+        """
+        Build 3-tier hybrid edge construction (Salad-inspired).
+        
+        Returns:
+            edge_index: [2, num_edges] tensor combining all 3 tiers
+        """
+        # Tier 1: Sequence-based edges (backbone)
+        tier1_edges = self._build_sequence_edges(
+            block_indices, entity_indices, pos_codes, self.sequence_neighbors_k
+        )
+        
+        # Tier 2: Spatial edges (radius graph with duplicate filtering)
+        tier2_edges = radius_graph(
+            positions, r=float(self.cutoff_distance), batch=None, loop=False,
+            max_num_neighbors=int(self.max_spatial_neighbors)
+        )
+        # Filter out Tier 1 edges from Tier 2 to maximize information diversity
+        tier2_edges = self._filter_duplicate_edges(tier2_edges, tier1_edges)
+        
+        # Tier 3: Random long-range edges
+        tier3_edges = self._build_random_edges(
+            positions, block_indices, entity_indices, pos_codes,
+            self.num_random_edges, self.random_edge_min_distance
+        )
+        
+        # Combine all tiers
+        all_edges = torch.cat([tier1_edges, tier2_edges, tier3_edges], dim=1)
+        
+        return all_edges
+
     def _universal_to_pyg(self, mol: UniversalMolecule) -> Optional[Data]:
         """Convert a UniversalMolecule to PyTorch Geometric Data object."""
         try:
@@ -213,10 +432,17 @@ class OptimizedUniversalDataset(InMemoryDataset):
 
             num_atoms = len(atoms)
             if num_atoms > 1:
-                edge_index = radius_graph(
-                    positions, r=float(self.cutoff_distance), batch=None, loop=False,
-                    max_num_neighbors=int(self.max_neighbors)
-                )
+                # Choose edge construction method
+                if self.use_hybrid_edges:
+                    edge_index = self._build_hybrid_edges(
+                        positions, block_indices, entity_indices, pos_codes
+                    )
+                else:
+                    # Legacy: radius graph
+                    edge_index = radius_graph(
+                        positions, r=float(self.cutoff_distance), batch=None, loop=False,
+                        max_num_neighbors=int(self.max_neighbors)
+                    )
                 edge_attr = self._calculate_edge_features(positions, edge_index)
             else:
                 edge_index = torch.empty((2, 0), dtype=torch.long)
@@ -366,6 +592,13 @@ if __name__ == "__main__":
     parser.add_argument("--cutoff", type=float, default=5.0, help="Distance cutoff for edges (Å)")
     parser.add_argument("--max-neighbors", type=int, default=64, help="Maximum neighbors per atom")
     parser.add_argument("--force", action="store_true", help="Force rebuild if output exists")
+    
+    # Hybrid edge construction (Salad-inspired)
+    parser.add_argument("--use-hybrid-edges", action="store_true", help="Enable 3-tier hybrid edge construction")
+    parser.add_argument("--sequence-neighbors-k", type=int, default=3, help="Tier 1: Sequence neighbors (±k)")
+    parser.add_argument("--max-spatial-neighbors", type=int, default=48, help="Tier 2: Max spatial neighbors")
+    parser.add_argument("--num-random-edges", type=int, default=8, help="Tier 3: Random long-range edges")
+    parser.add_argument("--random-edge-min-distance", type=float, default=10.0, help="Tier 3: Min distance (Å)")
 
     args = parser.parse_args()
 
@@ -391,11 +624,29 @@ if __name__ == "__main__":
     }
     
     dataset_class = dataset_classes[args.dataset_type]
-    dataset = dataset_class(
-        root=args.output_dir,
-        universal_cache_path=args.input_pkl,
-        max_samples=args.max_samples,
-        cutoff_distance=args.cutoff,
-        max_neighbors=args.max_neighbors
-    )
-    print(f"✅ Created {args.dataset_type.upper()} dataset: {len(dataset)} samples")
+    
+    # Hybrid edges only for pdb dataset type
+    if args.dataset_type == "pdb" and args.use_hybrid_edges:
+        dataset = dataset_class(
+            root=args.output_dir,
+            universal_cache_path=args.input_pkl,
+            max_samples=args.max_samples,
+            cutoff_distance=args.cutoff,
+            max_neighbors=args.max_neighbors,
+            use_hybrid_edges=True,
+            sequence_neighbors_k=args.sequence_neighbors_k,
+            max_spatial_neighbors=args.max_spatial_neighbors,
+            num_random_edges=args.num_random_edges,
+            random_edge_min_distance=args.random_edge_min_distance
+        )
+        print(f"✅ Created {args.dataset_type.upper()} dataset with HYBRID EDGES: {len(dataset)} samples")
+    else:
+        # Legacy: radius graph
+        dataset = dataset_class(
+            root=args.output_dir,
+            universal_cache_path=args.input_pkl,
+            max_samples=args.max_samples,
+            cutoff_distance=args.cutoff,
+            max_neighbors=args.max_neighbors
+        )
+        print(f"✅ Created {args.dataset_type.upper()} dataset: {len(dataset)} samples")

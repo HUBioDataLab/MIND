@@ -33,26 +33,9 @@ def get_adj_mask_from_edge_index_node(
         mask_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
         edge_mask_fill_value = 0
 
-    # --- FIX: reindex edge_index to [0, max_items) ---
-    unique_nodes = torch.unique(edge_index)
-    node_map = {int(n): i for i, n in enumerate(unique_nodes.tolist())}
-
-    src, dst = edge_index
-    src = torch.tensor([node_map[int(s)] for s in src], device=src.device)
-    dst = torch.tensor([node_map[int(d)] for d in dst], device=dst.device)
-
-    edge_index = torch.stack([src, dst], dim=0)
-
-    #src, dst = edge_index
-
-    if src.max() >= max_items or dst.max() >= max_items:
-        print("EDGE INDEX OUT OF RANGE")
-        print("max_items:", max_items)
-        print("src.max():", src.max().item())
-        print("dst.max():", dst.max().item())
-        raise RuntimeError("edge_index exceeds max_items")
-
-
+    # FIXED: Removed incorrect manual reindexing and premature check
+    # unbatch_edge_index (line 65) handles per-graph reindexing correctly
+    # The check was too early - it ran BEFORE unbatch_edge_index could fix the indices!
 
     adj_mask = torch.full(
         size=(batch_size, max_items, max_items),
