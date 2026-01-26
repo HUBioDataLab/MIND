@@ -318,16 +318,12 @@ class UniversalMolecularEncoder(nn.Module):
             elif isinstance(dataset_type, str):
                 is_rna = dataset_type.upper() == 'RNA'
         
-        # Also check molecule size (RNA structures typically > 500 atoms)
         num_atoms = len(x)
-        is_large_molecule = num_atoms > 500
+        use_sparse_computation = is_rna
         
-        # Use sparse computation for RNA or large molecules (>500 atoms)
-        use_sparse_computation = is_rna or is_large_molecule
-            
-        
-        if use_sparse_computation and num_atoms > 500:
-            print(f"🧬 RNA/Large molecule detected ({num_atoms} atoms) - Using SPARSE geometric features")
+        if use_sparse_computation:
+            if num_atoms > 5000:
+                print(f"🧬 RNA ({num_atoms} atoms) - Using SPARSE geometric features")
             
             # =====================================================================
             # SPARSE COMPUTATION PATH (RNA & Large Molecules)
@@ -436,10 +432,8 @@ class UniversalMolecularEncoder(nn.Module):
         
         else:
             # =====================================================================
-            # ORIGINAL DENSE COMPUTATION PATH (Proteins, Small Molecules, QM9)
+            # DENSE COMPUTATION PATH (Proteins & Small Molecules)
             # =====================================================================
-            print(f"🔬 Small/medium molecule ({num_atoms} atoms) - Using DENSE geometric features")
-            
             # Compute distances and edge types for coordination features
             delta_pos = pos_dense.unsqueeze(1) - pos_dense.unsqueeze(2)
             dist = delta_pos.norm(dim=-1)  # [n_graph, n_node, n_node]

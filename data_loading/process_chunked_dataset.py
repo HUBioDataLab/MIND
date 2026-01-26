@@ -84,6 +84,27 @@ def apply_config_defaults(args: argparse.Namespace, config: Dict) -> None:
     if args.max_neighbors is None and 'max_neighbors' in config:
         args.max_neighbors = config['max_neighbors']
         print(f"  ✓ max_neighbors from config: {args.max_neighbors}")
+    
+    # Hybrid edge parameters (Salad-inspired)
+    if not args.use_hybrid_edges and 'use_hybrid_edges' in config:
+        args.use_hybrid_edges = config['use_hybrid_edges']
+        print(f"  ✓ use_hybrid_edges from config: {args.use_hybrid_edges}")
+    
+    if args.sequence_neighbors_k is None and 'sequence_neighbors_k' in config:
+        args.sequence_neighbors_k = config['sequence_neighbors_k']
+        print(f"  ✓ sequence_neighbors_k from config: {args.sequence_neighbors_k}")
+    
+    if args.max_spatial_neighbors is None and 'max_spatial_neighbors' in config:
+        args.max_spatial_neighbors = config['max_spatial_neighbors']
+        print(f"  ✓ max_spatial_neighbors from config: {args.max_spatial_neighbors}")
+    
+    if args.num_random_edges is None and 'num_random_edges' in config:
+        args.num_random_edges = config['num_random_edges']
+        print(f"  ✓ num_random_edges from config: {args.num_random_edges}")
+    
+    if args.random_edge_min_distance is None and 'random_edge_min_distance' in config:
+        args.random_edge_min_distance = config['random_edge_min_distance']
+        print(f"  ✓ random_edge_min_distance from config: {args.random_edge_min_distance}")
 
 
 def validate_arguments(args: argparse.Namespace) -> Tuple[bool, str]:
@@ -186,6 +207,19 @@ def process_chunk(chunk_idx: int, args: argparse.Namespace) -> bool:
         pyg_cmd.extend(["--cutoff", str(args.cutoff)])
     if args.max_neighbors:
         pyg_cmd.extend(["--max-neighbors", str(args.max_neighbors)])
+    
+    # Hybrid edge parameters (Salad-inspired) - only for PDB/protein datasets
+    if args.dataset == 'pdb' and args.use_hybrid_edges:
+        pyg_cmd.append("--use-hybrid-edges")
+        if args.sequence_neighbors_k is not None:
+            pyg_cmd.extend(["--sequence-neighbors-k", str(args.sequence_neighbors_k)])
+        if args.max_spatial_neighbors is not None:
+            pyg_cmd.extend(["--max-spatial-neighbors", str(args.max_spatial_neighbors)])
+        if args.num_random_edges is not None:
+            pyg_cmd.extend(["--num-random-edges", str(args.num_random_edges)])
+        if args.random_edge_min_distance is not None:
+            pyg_cmd.extend(["--random-edge-min-distance", str(args.random_edge_min_distance)])
+    
     if args.force:
         pyg_cmd.append("--force")
     
@@ -300,7 +334,38 @@ def main() -> int:
         "--max-neighbors",
         type=int,
         default=None,
-        help="Maximum neighbors per node (default: 64)"
+        help="Maximum neighbors per node (default: 64, legacy mode)"
+    )
+    
+    # Hybrid edge parameters (Salad-inspired)
+    parser.add_argument(
+        "--use-hybrid-edges",
+        action="store_true",
+        help="Enable hybrid edge construction (3-tier: sequence + spatial + random)"
+    )
+    parser.add_argument(
+        "--sequence-neighbors-k",
+        type=int,
+        default=None,
+        help="Tier 1: Number of sequence neighbors ±k (default: 3)"
+    )
+    parser.add_argument(
+        "--max-spatial-neighbors",
+        type=int,
+        default=None,
+        help="Tier 2: Maximum spatial neighbors (default: 48)"
+    )
+    parser.add_argument(
+        "--num-random-edges",
+        type=int,
+        default=None,
+        help="Tier 3: Number of random long-range edges (default: 8)"
+    )
+    parser.add_argument(
+        "--random-edge-min-distance",
+        type=float,
+        default=None,
+        help="Tier 3: Minimum distance for random edges in Å (default: 10.0)"
     )
     
     # Control parameters
@@ -329,6 +394,16 @@ def main() -> int:
         args.cutoff = 5.0
     if args.max_neighbors is None:
         args.max_neighbors = 64
+    
+    # Hybrid edge defaults (use_hybrid_edges defaults to False via action="store_true")
+    if args.sequence_neighbors_k is None:
+        args.sequence_neighbors_k = 3
+    if args.max_spatial_neighbors is None:
+        args.max_spatial_neighbors = 48
+    if args.num_random_edges is None:
+        args.num_random_edges = 8
+    if args.random_edge_min_distance is None:
+        args.random_edge_min_distance = 10.0
     
     # Validate arguments
     is_valid, error_msg = validate_arguments(args)
@@ -363,7 +438,16 @@ def main() -> int:
     print(f"Cache dir:      {args.cache_dir}")
     print(f"Output base:    {args.output_base}")
     print(f"Cutoff:         {args.cutoff} Å")
-    print(f"Max neighbors:  {args.max_neighbors}")
+    
+    if args.use_hybrid_edges and args.dataset == 'pdb':
+        print(f"\n🔬 Hybrid Edge Construction (Salad-inspired):")
+        print(f"   ✓ Enabled: 3-tier edge system")
+        print(f"   Tier 1 (Sequence):  ±{args.sequence_neighbors_k} neighbors")
+        print(f"   Tier 2 (Spatial):   {args.max_spatial_neighbors} max neighbors (filtered)")
+        print(f"   Tier 3 (Random):    {args.num_random_edges} edges (>{args.random_edge_min_distance}Å)")
+    else:
+        print(f"Max neighbors:  {args.max_neighbors} (legacy radius graph)")
+    
     print("="*80)
     
     # Process chunks
