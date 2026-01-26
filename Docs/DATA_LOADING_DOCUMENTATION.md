@@ -269,8 +269,6 @@ python data_loading/process_chunked_dataset.py \
 
 ### Hybrid Edge Construction (Salad-inspired)
 
-**NEW FEATURE:** MIND now supports hybrid edge construction inspired by the [Salad paper](https://www.nature.com/articles/s42256-025-01100-z) (Nature Machine Intelligence, 2025).
-
 **3-Tier Edge System:**
 - **Tier 1**: Sequence-based edges (backbone connectivity, ±k residues)
 - **Tier 2**: Filtered spatial edges (radius graph with duplicate removal)
