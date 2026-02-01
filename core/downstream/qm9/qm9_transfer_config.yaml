@@ -1,0 +1,66 @@
+# QM9 Transfer Learning Configuration
+
+seed: 42
+# Set to null or omit to train from scratch (zero weights)
+pretrained_ckpt_path: null  # Path to pretrained checkpoint, or null for training from scratch
+target_name: homo  # QM9 target property: homo, lumo, gap, mu, alpha, etc.
+
+# Dataset
+dataset_dir: ./data/qm9
+train_split: 0.8
+val_split: 0.1
+test_split: 0.1
+max_samples: null  # null for all samples, or set a number
+
+# Training
+batch_size: 7936
+lr: 0.001
+max_epochs: 150
+regression_loss_fn: mae  # mae or mse
+early_stopping_patience: 30
+optimiser_weight_decay: 0.001
+gradient_clip_val: 0.5
+
+# Model
+graph_dim: 512  # Should match pretrained model (if loading checkpoint)
+freeze_encoder: false  # Freeze encoder weights
+freeze_esa: false  # Freeze ESA backbone weights
+
+# Architecture parameters (used when training from scratch)
+hidden_dims: [512, 512, 512, 512]
+num_heads: [8, 8, 8, 8]
+layer_types: ["S", "S", "S", "P"]  # S = SAB, M = MAB, P = PMA
+apply_attention_on: node  # node or edge
+xformers_or_torch_attn: xformers
+use_3d_coordinates: true
+atom_types: 121
+gaussian_kernels: 128
+cutoff_distance: 5.0
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+use_mlps: true
+mlp_hidden_size: 512
+mlp_type: standard
+norm_type: LN
+num_mlp_layers: 3
+pre_or_post: pre
+use_mlp_ln: false
+mlp_dropout: 0.0
+set_max_items: 0
+use_distance_bias: false
+distance_bias_scale: 1.0
+distance_bias_cutoff: 10.0
+
+# Data loading
+num_workers: 4
+
+# Output
+out_path: ./outputs/qm9_transfer
+wandb_project_name: qm9-transfer-learning
+wandb_run_name: qm9-homo-transfer  # Will be overridden dynamically based on target_name
+
+# Precision
+use_bfloat16: false
