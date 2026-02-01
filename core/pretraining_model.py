@@ -733,6 +733,13 @@ class PretrainingESAModel(pl.LightningModule):
         
         self.esa_backbone = ESA(**st_args)
         
+        # Configure distance-based attention bias (optional)
+        if hasattr(config, 'use_distance_bias') and config.use_distance_bias:
+            self.esa_backbone.use_distance_bias = True
+            self.esa_backbone.distance_bias_scale = getattr(config, 'distance_bias_scale', 1.0)
+            self.esa_backbone.distance_bias_cutoff = getattr(config, 'distance_bias_cutoff', 10.0)
+            print(f"✅ Distance-based attention bias enabled: scale={self.esa_backbone.distance_bias_scale}, cutoff={self.esa_backbone.distance_bias_cutoff}Å")
+        
         # Pretraining tasks
         self.pretraining_tasks = PretrainingTasks(config)
         
@@ -910,12 +917,22 @@ class PretrainingESAModel(pl.LightningModule):
                 device=edge_index.device
             )
 
-            h = self.esa_backbone(
+            esa_output = self.esa_backbone(
                 h,
                 local_edge_index,
                 batch_mapping,
-                num_max_items=num_max_items
+                num_max_items=num_max_items,
+                pos=pos
             )
+            
+            # ESA returns (graph_embeddings, node_embeddings_before_pma)
+            graph_emb, node_emb_before_pma = esa_output
+            
+            # For edge attention, we use graph-level embeddings
+            h = graph_emb
+            # For loss, we'd need to reconstruct node-level from edges, but edge attention doesn't have node-level
+            # So we'll use node_embeddings (pre-attention) for edge attention mode
+            h_node_level = node_embeddings
 
         # ============================================================
         # NODE ATTENTION PATH (DOĞRU & AKADEMİK)
@@ -939,25 +956,39 @@ class PretrainingESAModel(pl.LightningModule):
                 max_num_nodes=num_max_items
             )
 
-            # ❗ EDGE YOK
-            h = self.esa_backbone(
+            # Pass pos for distance-based attention bias
+            esa_output = self.esa_backbone(
                 h,
                 edge_index,
                 batch_mapping=batch_mapping,
-                num_max_items=num_max_items
+                num_max_items=num_max_items,
+                pos=pos
             )
+            
+            # ESA returns (graph_embeddings, node_embeddings_before_pma)
+            graph_emb, node_emb_before_pma = esa_output
+            
+            # Use node-level embeddings before PMA for loss computation
+            # node_emb_before_pma is in dense format [batch_size, max_nodes, dim]
+            # Map back to sparse node format
+            if node_emb_before_pma.dim() == 3:
+                h_node_level = node_emb_before_pma[dense_batch_index]
+            else:
+                h_node_level = node_emb_before_pma
+            
+            # graph_emb is for downstream tasks (graph-level)
+            h = graph_emb
 
-            if self.config.is_node_task and h.dim() == 3:
-                h = h[dense_batch_index]
-
-
-        return h, node_embeddings
+        return h, h_node_level
 
     
     def _compute_pretraining_losses(self, batch, graph_embeddings, node_embeddings):
         """Compute all pretraining task losses"""
         losses = {}
-        total_loss = 0.0               
+        total_loss = 0.0
+        
+        # node_embeddings from forward() is pre-PMA node-level embeddings (post-attention, before pooling)
+        # This ensures gradients flow through MHA layers
 
         # Long-range distance learning (global 3D structure)
         if "long_range_distance" in self.config.pretraining_tasks:
@@ -978,14 +1009,12 @@ class PretrainingESAModel(pl.LightningModule):
                 )
                 losses['short_range_distance'] = dist_loss
                 total_loss += self.config.task_weights['short_range_distance'] * dist_loss
-        
 
         # Masked language modeling
         if "mlm" in self.config.pretraining_tasks:
             losses['mlm'] = self.pretraining_tasks.mlm_loss(node_embeddings, batch)
             total_loss += self.config.task_weights['mlm'] * losses['mlm']
         
-
         return losses, total_loss
     
     def _compute_per_type_losses(self, batch, graph_embeddings, node_embeddings):
@@ -1002,6 +1031,7 @@ class PretrainingESAModel(pl.LightningModule):
         type_losses = {}
         unique_types = set(batch.dataset_type) if isinstance(batch.dataset_type, (list, tuple)) else {batch.dataset_type}
         
+        # node_embeddings from forward() is pre-PMA node-level embeddings (post-attention, before pooling)
         # Get device from embeddings (more reliable than batch.x)
         device = node_embeddings.device
         
@@ -1046,7 +1076,7 @@ class PretrainingESAModel(pl.LightningModule):
                         # Random mask (15%)
                         random_mask = (torch.rand(remapped_edge_index.size(1)) < 0.15).to(distances.device)
                         
-                        # Compute loss
+                        # Compute loss using pre-PMA node-level embeddings (post-attention)
                         masked_node_emb = node_embeddings[node_mask]
                         dist_loss = self.pretraining_tasks.short_range_distance_loss(
                             masked_node_emb, remapped_edge_index, distances, random_mask
@@ -1065,6 +1095,7 @@ class PretrainingESAModel(pl.LightningModule):
                     masked_batch.batch = torch.zeros(node_mask.sum(), dtype=torch.long, device=device)
                     masked_batch.num_graphs = 1
                     
+                    # Use pre-PMA node-level embeddings (post-attention)
                     masked_node_emb = node_embeddings[node_mask]
                     long_range_loss = self.pretraining_tasks.long_range_distance_loss(
                         masked_node_emb, masked_batch
@@ -1092,6 +1123,7 @@ class PretrainingESAModel(pl.LightningModule):
                         if hasattr(batch, 'masked_types') and batch.masked_types is not None:
                             masked_batch.masked_types = batch.masked_types[node_mask]
                         
+                        # Use pre-PMA node-level embeddings (post-attention)
                         masked_node_emb = node_embeddings[node_mask]
                         try:
                             mlm_loss = self.pretraining_tasks.mlm_loss(masked_node_emb, masked_batch)
@@ -1099,7 +1131,7 @@ class PretrainingESAModel(pl.LightningModule):
                             dtype_total += self.config.task_weights['mlm'] * mlm_loss
                         except (AssertionError, AttributeError):
                             pass  # Skip if MLM attributes are missing for this type
-            
+
             dtype_losses['total'] = dtype_total
             type_losses[dtype] = dtype_losses
         

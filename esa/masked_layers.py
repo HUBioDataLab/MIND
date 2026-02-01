@@ -19,6 +19,63 @@ from esa.mha_flash_varlen import SABFlashVarlen, PMAFlashVarlen
 from esa.mlp_utils import SmallMLP, GatedMLPMulti
 
 
+def compute_distance_bias(pos, batch_mapping, max_items, distance_scale=1.0, distance_cutoff=10.0, device="cuda:0", use_bfloat16=True):
+    """
+    Compute distance-based attention bias using inverse scale.
+    Far atoms get more negative bias (less attention).
+    
+    Args:
+        pos: [num_nodes, 3] atom positions
+        batch_mapping: [num_nodes] batch indices
+        max_items: maximum nodes per batch
+        distance_scale: scaling factor for distance bias (higher = stronger distance penalty)
+        distance_cutoff: distances beyond this are clamped (Angstroms)
+        device: device to compute on
+        use_bfloat16: whether to use bfloat16 for bias
+    
+    Returns:
+        distance_bias: [batch_size, 1, max_items, max_items] bias matrix
+                      Negative values for far atoms (less attention)
+    """
+    if pos is None:
+        return None
+    
+    batch_size = batch_mapping.max().item() + 1
+    dtype = torch.bfloat16 if use_bfloat16 else torch.float32
+    distance_bias = torch.full(
+        (batch_size, 1, max_items, max_items),
+        fill_value=-99999,  # Very negative for padding
+        device=device,
+        dtype=dtype,
+        requires_grad=False
+    )
+    
+    # Compute pairwise distances for each graph in batch
+    for b in range(batch_size):
+        batch_mask = batch_mapping == b
+        batch_pos = pos[batch_mask]  # [N_b, 3]
+        N_b = batch_pos.shape[0]
+        
+        if N_b == 0:
+            continue
+            
+        # Compute pairwise distances: [N_b, N_b]
+        pos_diff = batch_pos.unsqueeze(0) - batch_pos.unsqueeze(1)  # [N_b, N_b, 3]
+        distances = torch.norm(pos_diff, dim=2)  # [N_b, N_b]
+        
+        # Clamp distances to cutoff
+        distances = torch.clamp(distances, max=distance_cutoff)
+        
+        # Inverse scale: bias = -distance_scale * distance
+        # Far atoms get more negative bias (less attention)
+        bias = -distance_scale * distances
+        
+        # Place in the bias matrix
+        distance_bias[b, 0, :N_b, :N_b] = bias
+    
+    return distance_bias
+
+
 def get_adj_mask_from_edge_index_node(
     edge_index, batch_size, max_items, batch_mapping, xformers_or_torch_attn, use_bfloat16=True, device="cuda:0"
 ):
@@ -550,6 +607,11 @@ class ESA(nn.Module):
         self.set_max_items = set_max_items
         self.use_bfloat16 = use_bfloat16
         
+        # Distance-based attention bias config (optional)
+        self.use_distance_bias = False
+        self.distance_bias_scale = 1.0
+        self.distance_bias_cutoff = 10.0
+        
         layer_tracker = 0
 
         self.encoder = []
@@ -693,7 +755,7 @@ class ESA(nn.Module):
             self.dim_pma = dim_pma
 
 
-    def forward(self, X, edge_index, batch_mapping, num_max_items):
+    def forward(self, X, edge_index, batch_mapping, num_max_items, pos=None):
         
         if self.node_or_edge == "node":
             adj_mask = get_adj_mask_from_edge_index_node(
@@ -712,18 +774,57 @@ class ESA(nn.Module):
                 max_items=num_max_items,
                 xformers_or_torch_attn=self.xformers_or_torch_attn,
                 use_bfloat16=self.use_bfloat16,
-            )    
+            )
+        
+        # Add distance-based attention bias if enabled
+        if self.use_distance_bias and pos is not None:
+            distance_bias = compute_distance_bias(
+                pos=pos,
+                batch_mapping=batch_mapping,
+                max_items=num_max_items,
+                distance_scale=self.distance_bias_scale,
+                distance_cutoff=self.distance_bias_cutoff,
+                device=X.device,
+                use_bfloat16=self.use_bfloat16
+            )
+            
+            if distance_bias is not None:
+                # Combine adj_mask with distance_bias
+                # Check adj_mask dtype to determine backend behavior
+                if adj_mask is None:
+                    # If adj_mask is None (flash_varlen), just use distance_bias
+                    adj_mask = distance_bias
+                elif adj_mask.dtype == torch.bool:
+                    # For torch backend: convert boolean mask to float, then add distance bias
+                    # adj_mask is boolean: True for edge, False for no edge
+                    # Convert to float: 0.0 for edge (True), -99999.0 for no edge (False)
+                    adj_mask_float = (~adj_mask).float() * -99999.0
+                    combined_bias = adj_mask_float + distance_bias
+                    # Convert back to boolean: True if combined_bias > threshold
+                    adj_mask = combined_bias > -50000  # Threshold to distinguish edges from padding
+                else:
+                    # For xformers/flash_varlen: add biases (both are negative for masked/far)
+                    # adj_mask: -99999 for no edge, 0 for edge (or already float)
+                    # distance_bias: negative for far atoms
+                    adj_mask = adj_mask + distance_bias
 
         enc, _, _, _, _ = self.encoder((X, edge_index, batch_mapping, num_max_items, adj_mask))
         if hasattr(self, "dim_pma") and self.dim_hidden[0] != self.dim_pma:
             X = self.out_proj(X)
 
         enc = enc + X
+        
+        # Store node-level embeddings before PMA pooling (for pretraining losses)
+        node_embeddings_before_pma = enc
 
         if hasattr(self, "decoder"):
             out, _, _, _, _ = self.decoder((enc, edge_index, batch_mapping, num_max_items, adj_mask))
             out = out.mean(dim=1)
+            graph_embeddings = F.mish(self.decoder_linear(out))
+            # Return both: graph-level embeddings (for downstream) and node-level embeddings (for pretraining)
+            return graph_embeddings, node_embeddings_before_pma
         else:
             out = enc
-
-        return F.mish(self.decoder_linear(out))
+            graph_embeddings = F.mish(self.decoder_linear(out))
+            # No PMA, so out is already node-level
+            return graph_embeddings, out
