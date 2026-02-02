@@ -47,8 +47,8 @@ multi_domain:
       chunk_range: null
     
     metabolite:
-      enabled: false  # Not yet available
-      chunk_dir: "../data/metabolites/processed_chunks"
+      enabled: true  # Not yet available
+      chunk_dir: "/home/ege/MIND_HuBioDataLab/data/COCONUT/processed"
       atom_ratio: 10  # 10% of atoms from metabolites
     
     rna:
@@ -153,14 +153,6 @@ cutoff_distance: 5.0 #? Graph representation max distance is n angstrom. (used .
 max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
 max_distance: 20.0  #? Used in training.
 distance_bins: 5
-
-# -------------------------
-# Distance-Based Attention Bias (Optional)
-# -------------------------
-# Enables 3D distance-based attention bias: far atoms get less attention
-use_distance_bias: false  # Set to true to enable distance-based attention bias
-distance_bias_scale: 1.0  # Scaling factor for distance bias (higher = stronger distance penalty)
-distance_bias_cutoff: 10.0  # Distances beyond this are clamped (Angstroms)
 
 # -------------------------
 # Hybrid Edge Construction (Salad-inspired)
