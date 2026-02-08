@@ -147,6 +147,17 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                     print(f"⚠️  {dtype.upper()}: No chunks or processed files found in {chunk_dir}")
                 continue
             
+            # Apply chunk_range filter if specified (inclusive [start, end]; null = use all)
+            chunk_range = dtype_config.get('chunk_range')
+            num_chunks_total = len(chunk_dirs)
+            if chunk_range is not None and isinstance(chunk_range, (list, tuple)) and len(chunk_range) >= 2:
+                start, end = int(chunk_range[0]), int(chunk_range[1])
+                chunk_dirs = chunk_dirs[start : end + 1]
+                if not chunk_dirs:
+                    print(f"⚠️  {dtype.upper()}: chunk_range [{start}, {end}] yielded no chunks (have {num_chunks_total} total)")
+                    continue
+                print(f"   📌 {dtype.upper()}: using chunks {start}..{end} ({len(chunk_dirs)} of {num_chunks_total})")
+            
             # Collect .pt files from chunks
             # Only collect the path of the .pt file
             dtype_chunks = []
@@ -689,6 +700,10 @@ def train_universal_pretraining(
         save_dir=output_dir,
     )
     
+    # Validation and logging frequency (from config)
+    val_check_interval = getattr(config, 'val_check_interval', 0.25)
+    log_every_n_steps = getattr(config, 'log_every_n_steps', 1)
+
     # Create trainer with ESA optimizations
     trainer = pl.Trainer(
         max_epochs=config.max_epochs,
@@ -699,8 +714,8 @@ def train_universal_pretraining(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         num_sanity_val_steps=getattr(config, 'num_sanity_val_steps', 0),
-        log_every_n_steps=1,
-        val_check_interval=1.0,
+        log_every_n_steps=log_every_n_steps,
+        val_check_interval=val_check_interval,
     )
     
     print("🚀 Starting training...")
@@ -717,8 +732,10 @@ def train_universal_pretraining(
         print(f"   • Total batches per epoch: {len(train_loader)}")
         print(f"   • Validation batches: {len(val_loader)}")
     
-    print(f"   • Log every step: Yes")
-    print(f"   • Validation every: {trainer.val_check_interval} steps")
+    vi = trainer.val_check_interval
+    val_desc = f"{vi} steps" if isinstance(vi, int) else f"{vi} of epoch ({1/vi:.0f}x per epoch)"
+    print(f"   • Log every N steps: {log_every_n_steps}")
+    print(f"   • Validation: every {val_desc}")
     
     # CRITICAL FIX: Re-apply batch_sampler before training
     # PyTorch Lightning sometimes replaces the custom batch_sampler
