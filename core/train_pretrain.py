@@ -33,6 +33,7 @@ from data_loading.pretraining_transforms import MaskAtomTypes
 from data_loading.chunk_sampler import ChunkAwareSampler
 from data_loading.dynamic_chunk_sampler import DynamicChunkAwareBatchSampler
 from data_loading.improved_dynamic_sampler import ImprovedDynamicBatchSampler
+from data_loading.protein_dynamic_random_edges import OptimizedProteinDynamicRandomEdges
 from torch_geometric.transforms import Compose
 from glob import glob
 
@@ -47,6 +48,27 @@ torch.backends.cudnn.allow_tf32 = True
 def create_pretraining_data_transforms(config: PretrainingConfig):
     """Create data transforms for pretraining"""
     transforms = []
+    
+    # Add dynamic random edges transform if enabled
+    # This generates different random edges each epoch to prevent bias
+    use_dynamic_random_edges = getattr(config, 'use_dynamic_random_edges', False)
+    if use_dynamic_random_edges:
+        num_random_edges = getattr(config, 'num_random_edges', 8)
+        random_edge_min_distance = getattr(config, 'random_edge_min_distance', 10.0)
+        replace_existing = getattr(config, 'replace_existing_random_edges', False)
+        
+        print(f"⚡ Dynamic Random Edges enabled:")
+        print(f"   - Edges per CA atom: {num_random_edges}")
+        print(f"   - Min distance: {random_edge_min_distance}Å")
+        print(f"   - Replace existing: {replace_existing}")
+        print(f"   - Different edges each epoch (prevents bias)")
+        
+        transforms.append(OptimizedProteinDynamicRandomEdges(
+            num_random_edges=num_random_edges,
+            min_distance=random_edge_min_distance,
+            replace_existing_random_edges=replace_existing,
+            seed=None  # None = different edges each epoch
+        ))
     
     # Add MLM transform if MLM is in pretraining tasks
     if "mlm" in config.pretraining_tasks:

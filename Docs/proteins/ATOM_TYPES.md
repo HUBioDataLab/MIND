@@ -41,7 +41,7 @@
 ["Cl", "K", "Na", "I", "Br", "F"]  # Ion channels, modifications
 ```
 
-### Very Rare (<0.1%) ⚠️
+### Very Rare (<0.1%)
 ```python
 ["W", "V", "Cd", "As", "Hg"]  # Exotic metalloproteins
 ```

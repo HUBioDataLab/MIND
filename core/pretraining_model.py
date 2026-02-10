@@ -288,11 +288,11 @@ class UniversalMolecularEncoder(nn.Module):
     
     def _compute_geometric_features(self, x, pos, batch, batch_obj=None):
         """
-        Compute SE(3) invariant geometric features using existing radius graph edges
+        Compute SE(3) invariant geometric features using sparse edge_index computation.
         
-        RNA-SPECIFIC OPTIMIZATION:
-        For RNA structures (>1000 atoms), uses sparse edge_index to avoid OOM errors.
-        For other modalities (proteins, small molecules), uses original dense computation.
+        UNIFIED SPARSE COMPUTATION:
+        All data types (proteins, RNA, small molecules, metabolites) now use sparse 
+        computation for memory efficiency and consistency. Dense path has been removed.
         """
         # Convert to dense format for per-node features
         x_dense, batch_mask = to_dense_batch(x, batch, fill_value=0)
@@ -307,216 +307,118 @@ class UniversalMolecularEncoder(nn.Module):
         edge_index = batch_obj.edge_index
         
         # =====================================================================
-        # RNA-SPECIFIC CHECK: Use sparse computation for large structures
+        # SPARSE COMPUTATION FOR ALL DATA TYPES
         # =====================================================================
-        # Detect RNA by checking dataset_type attribute or molecule size
-        is_rna = False
-        if hasattr(batch_obj, 'dataset_type'):
-            dataset_type = batch_obj.dataset_type
-            if isinstance(dataset_type, (list, tuple)):
-                is_rna = any(dt.upper() == 'RNA' for dt in dataset_type)
-            elif isinstance(dataset_type, str):
-                is_rna = dataset_type.upper() == 'RNA'
-        
+        # All data types now use sparse computation for:
+        # 1. Memory efficiency (O(E) instead of O(N^2))
+        # 2. Speed (scatter operations are GPU-optimized)
+        # 3. Accuracy (no padding artifacts)
         num_atoms = len(x)
-        use_sparse_computation = is_rna
+        use_sparse_computation = True  # Always sparse!
         
-        if use_sparse_computation:
-            if num_atoms > 5000:
-                print(f"🧬 RNA ({num_atoms} atoms) - Using SPARSE geometric features")
-            
-            # =====================================================================
-            # SPARSE COMPUTATION PATH (RNA & Large Molecules)
-            # =====================================================================
-            # Edge distances (sparse - only for connected nodes)
-            edge_src, edge_dst = edge_index[0], edge_index[1]
-            edge_distances = torch.norm(pos[edge_src] - pos[edge_dst], dim=1)  # [num_edges]
-            
-            # SE(3) invariant node-level coordination features
-            # 1. Chemical bond-based coordination (true molecular graph neighbors)
-            chemical_coordination = self._compute_chemical_coordination(x_dense, batch_obj)
-            
-            # 2. Distance-based coordination from radius graph
-            # Count neighbors in different distance shells using edge_distances
-            close_cutoff = getattr(self.config, 'close_cutoff', 3.0)
-            
-            # Create edge masks for different distance ranges
-            close_mask = (edge_distances < close_cutoff) & (edge_distances > 0.5)
-            medium_mask = (edge_distances < self.config.cutoff_distance) & (edge_distances > 0.5)
-            
-            # Count neighbors per node using scatter operations
-            # from torch_scatter import scatter_add
-            num_nodes = len(x)
-            
-            # Count close neighbors
-            close_coordination_sparse = scatter_add(
-                close_mask.float(), edge_src, dim=0, dim_size=num_nodes
-            )
-            
-            # Count medium-range neighbors
-            distance_coordination_sparse = scatter_add(
-                medium_mask.float(), edge_src, dim=0, dim_size=num_nodes
-            )
-            
-            # Convert to dense format [n_graph, n_node]
-            close_coordination, _ = to_dense_batch(close_coordination_sparse, batch, fill_value=0)
-            distance_based_coordination, _ = to_dense_batch(distance_coordination_sparse, batch, fill_value=0)
-            
-            # 3. Distance statistics per node (min and mean of close neighbors)
-            # OPTIMIZED: Vectorized computation instead of per-node loop
-            min_distances_sparse = torch.full((num_nodes,), float('inf'), device=pos.device)
-            mean_distances_sparse = torch.zeros(num_nodes, device=pos.device)
-            count_per_node = torch.zeros(num_nodes, device=pos.device)
-            
-            # Filter to close neighbors only
-            close_indices = torch.where(close_mask)[0]
-            if len(close_indices) > 0:
-                close_src = edge_src[close_indices]
-                close_dists = edge_distances[close_indices]
-                
-                # Min distance per node (scatter_reduce with min operation)
-                # from torch_scatter import scatter_min, scatter_add
-                min_distances_sparse, _ = scatter_min(close_dists, close_src, dim=0, dim_size=num_nodes)
-                
-                # Mean distance per node
-                sum_per_node = scatter_add(close_dists, close_src, dim=0, dim_size=num_nodes)
-                count_per_node = scatter_add(torch.ones_like(close_dists), close_src, dim=0, dim_size=num_nodes)
-                mean_distances_sparse = sum_per_node / (count_per_node + 1e-8)
-            
-            # Replace inf with 0 for nodes with no close neighbors
-            min_distances_sparse[torch.isinf(min_distances_sparse)] = 0.0
-            
-            # Convert to dense format
-            min_distances, _ = to_dense_batch(min_distances_sparse, batch, fill_value=0)
-            mean_distances, _ = to_dense_batch(mean_distances_sparse, batch, fill_value=0)
-            
-            # SE(3) invariant feature combination
-            # Shape: [n_graph, n_node, feature_dim]
-            invariant_features = torch.stack([
-                chemical_coordination,        # True chemical bonds
-                close_coordination,          # Close spatial neighbors (~3Å)
-                distance_based_coordination, # Medium range environment (~cutoff)
-                min_distances,               # Closest neighbor distance
-                mean_distances,              # Average close neighbor distance
-            ], dim=-1)  # [n_graph, n_node, 5]
-            
-            # =====================================================================
-            # Vectorized radius graph RBF computation (GPU-optimized)
-            # =====================================================================
-            # Compute edge types
-            edge_types = x[edge_src] * self.config.atom_types + x[edge_dst]
-            
-            # Apply GaussianLayer to all edges at once
-            edge_dist_3d = edge_distances.unsqueeze(0).unsqueeze(0)  # [1, 1, num_edges]
-            edge_type_3d = edge_types.unsqueeze(0).unsqueeze(0)      # [1, 1, num_edges]
-            
-            edge_rbf_4d = self.gaussian_layer(edge_dist_3d, edge_type_3d)  # [1, 1, num_edges, gaussian_kernels]
-            edge_rbf = edge_rbf_4d.squeeze(0).squeeze(0)  # [num_edges, gaussian_kernels]
-            
-            # Aggregate RBF features to nodes using scatter operations
-            gaussian_kernels = self.config.gaussian_kernels
-            node_rbf_src = scatter_add(edge_rbf, edge_src, dim=0, dim_size=num_nodes)
-            node_rbf_dst = scatter_add(edge_rbf, edge_dst, dim=0, dim_size=num_nodes)
-            
-            # Combine source and destination features
-            node_rbf_combined = node_rbf_src + node_rbf_dst
-            
-            # Convert to dense format
-            gbf_feature, _ = to_dense_batch(node_rbf_combined, batch, fill_value=0)
-            
-            # Apply padding mask
-            padding_mask = x_dense.eq(0)
-            aggregated_edge_features = gbf_feature.masked_fill(
-                padding_mask.unsqueeze(-1), 0.0
-            )
+        # =====================================================================
+        # SPARSE COMPUTATION PATH (ALL DATA TYPES)
+        # =====================================================================
+        # Edge distances (sparse - only for connected nodes)
+        edge_src, edge_dst = edge_index[0], edge_index[1]
+        edge_distances = torch.norm(pos[edge_src] - pos[edge_dst], dim=1)  # [num_edges]
         
-        else:
-            # =====================================================================
-            # DENSE COMPUTATION PATH (Proteins & Small Molecules)
-            # =====================================================================
-            # Compute distances and edge types for coordination features
-            delta_pos = pos_dense.unsqueeze(1) - pos_dense.unsqueeze(2)
-            dist = delta_pos.norm(dim=-1)  # [n_graph, n_node, n_node]
-            
-            # Compute edge types for Gaussian computation
-            edge_type = x_dense.view(n_graph, n_node, 1) * self.config.atom_types + x_dense.view(n_graph, 1, n_node)
-            
-            # SE(3) invariant node-level coordination features
-            # 1. Distance-based neighbors (local environment density)
-            # Use chemically meaningful cutoffs
-            close_cutoff = getattr(self.config, 'close_cutoff', 3.0)   # First coordination shell (~typical bond + van der Waals)
-            medium_cutoff = self.config.cutoff_distance if hasattr(self.config, 'cutoff_distance') else 6.0
-            
-            # Count neighbors in different shells
-            close_mask = (dist < close_cutoff) & (dist > 0.5)     # Close neighbors (likely bonded)
-            medium_mask = (dist < medium_cutoff) & (dist > 0.5)   # Medium range (environment)
-            
-            close_coordination = close_mask.sum(dim=-1).float()    # [n_graph, n_node]
-            distance_based_coordination = medium_mask.sum(dim=-1).float()  # [n_graph, n_node]
-            
-            # 2. Chemical bond-based coordination (true molecular graph neighbors)
-            chemical_coordination = self._compute_chemical_coordination(x_dense, batch_obj)
-            
-            # SE(3) invariant distance statistics per node
-            # Use close_mask for meaningful distance statistics
-            masked_dist = dist.masked_fill(~close_mask, float('inf'))
-            min_distances = masked_dist.min(dim=-1)[0].masked_fill(close_mask.sum(dim=-1) == 0, 0.0)
-            
-            masked_dist_finite = dist.masked_fill(~close_mask, 0.0)
-            mean_distances = masked_dist_finite.sum(dim=-1) / (close_mask.sum(dim=-1) + 1e-8)
-            
-            # SE(3) invariant feature combination
-            # Shape: [n_graph, n_node, feature_dim]
-            invariant_features = torch.stack([
-                chemical_coordination,        # True chemical bonds (sp3≈4, sp2≈3, sp≈2)
-                close_coordination,          # Close spatial neighbors (~3Å, likely bonded)
-                distance_based_coordination,  # Medium range environment (~6Å)
-                min_distances,               # Closest neighbor distance
-                mean_distances,              # Average close neighbor distance
-            ], dim=-1)  # [n_graph, n_node, 5]
-            
-            # Vectorized radius graph RBF computation for GPU optimization
-            # Process all edges simultaneously
-            edge_src, edge_dst = batch_obj.edge_index  # [num_edges]
-            
-            # Compute edge distances and types vectorized
-            edge_distances = torch.norm(pos[edge_src] - pos[edge_dst], dim=1)  # [num_edges]
-            edge_types = x[edge_src] * self.config.atom_types + x[edge_dst]  # [num_edges]
-            
-            # Apply GaussianLayer to all edges at once
-            edge_dist_3d = edge_distances.unsqueeze(0).unsqueeze(0)  # [1, 1, num_edges]
-            edge_type_3d = edge_types.unsqueeze(0).unsqueeze(0)  # [1, 1, num_edges]
-            
-            edge_rbf_4d = self.gaussian_layer(edge_dist_3d, edge_type_3d)  # [1, 1, num_edges, gaussian_kernels]
-            edge_rbf = edge_rbf_4d.squeeze(0).squeeze(0)  # [num_edges, gaussian_kernels]
-            
-            # Vectorized aggregation using scatter operations
-            # from torch_scatter import scatter_add
-            
-            # Initialize RBF features for all nodes
-            gaussian_kernels = self.config.gaussian_kernels
-            gbf_feature = torch.zeros(n_graph, n_node, gaussian_kernels, device=x.device)
-            
-            # Aggregate to source and destination nodes
-            node_rbf_src = scatter_add(edge_rbf, edge_src, dim=0, dim_size=len(x))  # [total_nodes, gaussian_kernels]
-            node_rbf_dst = scatter_add(edge_rbf, edge_dst, dim=0, dim_size=len(x))  # [total_nodes, gaussian_kernels]
-            
-            # Combine source and destination features
-            node_rbf_combined = node_rbf_src + node_rbf_dst  # [total_nodes, gaussian_kernels]
-            
-            # Reshape to batch format using to_dense_batch
-            gbf_feature, _ = to_dense_batch(node_rbf_combined, batch, fill_value=0)  # [n_graph, n_node, gaussian_kernels]
-            
-            # Handle sparse case: [n_graph, n_node, gaussian_kernels] (already aggregated)
-            # Apply padding mask
-            padding_mask = x_dense.eq(0)
-            aggregated_edge_features = gbf_feature.masked_fill(
-                padding_mask.unsqueeze(-1), 0.0
-            )
+        # SE(3) invariant node-level coordination features
+        # 1. Chemical bond-based coordination (true molecular graph neighbors)
+        chemical_coordination = self._compute_chemical_coordination(x_dense, batch_obj)
         
-            aggregated_edge_features = gbf_feature.masked_fill(
-                padding_mask.unsqueeze(-1), 0.0
-            )
+        # 2. Distance-based coordination from radius graph
+        # Count neighbors in different distance shells using edge_distances
+        close_cutoff = getattr(self.config, 'close_cutoff', 3.0)
+        
+        # Create edge masks for different distance ranges
+        close_mask = (edge_distances < close_cutoff) & (edge_distances > 0.5)
+        medium_mask = (edge_distances < self.config.cutoff_distance) & (edge_distances > 0.5)
+        
+        # Count neighbors per node using scatter operations
+        num_nodes = len(x)
+        
+        # Count close neighbors
+        close_coordination_sparse = scatter_add(
+            close_mask.float(), edge_src, dim=0, dim_size=num_nodes
+        )
+        
+        # Count medium-range neighbors
+        distance_coordination_sparse = scatter_add(
+            medium_mask.float(), edge_src, dim=0, dim_size=num_nodes
+        )
+        
+        # Convert to dense format [n_graph, n_node]
+        close_coordination, _ = to_dense_batch(close_coordination_sparse, batch, fill_value=0)
+        distance_based_coordination, _ = to_dense_batch(distance_coordination_sparse, batch, fill_value=0)
+        
+        # 3. Distance statistics per node (min and mean of close neighbors)
+        # OPTIMIZED: Vectorized computation instead of per-node loop
+        min_distances_sparse = torch.full((num_nodes,), float('inf'), device=pos.device)
+        mean_distances_sparse = torch.zeros(num_nodes, device=pos.device)
+        count_per_node = torch.zeros(num_nodes, device=pos.device)
+        
+        # Filter to close neighbors only
+        close_indices = torch.where(close_mask)[0]
+        if len(close_indices) > 0:
+            close_src = edge_src[close_indices]
+            close_dists = edge_distances[close_indices]
+            
+            # Min distance per node (scatter_reduce with min operation)
+            min_distances_sparse, _ = scatter_min(close_dists, close_src, dim=0, dim_size=num_nodes)
+            
+            # Mean distance per node
+            sum_per_node = scatter_add(close_dists, close_src, dim=0, dim_size=num_nodes)
+            count_per_node = scatter_add(torch.ones_like(close_dists), close_src, dim=0, dim_size=num_nodes)
+            mean_distances_sparse = sum_per_node / (count_per_node + 1e-8)
+        
+        # Replace inf with 0 for nodes with no close neighbors
+        min_distances_sparse[torch.isinf(min_distances_sparse)] = 0.0
+        
+        # Convert to dense format
+        min_distances, _ = to_dense_batch(min_distances_sparse, batch, fill_value=0)
+        mean_distances, _ = to_dense_batch(mean_distances_sparse, batch, fill_value=0)
+        
+        # SE(3) invariant feature combination
+        # Shape: [n_graph, n_node, feature_dim]
+        invariant_features = torch.stack([
+            chemical_coordination,        # True chemical bonds
+            close_coordination,          # Close spatial neighbors (~3Å)
+            distance_based_coordination, # Medium range environment (~cutoff)
+            min_distances,               # Closest neighbor distance
+            mean_distances,              # Average close neighbor distance
+        ], dim=-1)  # [n_graph, n_node, 5]
+        
+        # =====================================================================
+        # Vectorized radius graph RBF computation (GPU-optimized)
+        # =====================================================================
+        # Compute edge types
+        edge_types = x[edge_src] * self.config.atom_types + x[edge_dst]
+        
+        # Apply GaussianLayer to all edges at once
+        edge_dist_3d = edge_distances.unsqueeze(0).unsqueeze(0)  # [1, 1, num_edges]
+        edge_type_3d = edge_types.unsqueeze(0).unsqueeze(0)      # [1, 1, num_edges]
+        
+        edge_rbf_4d = self.gaussian_layer(edge_dist_3d, edge_type_3d)  # [1, 1, num_edges, gaussian_kernels]
+        edge_rbf = edge_rbf_4d.squeeze(0).squeeze(0)  # [num_edges, gaussian_kernels]
+        
+        # Aggregate RBF features to nodes using scatter operations
+        gaussian_kernels = self.config.gaussian_kernels
+        node_rbf_src = scatter_add(edge_rbf, edge_src, dim=0, dim_size=num_nodes)
+        node_rbf_dst = scatter_add(edge_rbf, edge_dst, dim=0, dim_size=num_nodes)
+        
+        # Combine source and destination features
+        node_rbf_combined = node_rbf_src + node_rbf_dst
+        
+        # Convert to dense format
+        gbf_feature, _ = to_dense_batch(node_rbf_combined, batch, fill_value=0)
+        
+        # Apply padding mask
+        padding_mask = x_dense.eq(0)
+        aggregated_edge_features = gbf_feature.masked_fill(
+            padding_mask.unsqueeze(-1), 0.0
+        )
+
         
         # =====================================================================
         # COMMON PATH: Combine features and project (both sparse and dense)
