@@ -24,6 +24,11 @@ import warnings
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from data_loading.data_types import UniversalMolecule
 
+# Adapters pickle objects with __module__='data_types'; make unpickling work from project root
+if 'data_types' not in sys.modules:
+    import data_loading.data_types as _data_types_module
+    sys.modules['data_types'] = _data_types_module
+
 from torch_cluster import radius_graph
 warnings.filterwarnings('ignore')
 
@@ -103,13 +108,14 @@ class OptimizedUniversalDataset(InMemoryDataset):
         self.universal_cache_path = universal_cache_path
         self.max_samples = max_samples
         self.molecule_max_atoms = molecule_max_atoms
-        self.cutoff_distance = cutoff_distance
-        self.max_neighbors = max_neighbors
+        # Coerce to safe defaults so int()/float() never see None (config may pass null)
+        self.cutoff_distance = cutoff_distance if cutoff_distance is not None else 5.0
+        self.max_neighbors = max_neighbors if max_neighbors is not None else 32
         self.use_hybrid_edges = use_hybrid_edges
-        self.sequence_neighbors_k = sequence_neighbors_k
-        self.max_spatial_neighbors = max_spatial_neighbors
-        self.num_random_edges = num_random_edges
-        self.random_edge_min_distance = random_edge_min_distance
+        self.sequence_neighbors_k = sequence_neighbors_k if sequence_neighbors_k is not None else 3
+        self.max_spatial_neighbors = max_spatial_neighbors if max_spatial_neighbors is not None else 48
+        self.num_random_edges = num_random_edges if num_random_edges is not None else 8
+        self.random_edge_min_distance = random_edge_min_distance if random_edge_min_distance is not None else 10.0
 
         os.makedirs(root, exist_ok=True)
         super().__init__(root, transform, pre_transform, pre_filter)
@@ -173,21 +179,29 @@ class OptimizedUniversalDataset(InMemoryDataset):
         # 3. Convert all molecules to PyG Data objects
         data_list: List[Data] = []
         skipped_count = 0
+        first_fail_reason: Optional[str] = None
         for mol in tqdm(molecule_iterator, desc="Converting molecules"):
             try:
                 pyg_data = self._create_pyg_data_object(mol)
                 if pyg_data is not None:
                     data_list.append(pyg_data)
                 else:
+                    if first_fail_reason is None:
+                        first_fail_reason = self._diagnose_skip(mol)
                     skipped_count += 1
             except Exception as e:
-                warnings.warn(f"Skipping molecule {mol.id}: {e}", UserWarning)
+                if first_fail_reason is None:
+                    first_fail_reason = f"Exception: {e}"
+                warnings.warn(f"Skipping molecule {getattr(mol, 'id', '?')}: {e}", UserWarning)
                 skipped_count += 1
 
         if not data_list:
-            raise RuntimeError(
+            msg = (
                 f"No molecules were processed successfully. Skipped {skipped_count} molecules."
             )
+            if first_fail_reason:
+                msg += f" First skip reason: {first_fail_reason}"
+            raise RuntimeError(msg)
 
         # Memory usage info
         ram_mb = len(data_list) * 20 / 1024
@@ -203,6 +217,25 @@ class OptimizedUniversalDataset(InMemoryDataset):
         data, slices = self.collate(data_list)
         torch.save((data, slices), self.processed_paths[0])
         print(f"✅ Processing complete! Saved to: {self.processed_paths[0]}")
+
+    def _diagnose_skip(self, mol: UniversalMolecule) -> str:
+        """Return a short reason why this molecule would be skipped (for error messages)."""
+        try:
+            atoms = mol.get_all_atoms()
+            if not atoms:
+                return "get_all_atoms() returned empty (molecule has no blocks or blocks have no atoms)"
+            if self.molecule_max_atoms is not None and len(atoms) > self.molecule_max_atoms:
+                return f"molecule has {len(atoms)} atoms > molecule_max_atoms={self.molecule_max_atoms}"
+            # Try actual conversion with raise_on_error to capture the real error
+            try:
+                out = self._universal_to_pyg(mol, raise_on_error=True)
+                if out is None:
+                    return "_universal_to_pyg returned None (empty atoms)"
+            except Exception as e:
+                return str(e)
+            return "unknown"
+        except Exception as e:
+            return str(e)
 
     def _create_pyg_data_object(self, mol: UniversalMolecule) -> Optional[Data]:
         """Helper function to filter and convert a single UniversalMolecule."""
@@ -397,7 +430,7 @@ class OptimizedUniversalDataset(InMemoryDataset):
         # Tier 2: Spatial edges (radius graph with duplicate filtering)
         tier2_edges = radius_graph(
             positions, r=float(self.cutoff_distance), batch=None, loop=False,
-            max_num_neighbors=int(self.max_spatial_neighbors)
+            max_num_neighbors=int(self.max_spatial_neighbors)  # coerced in __init__ if None
         )
         # Filter out Tier 1 edges from Tier 2 to maximize information diversity
         tier2_edges = self._filter_duplicate_edges(tier2_edges, tier1_edges)
@@ -413,22 +446,29 @@ class OptimizedUniversalDataset(InMemoryDataset):
         
         return all_edges
 
-    def _universal_to_pyg(self, mol: UniversalMolecule) -> Optional[Data]:
+    def _universal_to_pyg(self, mol: UniversalMolecule, raise_on_error: bool = False) -> Optional[Data]:
         """Convert a UniversalMolecule to PyTorch Geometric Data object."""
         try:
             atoms = mol.get_all_atoms()
             if not atoms:
                 return None
 
-            positions = torch.tensor([atom.position for atom in atoms], dtype=torch.float32)
+            # Support position as tuple, list, or numpy (unpickled format may vary)
+            def _pos_to_list(p):
+                if hasattr(p, '__iter__') and not isinstance(p, str):
+                    return list(p)[:3]
+                return [0.0, 0.0, 0.0]
+            positions = torch.tensor([_pos_to_list(atom.position) for atom in atoms], dtype=torch.float32)
             atomic_numbers = torch.tensor(
-                [self._element_to_atomic_number(atom.element) for atom in atoms],
+                [self._element_to_atomic_number(str(getattr(atom, 'element', 'C'))) for atom in atoms],
                 dtype=torch.long
             )
-            block_indices = torch.tensor([atom.block_idx for atom in atoms], dtype=torch.long)
-            entity_indices = torch.tensor([atom.entity_idx for atom in atoms], dtype=torch.long)
+            def _safe_int(v, default: int = 0) -> int:
+                return int(v) if v is not None else default
+            block_indices = torch.tensor([_safe_int(getattr(atom, 'block_idx', None)) for atom in atoms], dtype=torch.long)
+            entity_indices = torch.tensor([_safe_int(getattr(atom, 'entity_idx', None)) for atom in atoms], dtype=torch.long)
             pos_codes = [atom.pos_code for atom in atoms]
-            block_symbols = [block.symbol for block in mol.blocks]
+            block_symbols = [str(getattr(block, 'symbol', '')) for block in mol.blocks]
 
             num_atoms = len(atoms)
             if num_atoms > 1:
@@ -457,22 +497,27 @@ class OptimizedUniversalDataset(InMemoryDataset):
                 entity_idx=entity_indices,
                 pos_code=pos_codes,
                 block_symbols=block_symbols,
-                mol_id=str(mol.id),
-                dataset_type=mol.dataset_type,
+                mol_id=str(getattr(mol, 'id', 'unknown')),
+                dataset_type=str(getattr(mol, 'dataset_type', 'unknown')),
                 num_nodes=len(atoms),
                 num_edges=edge_index.size(1),
             )
             return data
         except (ValueError, IndexError, TypeError) as e:
-            warnings.warn(f"Error converting molecule {mol.id}: {e}", UserWarning)
+            if raise_on_error:
+                raise
+            warnings.warn(f"Error converting molecule {getattr(mol, 'id', '?')}: {e}", UserWarning)
             return None
         except Exception as e:
-            warnings.warn(f"Unexpected error converting molecule {mol.id}: {e}", UserWarning)
+            if raise_on_error:
+                raise
+            warnings.warn(f"Unexpected error converting molecule {getattr(mol, 'id', '?')}: {e}", UserWarning)
             return None
 
     def _element_to_atomic_number(self, element: str) -> int:
         """Convert element symbol to atomic number using dictionary lookup."""
-        element_normalized = element.capitalize() if len(element) <= 2 else element
+        s = str(element).strip()
+        element_normalized = s.capitalize() if len(s) <= 2 else s
         return ELEMENT_TO_ATOMIC_NUMBER.get(element_normalized, DEFAULT_ATOMIC_NUMBER)
 
     def _calculate_edge_features(self, positions: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:

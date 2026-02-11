@@ -312,9 +312,9 @@ class QM9TransferModel(pl.LightningModule):
             h, batch_mapping, fill_value=0, max_num_nodes=num_max_items
         )
         
-        # Pass through ESA backbone
+        # Pass through ESA backbone (pos required for equivariant branch)
         esa_output = self.esa_backbone(
-            h, edge_index, batch_mapping, num_max_items=num_max_items
+            h, edge_index, batch_mapping, num_max_items, pos=pos
         )
         
         # ESA returns (graph_embeddings, node_embeddings_before_pma) or just graph_embeddings
