@@ -125,6 +125,17 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                     print(f"⚠️  {dtype.upper()}: No chunks or processed files found in {chunk_dir}")
                 continue
             
+            # Apply chunk_range filter if specified (inclusive [start, end]; null = use all)
+            chunk_range = dtype_config.get('chunk_range')
+            num_chunks_total = len(chunk_dirs)
+            if chunk_range is not None and isinstance(chunk_range, (list, tuple)) and len(chunk_range) >= 2:
+                start, end = int(chunk_range[0]), int(chunk_range[1])
+                chunk_dirs = chunk_dirs[start : end + 1]
+                if not chunk_dirs:
+                    print(f"⚠️  {dtype.upper()}: chunk_range [{start}, {end}] yielded no chunks (have {num_chunks_total} total)")
+                    continue
+                print(f"   📌 {dtype.upper()}: using chunks {start}..{end} ({len(chunk_dirs)} of {num_chunks_total})")
+            
             # Collect .pt files from chunks
             # Only collect the path of the .pt file
             dtype_chunks = []

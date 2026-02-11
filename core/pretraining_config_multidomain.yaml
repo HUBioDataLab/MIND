@@ -33,12 +33,12 @@ multi_domain:
   # - chunk_dir: Parent directory containing chunked .pt files
   # - atom_ratio: Target percentage of atoms from this dataset type (will be normalized)
   datasets:
-    #! Atom_ratio and chunk_range is not used, maybe we can add it in the future.
+    # chunk_range: [start, end] inclusive; null = use all chunks. atom_ratio: not yet used.
     pdb:
       enabled: true
       chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks
       atom_ratio: 60  
-      chunk_range: [0, 9]  # Use all 10 chunks
+      chunk_range: [0, 9]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
     
     qm9:
       enabled: true  # QM9 with legacy edges (cutoff 5.0Å, 16 neighbors)
@@ -50,6 +50,7 @@ multi_domain:
       enabled: true  # Not yet available
       chunk_dir: "/home/ege/MIND_HuBioDataLab/data/COCONUT/processed"
       atom_ratio: 10  # 10% of atoms from metabolites
+      chunk_range: null
     
     rna:
       enabled: false  # Future expansion
