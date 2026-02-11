@@ -71,7 +71,7 @@ set_max_items: 0
 triu_attn_mask: false
 
 # Equivariant branch (ESA pos/EquivariantSAB). Default false; set true to enable.
-use_equivariant_features: false
+use_equivariant_features: true
 equivariant_lmax: 2
 equivariant_num_features: 16
 equivariant_fusion_method: add
