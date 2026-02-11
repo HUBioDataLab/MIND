@@ -667,6 +667,10 @@ def train_universal_pretraining(
         save_dir=output_dir,
     )
     
+    # Validation and logging frequency (from config)
+    val_check_interval = getattr(config, 'val_check_interval', 0.25)
+    log_every_n_steps = getattr(config, 'log_every_n_steps', 1)
+
     # Create trainer with ESA optimizations
     trainer = pl.Trainer(
         max_epochs=config.max_epochs,
@@ -677,8 +681,8 @@ def train_universal_pretraining(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=1,
         num_sanity_val_steps=getattr(config, 'num_sanity_val_steps', 0),
-        log_every_n_steps=1,
-        val_check_interval=1.0,
+        log_every_n_steps=log_every_n_steps,
+        val_check_interval=val_check_interval,
     )
     
     print("🚀 Starting training...")
@@ -695,8 +699,10 @@ def train_universal_pretraining(
         print(f"   • Total batches per epoch: {len(train_loader)}")
         print(f"   • Validation batches: {len(val_loader)}")
     
-    print(f"   • Log every step: Yes")
-    print(f"   • Validation every: {trainer.val_check_interval} steps")
+    vi = trainer.val_check_interval
+    val_desc = f"{vi} steps" if isinstance(vi, int) else f"{vi} of epoch ({1/vi:.0f}x per epoch)"
+    print(f"   • Log every N steps: {log_every_n_steps}")
+    print(f"   • Validation: every {val_desc}")
     
     # CRITICAL FIX: Re-apply batch_sampler before training
     # PyTorch Lightning sometimes replaces the custom batch_sampler
