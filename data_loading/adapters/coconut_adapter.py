@@ -129,7 +129,7 @@ class COCONUTAdapter(BaseAdapter):
         # Extract chunking parameters
         num_chunks = kwargs.get('num_chunks', None)
         chunk_index = kwargs.get('chunk_index', None)
-        sdf_filename = kwargs.get('sdf_filename', 'coconut_sdf_3d-10-2025.sdf')
+        sdf_filename = kwargs.get('sdf_filename', 'coconut.sdf')
         
         # Construct SDF path
         sdf_path = os.path.join(data_path, "COCONUT", sdf_filename)
