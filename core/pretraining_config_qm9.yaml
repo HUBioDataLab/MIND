@@ -12,7 +12,7 @@ num_workers: 4
 molecule_max_atoms: 100
 
 # Optimized batch size for node attention
-batch_size: 3072
+batch_size: 1024
 
 # Dataset size limit (for testing)
 max_samples: 130000
@@ -70,6 +70,13 @@ pma_residual_dropout: 0.0
 set_max_items: 0
 triu_attn_mask: false
 
+# Equivariant branch (ESA pos/EquivariantSAB). Default false; set true to enable.
+use_equivariant_features: false
+equivariant_lmax: 2
+equivariant_num_features: 16
+equivariant_fusion_method: add
+equivariant_cross_connection: true
+
 # Positional encoding
 use_posenc: false  # Set to true to enable RWSE+LapPE positional encoders
 
@@ -105,6 +112,7 @@ preserve_universal_blocks: true
 
 # Fast training optimizations (since data loading is instant)
 fast_dev_run: false
+# Note: train_pretrain.py uses config.use_bfloat16 for precision (not precision key) and hardcodes accelerator/devices.
 accelerator: auto
 devices: auto
 precision: bfloat16

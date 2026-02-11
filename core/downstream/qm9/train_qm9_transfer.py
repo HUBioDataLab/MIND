@@ -216,7 +216,16 @@ def main():
         scaler=scaler,
         **model_kwargs
     )
-    
+
+    # One-time log: confirm equivariant branch is active (from config -> ESA -> EquivariantSAB)
+    use_eq = getattr(model, 'use_equivariant_features', config.get('use_equivariant_features', False))
+    if use_eq:
+        print("=" * 60)
+        print("EQUIVARIANT BRANCH: ENABLED (layer-wise EquivariantSAB in ESA)")
+        print("=" * 60)
+    else:
+        print("EQUIVARIANT BRANCH: DISABLED")
+
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
         monitor='val_loss',

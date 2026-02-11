@@ -19,6 +19,7 @@ except (ImportError, ModuleNotFoundError):
     NEQUIP_AVAILABLE = False
 
 from esa.mha import SAB, MAB
+from esa.mha_flash_varlen import SABFlashVarlen
 
 
 class EquivariantSAB(nn.Module):
@@ -53,10 +54,14 @@ class EquivariantSAB(nn.Module):
         self.use_equivariant = use_equivariant and NEQUIP_AVAILABLE
         self.fusion_method = fusion_method
         self.cross_connection = cross_connection
-        
-        # Invariant branch: Standard SAB
-        self.invariant_sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
-        
+        self.xformers_or_torch_attn = xformers_or_torch_attn
+
+        # Invariant branch: SAB or SABFlashVarlen (flash_varlen must use the latter)
+        if xformers_or_torch_attn == "flash_varlen":
+            self.invariant_sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
+        else:
+            self.invariant_sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
+
         # Equivariant branch: NequIP InteractionBlock
         if self.use_equivariant:
             assert NEQUIP_AVAILABLE, (
@@ -87,7 +92,11 @@ class EquivariantSAB(nn.Module):
             
             # Project equivariant features back to scalar space
             self.equivariant_to_scalar = nn.Linear(irreps_out.dim, dim_out)
-            
+
+            # SphericalHarmonics for edge attributes (create once, reuse in forward)
+            edge_attr_irreps = Irreps.spherical_harmonics(equivariant_lmax)
+            self._spherical_harmonics = SphericalHarmonics(edge_attr_irreps, normalize=True, normalization="component")
+
             # Cross-connection layers
             if cross_connection:
                 # Invariant -> Equivariant (to inform equivariant branch)
@@ -138,17 +147,15 @@ class EquivariantSAB(nn.Module):
         # ============================================================
         # 1. INVARIANT BRANCH: Standard self-attention
         # ============================================================
-        # If cross-connection enabled, enhance input with equivariant info
-        if self.use_equivariant and self.cross_connection and edge_vectors is not None:
-            # Get equivariant features to inform attention
-            # We'll compute this in the equivariant branch section
-            # For now, use invariant features as-is
-            invariant_input = X
+        invariant_input = X
+        # Apply invariant self-attention (with seq_lens when using Flash varlen)
+        if isinstance(self.invariant_sab, SABFlashVarlen) and batch_mapping is not None:
+            batch_size_x = X.size(0)
+            counts = torch.bincount(batch_mapping, minlength=batch_size_x)
+            seq_lens = counts.to(torch.int32)
+            invariant_out = self.invariant_sab(invariant_input, seq_lens=seq_lens, adj_mask=adj_mask)
         else:
-            invariant_input = X
-        
-        # Apply invariant self-attention
-        invariant_out = self.invariant_sab(invariant_input, adj_mask=adj_mask)
+            invariant_out = self.invariant_sab(invariant_input, adj_mask=adj_mask)
         # invariant_out: [batch_size, max_nodes, dim_out]
         
         # ============================================================
@@ -159,21 +166,16 @@ class EquivariantSAB(nn.Module):
             # X is [batch_size, max_nodes, dim_in], need [total_nodes, dim_in]
             if batch_mapping is not None:
                 total_nodes = batch_mapping.size(0)
-                X_sparse = torch.zeros(total_nodes, dim_in, device=X.device, dtype=X.dtype)
-                
-                # Map dense to sparse
-                node_idx = 0
-                for b in range(batch_size):
-                    # Count actual nodes in this batch (non-padding)
-                    if batch_mapping is not None:
-                        n_nodes_b = (batch_mapping == b).sum().item()
-                    else:
-                        n_nodes_b = max_nodes
-                    
-                    if n_nodes_b > 0:
-                        actual_nodes = min(n_nodes_b, max_nodes)
-                        X_sparse[node_idx:node_idx+actual_nodes] = X[b, :actual_nodes]
-                        node_idx += actual_nodes
+                counts = torch.bincount(batch_mapping, minlength=batch_size)
+                offsets = torch.cat([
+                    torch.zeros(1, device=X.device, dtype=counts.dtype),
+                    torch.cumsum(counts, dim=0)
+                ])
+                batch_idx = torch.repeat_interleave(
+                    torch.arange(batch_size, device=X.device), counts
+                )
+                node_in_graph = torch.arange(total_nodes, device=X.device) - offsets[batch_idx]
+                X_sparse = X[batch_idx, node_in_graph]
             else:
                 # Single graph case
                 X_sparse = X.squeeze(0)  # [max_nodes, dim_in]
@@ -187,11 +189,8 @@ class EquivariantSAB(nn.Module):
             
             # Prepare NequIP data format
             num_edges = edge_index.size(1)
-            
-            # Compute edge attributes (spherical harmonics)
-            edge_attr_irreps = Irreps.spherical_harmonics(self.equivariant_interaction.irreps_in[AtomicDataDict.EDGE_ATTRS_KEY].lmax)
-            sh = SphericalHarmonics(edge_attr_irreps, normalize=True, normalization="component")
-            edge_attrs = sh(edge_vectors)  # [E, edge_attr_dim]
+            # Compute edge attributes (spherical harmonics, reuse module from __init__)
+            edge_attrs = self._spherical_harmonics(edge_vectors)  # [E, edge_attr_dim]
             
             # Dummy positions (required by NequIP, but we use edge_vectors)
             dummy_positions = torch.zeros(total_nodes, 3, device=X.device, dtype=X.dtype)
@@ -225,16 +224,10 @@ class EquivariantSAB(nn.Module):
             # Project to scalar space
             equivariant_scalar = self.equivariant_to_scalar(equivariant_features)  # [total_nodes, dim_out]
             
-            # Convert back to dense format
+            # Convert back to dense format (vectorized)
             if batch_mapping is not None:
                 equivariant_dense = torch.zeros(batch_size, max_nodes, self.dim_out, device=X.device, dtype=X.dtype)
-                node_idx = 0
-                for b in range(batch_size):
-                    n_nodes_b = (batch_mapping == b).sum().item()
-                    if n_nodes_b > 0:
-                        actual_nodes = min(n_nodes_b, max_nodes)
-                        equivariant_dense[b, :actual_nodes] = equivariant_scalar[node_idx:node_idx+actual_nodes]
-                        node_idx += actual_nodes
+                equivariant_dense[batch_idx, node_in_graph] = equivariant_scalar
             else:
                 equivariant_dense = equivariant_scalar.unsqueeze(0)  # [1, max_nodes, dim_out]
             
@@ -242,16 +235,10 @@ class EquivariantSAB(nn.Module):
             if self.cross_connection:
                 equivariant_gate = self.equiv_to_inv_gate(equivariant_features)  # [total_nodes, dim_out]
                 
-                # Convert gate to dense
+                # Convert gate to dense (vectorized)
                 if batch_mapping is not None:
                     gate_dense = torch.zeros(batch_size, max_nodes, self.dim_out, device=X.device, dtype=X.dtype)
-                    node_idx = 0
-                    for b in range(batch_size):
-                        n_nodes_b = (batch_mapping == b).sum().item()
-                        if n_nodes_b > 0:
-                            actual_nodes = min(n_nodes_b, max_nodes)
-                            gate_dense[b, :actual_nodes] = equivariant_gate[node_idx:node_idx+actual_nodes]
-                            node_idx += actual_nodes
+                    gate_dense[batch_idx, node_in_graph] = equivariant_gate
                 else:
                     gate_dense = equivariant_gate.unsqueeze(0)
                 

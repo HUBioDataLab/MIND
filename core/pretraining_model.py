@@ -661,7 +661,11 @@ class PretrainingESAModel(pl.LightningModule):
         # Note: Equivariant features are now integrated layer-wise in ESA backbone
         # via EquivariantSAB layers (see ESA.__init__ with use_equivariant=True)
         # No need for separate equivariant_branch here
-        
+        if config.use_equivariant_features:
+            print("✅ Pretraining equivariant: ENABLED | pos→ESA→EquivariantSAB | gradients flow through equivariant branch")
+        else:
+            print("⬜ Pretraining equivariant: DISABLED | ESA uses invariant-only SAB/MAB (no EquivariantSAB)")
+
         # Output projection for node-level tasks
         if config.apply_attention_on == "edge":
             # For edge attention, input is concatenated source and target embeddings
@@ -917,6 +921,42 @@ class PretrainingESAModel(pl.LightningModule):
 
         return h, h_node_level
 
+    def _ensure_mlm_attributes(self, batch):
+        """If MLM is a task but batch has no mlm_mask (transform not applied), add MLM masking on-the-fly."""
+        if "mlm" not in self.config.pretraining_tasks:
+            return
+        if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
+            return
+        if not hasattr(batch, 'z') or batch.z is None:
+            return
+        mask_ratio = getattr(self.config, 'mlm_mask_ratio', 0.15)
+        mask_token = 0
+        z = batch.z.long()
+        batch.original_types = z.clone()
+        num_nodes = z.size(0)
+        mlm_mask = torch.zeros(num_nodes, dtype=torch.bool, device=z.device)
+        masked_types = z.clone()
+        if hasattr(batch, 'batch') and batch.batch is not None:
+            graph_idx = batch.batch
+            for g in graph_idx.unique().tolist():
+                node_mask = (graph_idx == g)
+                indices = torch.where(node_mask)[0]
+                n = indices.size(0)
+                if n > 0:
+                    k = max(1, int(n * mask_ratio))
+                    perm = torch.randperm(n, device=z.device)[:k]
+                    selected = indices[perm]
+                    mlm_mask[selected] = True
+                    masked_types[selected] = mask_token
+        else:
+            k = max(1, int(num_nodes * mask_ratio))
+            selected = torch.randperm(num_nodes, device=z.device)[:k]
+            mlm_mask[selected] = True
+            masked_types[selected] = mask_token
+        batch.mlm_mask = mlm_mask
+        batch.masked_types = masked_types
+        batch.z = masked_types  # encoder sees masked input
+
     
     def _compute_pretraining_losses(self, batch, graph_embeddings, node_embeddings):
         """Compute all pretraining task losses"""
@@ -1075,6 +1115,7 @@ class PretrainingESAModel(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """Training step"""
+        self._ensure_mlm_attributes(batch)
         # DEBUG: Check if dataset_type exists
         if batch_idx % 10 == 0:
             if hasattr(batch, 'dataset_type'):
@@ -1160,6 +1201,7 @@ class PretrainingESAModel(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         """Validation step"""
+        self._ensure_mlm_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
         
         losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
@@ -1181,6 +1223,7 @@ class PretrainingESAModel(pl.LightningModule):
     
     def test_step(self, batch, batch_idx):
         """Test step"""
+        self._ensure_mlm_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
         
         losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
