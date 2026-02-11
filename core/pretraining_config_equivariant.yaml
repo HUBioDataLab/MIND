@@ -1,26 +1,26 @@
 # ===================================================================
-# MIND Project - Multi-Domain Pretraining Configuration
+# MIND Project - Pretraining Configuration with Equivariant Features
 # ===================================================================
-# This config enables training on multiple molecular dataset types simultaneously
-# (proteins, small molecules, metabolites, RNA, DNA) with cross-modal batching.
+# This config enables pretraining with layer-wise equivariant integration
+# using NequIP's InteractionBlock for E(3)-equivariant features.
 #
 # Key Features:
-# - Atom-aware rotational sampling for balanced training
-# - Cross-modal batches (proteins + small molecules in same batch)
-# - Efficient memory usage (LRU cache with chunked datasets)
-# - Graceful fallback (works even if some datasets are missing)
+# - Layer-wise equivariant integration (EquivariantSAB in each attention layer)
+# - Translation invariant (position centering)
+# - Rotation equivariant (predictable transformation)
+# - Multi-domain support (proteins, small molecules, etc.)
 #
 # Usage:
-#   python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain.yaml
+#   python core/train_pretrain.py --config-yaml-path core/pretraining_config_equivariant.yaml
 # ===================================================================
 
 # -------------------------
 # Genel ve Çıktı Ayarları
 # -------------------------
 seed: 42
-out_path: "outputs/multidomain_pretrain"
-wandb_project_name: "MIND-Project-Pretraining"
-wandb_run_name: "multidomain-run-1"
+out_path: "outputs/pretrain_equivariant"
+wandb_project_name: "MIND-Project-Pretraining-Equivariant"
+wandb_run_name: "equivariant-pretrain-run-1"
 
 # -------------------------
 # Multi-Domain Configuration
@@ -29,11 +29,7 @@ multi_domain:
   enabled: true  # ✅ Set to true to enable multi-domain training
   
   # Dataset Configurations
-  # - enabled: Whether to include this dataset type
-  # - chunk_dir: Parent directory containing chunked .pt files
-  # - atom_ratio: Target percentage of atoms from this dataset type (will be normalized)
   datasets:
-    #! Atom_ratio and chunk_range is not used, maybe we can add it in the future.
     pdb:
       enabled: true
       chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks
@@ -49,12 +45,12 @@ multi_domain:
     metabolite:
       enabled: false  # Not yet available
       chunk_dir: "../data/metabolites/processed_chunks"
-      atom_ratio: 10  # 10% of atoms from metabolites
+      atom_ratio: 10
     
     rna:
       enabled: false  # Future expansion
       chunk_dir: "../data/rna/processed_chunks"
-      atom_ratio: 5   # 5% of atoms from RNA
+      atom_ratio: 5
     
     dna:
       enabled: false  # Future expansion
@@ -62,7 +58,7 @@ multi_domain:
       atom_ratio: 0
   
   # Rotational Sampling Parameters
-  target_atoms_per_rotation: 50000  #! Not used anymore. Target total atoms per rotation (adjust based on GPU RAM) 
+  target_atoms_per_rotation: 50000
   max_cache_chunks: 10              # Maximum chunks in LRU cache (adjust based on system RAM)
   fallback_to_single_domain: true   # If metadata missing, fall back to ChunkAwareSampler
 
@@ -102,27 +98,27 @@ gradient_clip_val: 0.5
 optimiser_weight_decay: 1.0e-10
 monitor_loss_name: "val_total_loss"
 use_bfloat16: true  # Required for flash_varlen
-accelerator: gpu #! Not used
-devices: 1  # Use single GPU (will be GPU 6 via CUDA_VISIBLE_DEVICES) #! Not used
+accelerator: gpu
+devices: 1  # Use single GPU
 precision: bfloat16  # Required for flash_varlen
 num_sanity_val_steps: 0 
-val_check_interval: 1.0  # Run validation at end of each epoch #! Not used
-fast_dev_run: false #! Not used
+val_check_interval: 1.0  # Run validation at end of each epoch
+fast_dev_run: false
 
 # -------------------------
 # Model Mimarisi (ESA)
 # -------------------------
 apply_attention_on: node
 graph_dim: 256
-edge_dim: 64 #! Not used
+edge_dim: 64
 hidden_dims: [256, 256, 256, 256, 256, 256, 256, 256]
 num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "M", "S", "M", "S", "P", "P"]
-xformers_or_torch_attn: flash_varlen  # ⚡ Padding-free for mixed sizes (CORRECT: flash_varlen not varlen_flash!)
+xformers_or_torch_attn: flash_varlen  # ⚡ Padding-free for mixed sizes
 norm_type: LN
 use_3d_coordinates: true
 set_max_items: 0
-triu_attn_mask: false #! Not used
+triu_attn_mask: false
 
 # -------------------------
 # MLP Ayarları
@@ -147,11 +143,11 @@ pma_residual_dropout: 0.0
 # -------------------------
 # 3D Geometrik Parametreler
 # -------------------------
-molecule_max_atoms: null #! Not used in chunked datasets.
+molecule_max_atoms: null
 gaussian_kernels: 128
-cutoff_distance: 5.0 #? Graph representation max distance is n angstrom. (used .pkl -> .pt)
-max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
-max_distance: 20.0  #? Used in training.
+cutoff_distance: 5.0  # Graph representation max distance is n angstrom
+max_neighbors: 64  # Max neighbors for protein is 64
+max_distance: 20.0  # Used in training
 distance_bins: 5
 
 # -------------------------
@@ -161,15 +157,6 @@ distance_bins: 5
 use_distance_bias: false  # Set to true to enable distance-based attention bias
 distance_bias_scale: 1.0  # Scaling factor for distance bias (higher = stronger distance penalty)
 distance_bias_cutoff: 10.0  # Distances beyond this are clamped (Angstroms)
-
-# -------------------------
-# Equivariant Features (Layer-wise Integration)
-# -------------------------
-use_equivariant_features: true  # Set to true to enable equivariant branch (layer-wise integration)
-equivariant_lmax: 2  # Maximum angular momentum (l=0,1,2)
-equivariant_num_features: 16  # Number of tensor feature channels
-equivariant_fusion_method: add  # add, concat, bilinear, or gated
-equivariant_cross_connection: true  # Enable cross-connection between invariant and equivariant branches
 
 # -------------------------
 # Hybrid Edge Construction (Salad-inspired)
@@ -185,6 +172,17 @@ num_random_edges: 8              # Tier 3: Random long-range edges (scaled for p
 random_edge_min_distance: 10.0   # Tier 3: Minimum distance (Å) for random edges
 
 # -------------------------
+# Equivariant Features (Layer-wise Integration)
+# -------------------------
+# Enables E(3)-equivariant features using NequIP's InteractionBlock
+# Integrated layer-wise in each SAB (Self-Attention Block) via EquivariantSAB
+use_equivariant_features: true  # ✅ Set to true to enable equivariant branch (layer-wise integration)
+equivariant_lmax: 2  # Maximum angular momentum (l=0,1,2) - controls spherical harmonics order
+equivariant_num_features: 16  # Number of tensor feature channels (scalars + vectors)
+equivariant_fusion_method: add  # Fusion method: add, concat, bilinear, or gated
+equivariant_cross_connection: true  # Enable cross-connection between invariant and equivariant branches
+
+# -------------------------
 # Ön-Eğitim Görevleri
 # -------------------------
 pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
@@ -193,51 +191,46 @@ task_weights:
   short_range_distance: 1.0
   mlm: 0.3
 mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task
-temperature: 0.2 #! Not used
+temperature: 0.2
 
 # -------------------------
 # Yeni Kod Yapısı İçin Gerekli Diğer Parametreler
 # -------------------------
-max_block_types: 150 #! Not used
-max_position_types: 15 #! Not used
-max_entity_types: 6 #! Not used
-block_embedding_dim: 32 #! Not used
-position_embedding_dim: 16 #! Not used
-entity_embedding_dim: 8 #! Not used
-use_hierarchical_features: false #! Not used
-max_atomic_num: 118 #! Not used
-rwse_dim: 24 #! Not used
-lap_dim: 4 #! Not used
-mlp_inter_dim: 128 #! Not used
-pma_num_outputs: 32 #! Not used
+max_block_types: 150
+max_position_types: 15
+max_entity_types: 6
+block_embedding_dim: 32
+position_embedding_dim: 16
+entity_embedding_dim: 8
+use_hierarchical_features: false
+max_atomic_num: 118
+rwse_dim: 24
+lap_dim: 4
+mlp_inter_dim: 128
+pma_num_outputs: 32
 
 # ===================================================================
 # Quick Start Guide
 # ===================================================================
 #
-# 1. PROTEIN-ONLY MODE (Default):
-#    - Set multi_domain.enabled = false
-#    - Run: python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain.yaml
+# 1. EQUIVARIANT PRETRAINING:
+#    - Equivariant features are enabled by default (use_equivariant_features: true)
+#    - Layer-wise integration: EquivariantSAB in each SAB layer
+#    - Translation invariant: Position centering applied automatically
+#    - Rotation equivariant: Predictable transformation under rotation
 #
-# 2. MULTI-DOMAIN MODE (When you have QM9 and Metabolite data):
-#    a. Generate metadata for all chunks:
-#       python data_loading/create_chunk_metadata.py --chunk-dir ../data/proteins/processed_graphs_40k
-#       python data_loading/create_chunk_metadata.py --chunk-dir ../data/small_molecules/qm9/processed_chunks
-#       python data_loading/create_chunk_metadata.py --chunk-dir ../data/metabolites/processed_chunks
+# 2. RUN TRAINING:
+#    python core/train_pretrain.py --config-yaml-path core/pretraining_config_equivariant.yaml
 #
-#    b. Update this config:
-#       - Set multi_domain.enabled = true
-#       - Set multi_domain.datasets.qm9.enabled = true
-#       - Set multi_domain.datasets.metabolite.enabled = true
-#       - Adjust atom_ratio values if needed (will be auto-normalized)
+# 3. MONITORING:
+#    - Check WandB dashboard for training progress
+#    - Equivariant features will be logged in model architecture
+#    - Translation/rotation invariance verified in tests
 #
-#    c. Run training:
-#       python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain.yaml
-#
-# 3. TUNING PARAMETERS:
-#    - target_atoms_per_rotation: Increase if you have more GPU RAM, decrease if OOM
-#    - max_cache_chunks: Increase if you have more system RAM
-#    - atom_ratio: Adjust to control dataset contribution (doesn't need to sum to 100)
+# 4. TUNING PARAMETERS:
+#    - equivariant_lmax: Increase for higher angular resolution (2 = l=0,1,2)
+#    - equivariant_num_features: Increase for more tensor channels (16 = 8 scalars + 8 vectors)
+#    - equivariant_fusion_method: Try "concat" or "bilinear" for different fusion strategies
+#    - equivariant_cross_connection: Set to false to disable cross-connections
 #
 # ===================================================================
-

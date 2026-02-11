@@ -290,6 +290,12 @@ class SABComplete(nn.Module):
         num_layers_for_residual=0,
         use_mlp_ln=False,
         mlp_dropout=0,
+        # Equivariant features (layer-wise integration)
+        use_equivariant=False,
+        equivariant_lmax=2,
+        equivariant_num_features=16,
+        equivariant_fusion_method="add",
+        equivariant_cross_connection=True,
     ):
         super(SABComplete, self).__init__()
 
@@ -306,6 +312,7 @@ class SABComplete(nn.Module):
         self.use_bfloat16 = use_bfloat16
         self.num_mlp_layers = num_mlp_layers
         self.pre_or_post = pre_or_post
+        self.use_equivariant = use_equivariant
 
         if self.pre_or_post == "post":
             self.residual_attn = as_module(num_layers_for_residual)
@@ -314,12 +321,36 @@ class SABComplete(nn.Module):
         if dim_in != dim_out:
             self.proj_1 = nn.Linear(dim_in, dim_out)
     
-        # Choose attention implementation based on xformers_or_torch_attn setting
-        # If flash_varlen is specified, use padding-free attention
-        if xformers_or_torch_attn == "flash_varlen":
-            self.sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
+        # Choose attention implementation based on equivariant features and xformers_or_torch_attn
+        if self.use_equivariant:
+            try:
+                from esa.equivariant_sab import EquivariantSAB
+                self.sab = EquivariantSAB(
+                    dim_in=dim_in,
+                    dim_out=dim_out,
+                    num_heads=num_heads,
+                    dropout=dropout,
+                    xformers_or_torch_attn=xformers_or_torch_attn,
+                    use_equivariant=True,
+                    equivariant_lmax=equivariant_lmax,
+                    equivariant_num_features=equivariant_num_features,
+                    fusion_method=equivariant_fusion_method,
+                    cross_connection=equivariant_cross_connection,
+                )
+                print(f"✅ EquivariantSAB enabled for layer {idx}")
+            except ImportError as e:
+                print(f"⚠️  Warning: EquivariantSAB not available, falling back to standard SAB. Error: {e}")
+                self.use_equivariant = False
+                if xformers_or_torch_attn == "flash_varlen":
+                    self.sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
+                else:
+                    self.sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
         else:
-            self.sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
+            # Standard attention (no equivariant features)
+            if xformers_or_torch_attn == "flash_varlen":
+                self.sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
+            else:
+                self.sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
 
         if self.idx != 2:
             bn_dim = self.set_max_items
@@ -375,7 +406,14 @@ class SABComplete(nn.Module):
 
 
     def forward(self, inp):
-        X, edge_index, batch_mapping, max_items, adj_mask = inp
+        # inp can be tuple of (X, edge_index, batch_mapping, max_items, adj_mask)
+        # or tuple with additional geometric info: (X, edge_index, batch_mapping, max_items, adj_mask, pos, edge_vectors)
+        if len(inp) >= 7:
+            X, edge_index, batch_mapping, max_items, adj_mask, pos, edge_vectors = inp[:7]
+        else:
+            X, edge_index, batch_mapping, max_items, adj_mask = inp[:5]
+            pos = None
+            edge_vectors = None
 
         if self.pre_or_post == "pre":
             X = self.norm(X)
@@ -398,6 +436,28 @@ class SABComplete(nn.Module):
                 out_attn = self.sab(X, seq_lens=seq_lens, adj_mask=None)
             else:
                 out_attn = self.sab(X, seq_lens=seq_lens, adj_mask=None)
+        elif self.use_equivariant:
+            # EquivariantSAB: pass geometric information
+            # Compute edge_vectors if not provided
+            if edge_vectors is None and pos is not None and edge_index is not None:
+                # Convert pos to sparse if needed
+                if pos.dim() == 2 and pos.size(0) == batch_mapping.size(0):
+                    # pos is already sparse [total_nodes, 3]
+                    edge_src, edge_dst = edge_index[0], edge_index[1]
+                    edge_vectors = pos[edge_dst] - pos[edge_src]  # [E, 3]
+                else:
+                    # pos might be dense, need to convert
+                    edge_vectors = None
+            
+            # Call EquivariantSAB with geometric information
+            out_attn = self.sab(
+                X, 
+                adj_mask=adj_mask,
+                edge_index=edge_index,
+                edge_vectors=edge_vectors,
+                pos=pos,
+                batch_mapping=batch_mapping,
+            )
         else:
             # Standard attention (xformers or torch)
             if self.idx == 1:
@@ -512,7 +572,12 @@ class PMAComplete(nn.Module):
 
 
     def forward(self, inp):
-        X, edge_index, batch_mapping, max_items, adj_mask = inp
+        # Handle both old format (5 values) and new format (7 values with pos, edge_vectors)
+        if len(inp) == 7:
+            X, edge_index, batch_mapping, max_items, adj_mask, pos, edge_vectors = inp
+        else:
+            X, edge_index, batch_mapping, max_items, adj_mask = inp
+            pos, edge_vectors = None, None
 
         if self.pre_or_post == "pre":
             X = self.norm(X)
@@ -581,6 +646,12 @@ class ESA(nn.Module):
         use_mlp_ln=False,
         set_max_items=0,
         use_bfloat16=True,
+        # Equivariant features (layer-wise integration)
+        use_equivariant=False,
+        equivariant_lmax=2,
+        equivariant_num_features=16,
+        equivariant_fusion_method="add",
+        equivariant_cross_connection=True,
     ):
         super(ESA, self).__init__()
 
@@ -606,6 +677,11 @@ class ESA(nn.Module):
         self.use_mlp_ln = use_mlp_ln
         self.set_max_items = set_max_items
         self.use_bfloat16 = use_bfloat16
+        self.use_equivariant = use_equivariant
+        self.equivariant_lmax = equivariant_lmax
+        self.equivariant_num_features = equivariant_num_features
+        self.equivariant_fusion_method = equivariant_fusion_method
+        self.equivariant_cross_connection = equivariant_cross_connection
         
         # Distance-based attention bias config (optional)
         self.use_distance_bias = False
@@ -654,6 +730,11 @@ class ESA(nn.Module):
                         set_max_items=set_max_items,
                         use_bfloat16=use_bfloat16,
                         num_layers_for_residual=len(dim_hidden) * 2,
+                        use_equivariant=use_equivariant,
+                        equivariant_lmax=equivariant_lmax,
+                        equivariant_num_features=equivariant_num_features,
+                        equivariant_fusion_method=equivariant_fusion_method,
+                        equivariant_cross_connection=equivariant_cross_connection,
                     )
                 )
                 
@@ -681,6 +762,11 @@ class ESA(nn.Module):
                         set_max_items=set_max_items,
                         use_bfloat16=use_bfloat16,
                         num_layers_for_residual=len(dim_hidden) * 2,
+                        use_equivariant=use_equivariant,
+                        equivariant_lmax=equivariant_lmax,
+                        equivariant_num_features=equivariant_num_features,
+                        equivariant_fusion_method=equivariant_fusion_method,
+                        equivariant_cross_connection=equivariant_cross_connection,
                     )
                 )
                 
@@ -735,6 +821,11 @@ class ESA(nn.Module):
                         set_max_items=set_max_items,
                         use_bfloat16=use_bfloat16,
                         num_layers_for_residual=len(dim_hidden) * 2,
+                        use_equivariant=use_equivariant,
+                        equivariant_lmax=equivariant_lmax,
+                        equivariant_num_features=equivariant_num_features,
+                        equivariant_fusion_method=equivariant_fusion_method,
+                        equivariant_cross_connection=equivariant_cross_connection,
                     )
                 )
 
@@ -774,7 +865,7 @@ class ESA(nn.Module):
                 max_items=num_max_items,
                 xformers_or_torch_attn=self.xformers_or_torch_attn,
                 use_bfloat16=self.use_bfloat16,
-            )
+            )    
         
         # Add distance-based attention bias if enabled
         if self.use_distance_bias and pos is not None:
@@ -808,7 +899,18 @@ class ESA(nn.Module):
                     # distance_bias: negative for far atoms
                     adj_mask = adj_mask + distance_bias
 
-        enc, _, _, _, _ = self.encoder((X, edge_index, batch_mapping, num_max_items, adj_mask))
+        # Compute edge_vectors for equivariant layers (if needed)
+        edge_vectors = None
+        if self.use_equivariant and pos is not None:
+            edge_src, edge_dst = edge_index[0], edge_index[1]
+            edge_vectors = pos[edge_dst] - pos[edge_src]  # [E, 3]
+
+        # Pass geometric information to encoder layers if equivariant features are enabled
+        if self.use_equivariant and pos is not None and edge_vectors is not None:
+            enc, _, _, _, _ = self.encoder((X, edge_index, batch_mapping, num_max_items, adj_mask, pos, edge_vectors))
+        else:
+            enc, _, _, _, _ = self.encoder((X, edge_index, batch_mapping, num_max_items, adj_mask))
+        
         if hasattr(self, "dim_pma") and self.dim_hidden[0] != self.dim_pma:
             X = self.out_proj(X)
 
@@ -818,7 +920,11 @@ class ESA(nn.Module):
         node_embeddings_before_pma = enc
 
         if hasattr(self, "decoder"):
-            out, _, _, _, _ = self.decoder((enc, edge_index, batch_mapping, num_max_items, adj_mask))
+            # Pass geometric information to decoder layers if equivariant features are enabled
+            if self.use_equivariant and pos is not None and edge_vectors is not None:
+                out, _, _, _, _ = self.decoder((enc, edge_index, batch_mapping, num_max_items, adj_mask, pos, edge_vectors))
+            else:
+                out, _, _, _, _ = self.decoder((enc, edge_index, batch_mapping, num_max_items, adj_mask))
             out = out.mean(dim=1)
             graph_embeddings = F.mish(self.decoder_linear(out))
             # Return both: graph-level embeddings (for downstream) and node-level embeddings (for pretraining)

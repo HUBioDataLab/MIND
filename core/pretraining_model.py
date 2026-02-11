@@ -104,6 +104,13 @@ class PretrainingConfig:
     compute_per_type_losses: bool = False
     log_per_type_frequency: int = 10
     
+    # Equivariant features (experimental)
+    use_equivariant_features: bool = False  # Set to true to enable equivariant branch
+    equivariant_lmax: int = 2  # Maximum angular momentum (l=0,1,2)
+    equivariant_num_features: int = 16  # Number of tensor feature channels
+    equivariant_fusion_method: str = "add"  # add, concat, bilinear
+    equivariant_cross_connection: bool = True  # Enable cross-connection between invariant and equivariant branches
+    
     
 def nearest_multiple_of_8(n):
     return math.ceil(n / 8) * 8
@@ -705,7 +712,7 @@ class PretrainingESAModel(pl.LightningModule):
         # Universal molecular encoder
         self.encoder = UniversalMolecularEncoder(config)
         
-        # ESA backbone
+        # ESA backbone (with layer-wise equivariant integration if enabled)
         st_args = dict(
             num_outputs=32,
             dim_output=config.graph_dim,
@@ -729,6 +736,12 @@ class PretrainingESAModel(pl.LightningModule):
             pma_residual_dropout=config.pma_residual_dropout,
             use_mlp_ln=config.use_mlp_ln,
             mlp_dropout=config.mlp_dropout,
+            # Equivariant features (layer-wise integration)
+            use_equivariant=config.use_equivariant_features,
+            equivariant_lmax=config.equivariant_lmax,
+            equivariant_num_features=config.equivariant_num_features,
+            equivariant_fusion_method=config.equivariant_fusion_method,
+            equivariant_cross_connection=config.equivariant_cross_connection,
         )
         
         self.esa_backbone = ESA(**st_args)
@@ -742,6 +755,10 @@ class PretrainingESAModel(pl.LightningModule):
         
         # Pretraining tasks
         self.pretraining_tasks = PretrainingTasks(config)
+        
+        # Note: Equivariant features are now integrated layer-wise in ESA backbone
+        # via EquivariantSAB layers (see ESA.__init__ with use_equivariant=True)
+        # No need for separate equivariant_branch here
         
         # Output projection for node-level tasks
         if config.apply_attention_on == "edge":
@@ -795,6 +812,19 @@ class PretrainingESAModel(pl.LightningModule):
         # Ensure coordinates are available for pretraining tasks
         assert pos is not None, \
             "Coordinates (pos) are required for pretraining tasks"
+        
+        # Center positions for translation invariance (per-graph)
+        if pos is not None:
+            pos_centered = pos.clone()
+            for graph_id in torch.unique(batch_mapping):
+                mask = batch_mapping == graph_id
+                if mask.sum() > 0:
+                    # Center of mass for this graph
+                    com = pos[mask].mean(dim=0, keepdim=True)
+                    pos_centered[mask] = pos[mask] - com
+            pos = pos_centered
+            # Update batch.pos so encoder and loss computations use centered positions
+            batch.pos = pos_centered
 
         # Encode nodes (universal approach)
         node_embeddings = self.encoder(x, pos, batch)
@@ -932,6 +962,7 @@ class PretrainingESAModel(pl.LightningModule):
             h = graph_emb
             # For loss, we'd need to reconstruct node-level from edges, but edge attention doesn't have node-level
             # So we'll use node_embeddings (pre-attention) for edge attention mode
+            # Note: Equivariant features are already integrated layer-wise in ESA backbone
             h_node_level = node_embeddings
 
         # ============================================================
@@ -975,6 +1006,9 @@ class PretrainingESAModel(pl.LightningModule):
                 h_node_level = node_emb_before_pma[dense_batch_index]
             else:
                 h_node_level = node_emb_before_pma
+            
+            # Note: Equivariant features are already integrated layer-wise in ESA backbone
+            # via EquivariantSAB layers, so no need for post-backbone equivariant branch
             
             # graph_emb is for downstream tasks (graph-level)
             h = graph_emb

@@ -86,6 +86,12 @@ class QM9TransferModel(pl.LightningModule):
         use_distance_bias: bool = False,
         distance_bias_scale: float = 1.0,
         distance_bias_cutoff: float = 10.0,
+        # Equivariant features (experimental)
+        use_equivariant_features: bool = False,
+        equivariant_lmax: int = 2,
+        equivariant_num_features: int = 16,
+        equivariant_fusion_method: str = "add",
+        equivariant_cross_connection: bool = True,
         **kwargs
     ):
         super().__init__()
@@ -102,6 +108,13 @@ class QM9TransferModel(pl.LightningModule):
         self.freeze_encoder = freeze_encoder
         self.freeze_esa = freeze_esa
         self.scaler = scaler
+        
+        # Equivariant features (experimental)
+        self.use_equivariant_features = use_equivariant_features
+        self.equivariant_lmax = equivariant_lmax
+        self.equivariant_num_features = equivariant_num_features
+        self.equivariant_fusion_method = equivariant_fusion_method
+        self.equivariant_cross_connection = equivariant_cross_connection
         
         # Load pretrained model OR create from scratch
         if pretrained_ckpt_path is not None:
@@ -183,6 +196,15 @@ class QM9TransferModel(pl.LightningModule):
                 mlp_dropout=self.config.mlp_dropout,
             )
             
+            # Equivariant features (layer-wise integration in ESA)
+            st_args.update({
+                'use_equivariant': self.use_equivariant_features,
+                'equivariant_lmax': self.equivariant_lmax,
+                'equivariant_num_features': self.equivariant_num_features,
+                'equivariant_fusion_method': self.equivariant_fusion_method,
+                'equivariant_cross_connection': self.equivariant_cross_connection,
+            })
+            
             self.esa_backbone = ESA(**st_args)
             
             # Configure distance-based attention bias (optional)
@@ -203,6 +225,10 @@ class QM9TransferModel(pl.LightningModule):
             print("Freezing ESA backbone weights")
             for param in self.esa_backbone.parameters():
                 param.requires_grad = False
+        
+        # Note: Equivariant features are now integrated layer-wise in ESA backbone
+        # via EquivariantSAB layers (see ESA.__init__ with use_equivariant=True)
+        # No need for separate equivariant_branch here
         
         # Output head for QM9 property prediction
         self.output_head = SmallMLP(
@@ -245,6 +271,18 @@ class QM9TransferModel(pl.LightningModule):
         batch_mapping = batch.batch
         pos = getattr(batch, 'pos', None)
         
+        # Center positions for translation invariance (per-graph)
+        if pos is not None:
+            # Center each graph independently (translation invariant)
+            pos_centered = pos.clone()
+            for graph_id in torch.unique(batch_mapping):
+                mask = batch_mapping == graph_id
+                if mask.sum() > 0:
+                    # Center of mass for this graph
+                    com = pos[mask].mean(dim=0, keepdim=True)
+                    pos_centered[mask] = pos[mask] - com
+            pos = pos_centered
+        
         # Get atomic numbers
         assert hasattr(batch, 'z') and batch.z is not None, "Batch must have 'z' attribute"
         x = batch.z
@@ -281,9 +319,13 @@ class QM9TransferModel(pl.LightningModule):
         
         # ESA returns (graph_embeddings, node_embeddings_before_pma) or just graph_embeddings
         if isinstance(esa_output, tuple):
-            graph_emb, _ = esa_output
+            graph_emb, node_emb_before_pma = esa_output
         else:
             graph_emb = esa_output
+            node_emb_before_pma = None
+        
+        # Note: Equivariant features are already integrated layer-wise in ESA backbone
+        # via EquivariantSAB layers, so no need for post-backbone equivariant branch
         
         # Graph embeddings should be [batch_size, graph_dim]
         # Handle different output formats from ESA

@@ -64,3 +64,10 @@ wandb_run_name: qm9-homo-transfer  # Will be overridden dynamically based on tar
 
 # Precision
 use_bfloat16: false
+
+# Equivariant features (experimental)
+use_equivariant_features: true  # Set to true to enable equivariant branch
+equivariant_lmax: 2  # Maximum angular momentum (l=0,1,2)
+equivariant_num_features: 16  # Number of tensor feature channels
+equivariant_fusion_method: add  # add, concat, or bilinear
+equivariant_cross_connection: true  # Enable cross-connection between branches

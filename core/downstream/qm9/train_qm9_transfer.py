@@ -194,6 +194,12 @@ def main():
             use_distance_bias=config.get('use_distance_bias', False),
             distance_bias_scale=config.get('distance_bias_scale', 1.0),
             distance_bias_cutoff=config.get('distance_bias_cutoff', 10.0),
+            # Equivariant features (experimental)
+            use_equivariant_features=config.get('use_equivariant_features', False),
+            equivariant_lmax=config.get('equivariant_lmax', 2),
+            equivariant_num_features=config.get('equivariant_num_features', 16),
+            equivariant_fusion_method=config.get('equivariant_fusion_method', 'add'),
+            equivariant_cross_connection=config.get('equivariant_cross_connection', True),
         )
     
     model = QM9TransferModel(
