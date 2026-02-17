@@ -87,12 +87,16 @@ max_distance: 10.0  # Appropriate for small molecules
 distance_bins: 16  # Fewer bins for easier learning
 
 # Pretraining tasks matching working model
-pretraining_tasks: ["short_range_distance", "mlm", "long_range_distance"]
+pretraining_tasks: ["short_range_distance", "mlm", "long_range_distance", "coordinate_denoising"]
 task_weights:
   long_range_distance: 1.0  # Global 3D structure learning
   short_range_distance: 1.0  # Local chemical bond learning
   mlm: 0.5  # Masked language modeling helps representation learning
-  
+  coordinate_denoising: 0.7  # Slightly lower so other tasks get more gradient once denoising plateaus
+
+# Coordinate denoising: larger noise = harder task, keeps learning longer (was 0.1 → quick plateau)
+coordinate_denoising_noise_std: 0.2
+coordinate_denoising_mask_ratio: 0.25  # Predict on more nodes (was 0.15)
 
 mlm_mask_ratio: 0.15
 temperature: 0.1
@@ -109,6 +113,9 @@ attention_dropout: 0.1
 # Note: Hierarchical blocks are ALWAYS available in universal representations
 # They are pre-processed in the adapter, no need for GET processing during training
 preserve_universal_blocks: true
+
+# Set to true to print batch stats (BATCH N, dataset mix, step losses) every 10/50 steps
+log_batch_stats: false
 
 # Fast training optimizations (since data loading is instant)
 fast_dev_run: false

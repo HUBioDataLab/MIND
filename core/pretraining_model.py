@@ -97,12 +97,19 @@ class PretrainingConfig:
     mlm_weight: float = 1.0
     mlm_mask_ratio: float = 0.15
     
+    # Coordinate denoising (predict added noise from node embeddings; SE(3)-invariant loss)
+    coordinate_denoising_noise_std: float = 0.1
+    coordinate_denoising_mask_ratio: float = 0.15  # fraction of nodes to compute loss on
+    
     # Temperature for softmax (used in distance prediction)
     temperature: float = 0.1
     
     # Per-type loss tracking (for multi-domain analysis)
     compute_per_type_losses: bool = False
     log_per_type_frequency: int = 10
+    
+    # Verbose batch logging (BATCH N, dataset mix, step loss prints); set true to enable
+    log_batch_stats: bool = False
     
     # Equivariant features (experimental)
     use_equivariant_features: bool = False  # Set to true to enable equivariant branch
@@ -457,6 +464,17 @@ class PretrainingTasks(nn.Module):
         self.long_range_distance_head = self._create_long_range_distance_head()
         self.distance_head = self._create_distance_head()  # Used by short_range_distance
         self.mlm_head = self._create_mlm_head()
+        self.coordinate_denoising_head = self._create_coordinate_denoising_head()
+    
+    def _create_coordinate_denoising_head(self):
+        """Predict 3D noise vector from node embeddings (invariant head; loss is SE(3)-invariant).
+        Literature: equivariant denoising (e.g. E(3)-equivariant noise prediction) would use
+        vector (1o) features from EquivariantSAB; currently we use scalar→3D MLP (invariant head)."""
+        return nn.Sequential(
+            nn.Linear(self.config.graph_dim, self.config.graph_dim // 2),
+            nn.ReLU(),
+            nn.Linear(self.config.graph_dim // 2, 3)
+        )
     
     def _create_long_range_distance_head(self):
         """Head for learning atom ordering relative to seed atom"""
@@ -598,6 +616,23 @@ class PretrainingTasks(nn.Module):
         loss = F.cross_entropy(logits[mask], original_types[mask], reduction='mean')
         return loss
     
+    def coordinate_denoising_loss(self, node_embeddings, data):
+        """
+        Coordinate denoising: predict noise (pos - clean_pos) from node embeddings.
+        Uses invariant head (scalar -> 3D); loss is MSE on masked nodes, SE(3)-invariant.
+        """
+        if not hasattr(data, 'clean_pos') or data.clean_pos is None:
+            return torch.tensor(0.0, device=node_embeddings.device)
+        if not hasattr(data, 'pos') or data.pos is None:
+            return torch.tensor(0.0, device=node_embeddings.device)
+        coord_mask = getattr(data, 'coord_mask', None)
+        if coord_mask is None:
+            coord_mask = torch.ones(node_embeddings.size(0), dtype=torch.bool, device=node_embeddings.device)
+        if coord_mask.sum() == 0:
+            return torch.tensor(0.0, device=node_embeddings.device)
+        true_noise = data.pos - data.clean_pos
+        pred_noise = self.coordinate_denoising_head(node_embeddings)
+        return F.mse_loss(pred_noise[coord_mask], true_noise[coord_mask], reduction='mean')
 
 
 
@@ -957,6 +992,34 @@ class PretrainingESAModel(pl.LightningModule):
         batch.masked_types = masked_types
         batch.z = masked_types  # encoder sees masked input
 
+    def _ensure_coord_denoising_attributes(self, batch):
+        """If coordinate_denoising is a task but batch has no clean_pos, add noise on-the-fly."""
+        if "coordinate_denoising" not in self.config.pretraining_tasks:
+            return
+        if hasattr(batch, 'clean_pos') and batch.clean_pos is not None:
+            return
+        if not hasattr(batch, 'pos') or batch.pos is None:
+            return
+        noise_std = getattr(self.config, 'coordinate_denoising_noise_std', 0.1)
+        mask_ratio = getattr(self.config, 'coordinate_denoising_mask_ratio', 0.15)
+        batch.clean_pos = batch.pos.clone()
+        noise = torch.randn_like(batch.pos, device=batch.pos.device, dtype=batch.pos.dtype) * noise_std
+        batch.pos = batch.clean_pos + noise
+        num_nodes = batch.pos.size(0)
+        coord_mask = torch.zeros(num_nodes, dtype=torch.bool, device=batch.pos.device)
+        if hasattr(batch, 'batch') and batch.batch is not None:
+            for g in batch.batch.unique().tolist():
+                node_mask = (batch.batch == g)
+                indices = torch.where(node_mask)[0]
+                n = indices.size(0)
+                k = max(1, int(n * mask_ratio))
+                perm = torch.randperm(n, device=batch.pos.device)[:k]
+                coord_mask[indices[perm]] = True
+        else:
+            k = max(1, int(num_nodes * mask_ratio))
+            coord_mask[torch.randperm(num_nodes, device=batch.pos.device)[:k]] = True
+        batch.coord_mask = coord_mask
+
     
     def _compute_pretraining_losses(self, batch, graph_embeddings, node_embeddings):
         """Compute all pretraining task losses"""
@@ -990,6 +1053,12 @@ class PretrainingESAModel(pl.LightningModule):
         if "mlm" in self.config.pretraining_tasks:
             losses['mlm'] = self.pretraining_tasks.mlm_loss(node_embeddings, batch)
             total_loss += self.config.task_weights['mlm'] * losses['mlm']
+
+        # Coordinate denoising (predict added noise; invariant head)
+        if "coordinate_denoising" in self.config.pretraining_tasks:
+            losses['coordinate_denoising'] = self.pretraining_tasks.coordinate_denoising_loss(node_embeddings, batch)
+            w = self.config.task_weights.get('coordinate_denoising', 1.0)
+            total_loss += w * losses['coordinate_denoising']
         
         return losses, total_loss
     
@@ -1108,6 +1177,20 @@ class PretrainingESAModel(pl.LightningModule):
                         except (AssertionError, AttributeError):
                             pass  # Skip if MLM attributes are missing for this type
 
+            # Coordinate denoising (masked nodes with clean_pos/coord_mask)
+            if "coordinate_denoising" in self.config.pretraining_tasks:
+                if hasattr(batch, 'clean_pos') and batch.clean_pos is not None and getattr(batch, 'coord_mask', None) is not None:
+                    masked_coord = batch.coord_mask[node_mask]
+                    if masked_coord.sum() > 0:
+                        masked_batch = batch.__class__()
+                        masked_batch.clean_pos = batch.clean_pos[node_mask]
+                        masked_batch.pos = batch.pos[node_mask]
+                        masked_batch.coord_mask = masked_coord
+                        masked_node_emb = node_embeddings[node_mask]
+                        coord_loss = self.pretraining_tasks.coordinate_denoising_loss(masked_node_emb, masked_batch)
+                        dtype_losses['coordinate_denoising'] = coord_loss
+                        dtype_total += self.config.task_weights.get('coordinate_denoising', 1.0) * coord_loss
+
             dtype_losses['total'] = dtype_total
             type_losses[dtype] = dtype_losses
         
@@ -1116,19 +1199,15 @@ class PretrainingESAModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Training step"""
         self._ensure_mlm_attributes(batch)
-        # DEBUG: Check if dataset_type exists
-        if batch_idx % 10 == 0:
+        self._ensure_coord_denoising_attributes(batch)
+        if getattr(self.config, 'log_batch_stats', False) and batch_idx % 10 == 0:
             if hasattr(batch, 'dataset_type'):
                 print(f"✅ Batch {batch_idx} has dataset_type: {batch.dataset_type}")
             else:
                 print(f"⚠️  Batch {batch_idx} MISSING dataset_type attribute!")
-        
-        # Log batch composition every 10 batches
-        if batch_idx % 10 == 0:
+        if getattr(self.config, 'log_batch_stats', False) and batch_idx % 10 == 0:
             num_graphs = batch.num_graphs if hasattr(batch, 'num_graphs') else 1
             num_atoms = batch.num_nodes if hasattr(batch, 'num_nodes') else batch.x.size(0)
-            
-            # Calculate atoms per graph
             if hasattr(batch, 'batch'):
                 atoms_per_graph = [(batch.batch == i).sum().item() for i in range(num_graphs)]
                 avg_atoms = sum(atoms_per_graph) / len(atoms_per_graph)
@@ -1137,14 +1216,11 @@ class PretrainingESAModel(pl.LightningModule):
             else:
                 avg_atoms = num_atoms / num_graphs
                 min_atoms = max_atoms = int(avg_atoms)
-            
             print(f"\n{'='*80}")
             print(f"📊 BATCH {batch_idx} | Epoch {self.current_epoch}")
             print(f"{'='*80}")
             print(f"  Total Graphs: {num_graphs:4d} | Total Atoms: {num_atoms:6,d}")
             print(f"  Avg Atoms:    {avg_atoms:6.1f} | Min: {min_atoms:6,d} | Max: {max_atoms:6,d}")
-            
-            # Show dataset composition if available
             if hasattr(batch, 'dataset_type'):
                 from collections import Counter
                 if isinstance(batch.dataset_type, (list, tuple)):
@@ -1153,19 +1229,15 @@ class PretrainingESAModel(pl.LightningModule):
                     type_counts = Counter(batch.dataset_type.tolist() if hasattr(batch.dataset_type, 'tolist') else [batch.dataset_type.item()])
                 else:
                     type_counts = {batch.dataset_type: num_graphs}
-                
                 print(f"  Dataset Mix:")
                 for dtype, count in sorted(type_counts.items()):
                     pct = count / num_graphs * 100
-                    # Calculate atoms for this dataset type
                     if hasattr(batch, 'batch') and isinstance(batch.dataset_type, (list, tuple)):
                         type_atoms = sum(atoms_per_graph[i] for i, dt in enumerate(batch.dataset_type) if dt == dtype)
                         print(f"    {dtype.upper():12s}: {count:4d} graphs ({pct:5.1f}%) | {type_atoms:6,d} atoms")
                     else:
                         print(f"    {dtype.upper():12s}: {count:4d} graphs ({pct:5.1f}%)")
-            
             print(f"{'='*80}")
-        
         graph_embeddings, node_embeddings = self.forward(batch)
         
         losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
@@ -1202,6 +1274,7 @@ class PretrainingESAModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         """Validation step"""
         self._ensure_mlm_attributes(batch)
+        self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
         
         losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
@@ -1224,6 +1297,7 @@ class PretrainingESAModel(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         """Test step"""
         self._ensure_mlm_attributes(batch)
+        self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
         
         losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)

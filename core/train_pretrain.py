@@ -29,7 +29,7 @@ sys.path.insert(0, parent_dir)
 from core.pretraining_model import PretrainingESAModel, PretrainingConfig, create_pretraining_config
 from core.batch_statistics_callback import BatchStatisticsCallback
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
-from data_loading.pretraining_transforms import MaskAtomTypes
+from data_loading.pretraining_transforms import MaskAtomTypes, AddRandomNoise
 from data_loading.chunk_sampler import ChunkAwareSampler
 from data_loading.dynamic_chunk_sampler import DynamicChunkAwareBatchSampler
 from data_loading.improved_dynamic_sampler import ImprovedDynamicBatchSampler
@@ -77,6 +77,12 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
             mask_ratio=mask_ratio,
             mask_token=0  # Assuming 0 is the mask token
         ))
+
+    # Add coordinate denoising transform (noise on pos, clean_pos + coord_mask)
+    if "coordinate_denoising" in config.pretraining_tasks:
+        noise_std = getattr(config, 'coordinate_denoising_noise_std', 0.1)
+        mask_ratio = getattr(config, 'coordinate_denoising_mask_ratio', 0.15)
+        transforms.append(AddRandomNoise(noise_std=noise_std, mask_ratio=mask_ratio))
     
     return Compose(transforms) if len(transforms) > 0 else None
 
