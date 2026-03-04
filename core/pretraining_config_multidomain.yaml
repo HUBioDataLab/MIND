@@ -154,25 +154,8 @@ molecule_max_atoms: null #! Not used in chunked datasets.
 gaussian_kernels: 128
 cutoff_distance: 5.0 #? Graph representation max distance is n angstrom. (used .pkl -> .pt)
 max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
-max_distance: 20.0  #? Used in training.
+max_distance: 20.0  #? Used in training. 
 distance_bins: 5
-
-# -------------------------
-# Distance-Based Attention Bias (Optional)
-# -------------------------
-# Enables 3D distance-based attention bias: far atoms get less attention
-use_distance_bias: false  # Set to true to enable distance-based attention bias
-distance_bias_scale: 1.0  # Scaling factor for distance bias (higher = stronger distance penalty)
-distance_bias_cutoff: 10.0  # Distances beyond this are clamped (Angstroms)
-
-# -------------------------
-# Equivariant Features (Layer-wise Integration)
-# -------------------------
-use_equivariant_features: true  # Set to true to enable equivariant branch (layer-wise integration)
-equivariant_lmax: 2  # Maximum angular momentum (l=0,1,2)
-equivariant_num_features: 16  # Number of tensor feature channels
-equivariant_fusion_method: add  # add, concat, bilinear, or gated
-equivariant_cross_connection: true  # Enable cross-connection between invariant and equivariant branches
 
 # -------------------------
 # Hybrid Edge Construction (Salad-inspired)
@@ -198,11 +181,12 @@ replace_existing_random_edges: true    # If true, removes static Tier 3 from .pt
 # -------------------------
 # Ön-Eğitim Görevleri
 # -------------------------
-pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
+pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm", "residue_type_prediction"]
 task_weights:
   long_range_distance: 1.5
   short_range_distance: 1.0
   mlm: 0.3
+  residue_type_prediction: 1.0
 mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task
 temperature: 0.2 #! Not used
 
