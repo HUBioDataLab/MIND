@@ -43,8 +43,8 @@ multi_domain:
       chunk_range: null
     
     metabolite:
-      enabled: false  # Not yet available
-      chunk_dir: "../data/metabolites/processed_chunks"
+      enabled: true  # Not yet available
+      chunk_dir: "/home/ege/MIND_HuBioDataLab/data/COCONUT/processed"
       atom_ratio: 10
     
     rna:
