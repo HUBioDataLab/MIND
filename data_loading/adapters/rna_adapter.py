@@ -6,11 +6,14 @@ RNA Adapter
 Adapter to parse raw RNA CIF files into the UniversalMolecule format.
 Processes RNA structures from databases like RNA3DB, filtering for
 standard RNA nucleotides (A, U, G, C) and their modified variants.
+
+Supports 23-atom uniform representation to prevent sequence leakage during MLM training.
 """
 
 import sys
+import numpy as np
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # Add project root to sys.path to allow imports like 'data_loading.adapters'
 sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -21,12 +24,40 @@ from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMole
 # BioPython for reading CIF files
 from Bio.PDB import MMCIFParser
 
+# Constants for 23-atom uniform representation
+# RNA backbone atoms (standard nucleotide structure)
+BACKBONE_ATOMS = ['P', 'OP1', 'OP2', 'O5\'', 'C5\'', 'C4\'', 'O4\'', 'C3\'', 'O3\'', 'C2\'', 'O2\'', 'C1\'']
+MAX_SIDECHAIN_ATOMS = 11  # 23 total - 12 backbone = 11 sidechain
+TOTAL_ATOMS_PER_RESIDUE = 23  # Fixed target for all nucleotides
+
+# Canonical ordering for sidechain atoms (priority-based)
+# This ensures consistent ordering across different RNA structures
+# Prioritizes base atoms (N, C) over hydrogens
+SIDECHAIN_ATOM_PRIORITY = [
+    # Purine bases (A, G) - N9, C8, N7, C6, N1, C2, N3, C4, C5
+    'N9', 'C8', 'N7', 'C6', 'N1', 'C2', 'N3', 'C4', 'C5',
+    # Pyrimidine bases (C, U) - N1, C2, N3, C4, C5, C6
+    'N1', 'C2', 'N3', 'C4', 'C5', 'C6',
+    # Amino/carbonyl groups
+    'N4', 'O4', 'N6', 'O6', 'N2', 'O2',
+    # Additional backbone-adjacent atoms
+    'N5', 'N8', 'C7'
+]
+
+# Virtual atom type (single generic type for all virtual atoms)
+# This prevents sequence leakage: model cannot infer nucleotide type from virtual atom type
+VIRTUAL_ATOM = 'V'  # All virtual atoms have the same generic type
+
+
 class RNAAdapter(BaseAdapter):
     """
     Adapter to parse raw RNA CIF files into the UniversalMolecule format.
     
     Supports mmCIF format with optional filtering via manifest files.
     Processes standard RNA nucleotides (A, U, G, C) and common modified bases.
+    
+    Supports 23-atom uniform representation to prevent sequence leakage during
+    masked language modeling training.
     """
 
     # Standard RNA nucleotides and common modified variants
@@ -38,19 +69,189 @@ class RNAAdapter(BaseAdapter):
         'M2G', 'OMC', 'OMG', 'YG', 'H2U'
     }
 
-    def __init__(self, include_modified: bool = True, include_ions: bool = False) -> None:
+    def __init__(self, include_modified: bool = True, include_ions: bool = False, 
+                 use_23atom_uniform: bool = True) -> None:
         """
         Initialize RNAAdapter.
         
         Args:
             include_modified: Include modified RNA bases if True
             include_ions: Include metal ions and small molecules if True
+            use_23atom_uniform: Use 23-atom uniform representation to prevent sequence leakage
         """
         super().__init__("rna")
         self.include_modified = include_modified
         self.include_ions = include_ions
+        self.use_23atom_uniform = use_23atom_uniform
         # Initialize parser with QUIET=True to suppress warnings
         self.cif_parser = MMCIFParser(QUIET=True)
+        
+        if self.use_23atom_uniform:
+            print(f"✨ 23-atom uniform representation ENABLED")
+            print(f"   Each nucleotide will have exactly {TOTAL_ATOMS_PER_RESIDUE} atoms")
+            print(f"   ({len(BACKBONE_ATOMS)} backbone + {MAX_SIDECHAIN_ATOMS} sidechain)")
+            print(f"   Virtual atoms use generic type '{VIRTUAL_ATOM}' to prevent sequence leakage")
+
+    def _get_base_center_position(self, atoms: List[UniversalAtom], res_name: str) -> Tuple[float, float, float]:
+        """
+        Get the geometric center of the nucleobase for virtual atom placement.
+        
+        Falls back to C1' position if base atoms are not found.
+        
+        Args:
+            atoms: List of atoms in the residue
+            res_name: Residue name (e.g., 'A', 'U', 'G', 'C')
+            
+        Returns:
+            Position tuple (x, y, z)
+        """
+        # Try to find base atoms (N9 for purines, N1 for pyrimidines)
+        base_markers = ['N9', 'N1', 'C8', 'C2', 'C4']
+        base_positions = []
+        
+        for atom in atoms:
+            if atom.pos_code in base_markers:
+                base_positions.append(atom.position)
+        
+        # If we found base atoms, calculate their geometric center
+        if base_positions:
+            avg_x = sum(pos[0] for pos in base_positions) / len(base_positions)
+            avg_y = sum(pos[1] for pos in base_positions) / len(base_positions)
+            avg_z = sum(pos[2] for pos in base_positions) / len(base_positions)
+            return (avg_x, avg_y, avg_z)
+        
+        # Fallback to C1' (anomeric carbon)
+        for atom in atoms:
+            if atom.pos_code == 'C1\'':
+                return atom.position
+        
+        # Fallback to C4' position
+        for atom in atoms:
+            if atom.pos_code == 'C4\'':
+                return atom.position
+        
+        # Final fallback: first atom position
+        if atoms:
+            return atoms[0].position
+        
+        return (0.0, 0.0, 0.0)
+
+    def _sort_sidechain_atoms(self, atoms: List[UniversalAtom]) -> List[UniversalAtom]:
+        """
+        Sort sidechain atoms by priority order for canonical representation.
+        
+        Args:
+            atoms: List of sidechain atoms
+            
+        Returns:
+            Sorted list of sidechain atoms
+        """
+        def get_priority(atom: UniversalAtom) -> int:
+            """Get priority index for atom (lower = higher priority)"""
+            try:
+                return SIDECHAIN_ATOM_PRIORITY.index(atom.pos_code)
+            except ValueError:
+                # Atom not in priority list, put at end
+                return len(SIDECHAIN_ATOM_PRIORITY)
+        
+        return sorted(atoms, key=get_priority)
+
+    def _get_virtual_atom_type(self, res_name: str, virtual_index: int, real_sidechain_count: int) -> str:
+        """
+        Get virtual atom type (always generic to prevent sequence leakage).
+        
+        All virtual atoms have the same type 'V' to prevent the model from inferring
+        nucleotide identity from virtual atom types. This ensures the model learns from
+        geometric and chemical features of REAL atoms only.
+        
+        Disambiguation between nucleotides (e.g., A vs U) happens through their
+        REAL atoms (different nitrogenous bases), not virtual atoms.
+        
+        Args:
+            res_name: Residue name (unused, kept for API compatibility)
+            virtual_index: Index of this virtual atom (unused)
+            real_sidechain_count: How many real sidechain atoms (unused)
+            
+        Returns:
+            Generic virtual atom type 'V'
+        """
+        return VIRTUAL_ATOM
+
+    def _standardize_residue_to_23_atoms(
+        self,
+        atoms: List[UniversalAtom],
+        res_name: str,
+        block_idx: int
+    ) -> List[UniversalAtom]:
+        """
+        Standardize a residue to exactly 23 atoms (12 backbone + 11 sidechain).
+        
+        For nucleotides with < 11 sidechain atoms, virtual atoms are added at the
+        base center position. This prevents the model from inferring nucleotide type
+        from atom count during masked language modeling.
+        
+        For nucleotides with > 11 sidechain atoms, the highest priority atoms are kept.
+        
+        Args:
+            atoms: List of atoms in the residue
+            res_name: Residue name (e.g., 'A', 'U', 'G', 'C')
+            block_idx: Block index for atom creation
+            
+        Returns:
+            List of exactly 23 atoms (12 backbone + 11 sidechain)
+        """
+        # Separate backbone and sidechain atoms
+        backbone_atoms = []
+        sidechain_atoms = []
+        
+        for atom in atoms:
+            if atom.pos_code in BACKBONE_ATOMS:
+                backbone_atoms.append(atom)
+            else:
+                sidechain_atoms.append(atom)
+        
+        # Sort sidechain atoms by canonical order
+        sidechain_atoms = self._sort_sidechain_atoms(sidechain_atoms)
+        
+        # Get base center position for virtual atoms
+        virtual_position = self._get_base_center_position(atoms, res_name)
+        
+        # Create standardized sidechain (exactly 11 atoms)
+        standardized_sidechain = []
+        real_sidechain_count = len(sidechain_atoms)
+        
+        for i in range(MAX_SIDECHAIN_ATOMS):
+            if i < len(sidechain_atoms):
+                # Real atom exists
+                atom = sidechain_atoms[i]
+                # Update atom_idx_in_block to reflect new position
+                atom.atom_idx_in_block = len(backbone_atoms) + i
+                standardized_sidechain.append(atom)
+            else:
+                # Need to add virtual atom
+                virtual_idx = i - real_sidechain_count
+                virtual_type = self._get_virtual_atom_type(res_name, virtual_idx, real_sidechain_count)
+                
+                virtual_atom = UniversalAtom(
+                    element=virtual_type,
+                    position=virtual_position,
+                    pos_code=f'V{i+1}',  # V1, V2, V3, ... for virtual atoms
+                    block_idx=block_idx,
+                    atom_idx_in_block=len(backbone_atoms) + i,
+                    entity_idx=0,  # RNA entity
+                    is_virtual=True,
+                    virtual_type=virtual_type
+                )
+                standardized_sidechain.append(virtual_atom)
+        
+        # Combine: 12 backbone + 11 sidechain = 23 atoms
+        standardized_atoms = backbone_atoms + standardized_sidechain
+        
+        # Ensure all atoms have correct atom_idx_in_block
+        for i, atom in enumerate(standardized_atoms):
+            atom.atom_idx_in_block = i
+        
+        return standardized_atoms
 
     def load_raw_data(
         self,
@@ -222,6 +423,14 @@ class RNAAdapter(BaseAdapter):
                         block_atoms.append(uni_atom)
                     
                     if block_atoms:
+                        # Apply 23-atom standardization for standard RNA nucleotides
+                        if self.use_23atom_uniform and is_rna:
+                            block_atoms = self._standardize_residue_to_23_atoms(
+                                block_atoms,
+                                res_name,
+                                len(blocks)
+                            )
+                        
                         # Create a UniversalBlock for the nucleotide if it contains atoms
                         block = UniversalBlock(
                             symbol=res_name,  # e.g., 'A', 'U', 'G', 'C', or modified bases
@@ -250,7 +459,7 @@ class RNAAdapter(BaseAdapter):
         )
 
 
-        # Add this to the END of your rna_adapter.py file
+# Add this to the END of your rna_adapter.py file
 
 if __name__ == "__main__":
     import argparse
@@ -266,6 +475,8 @@ if __name__ == "__main__":
                        help="Include modified RNA bases")
     parser.add_argument("--include-ions", action="store_true", default=False,
                        help="Include metal ions")
+    parser.add_argument("--use-23atom-uniform", action="store_true", default=True,
+                       help="Use 23-atom uniform representation")
     
     args = parser.parse_args()
     
@@ -276,7 +487,8 @@ if __name__ == "__main__":
     # Create adapter
     adapter = RNAAdapter(
         include_modified=args.include_modified,
-        include_ions=args.include_ions
+        include_ions=args.include_ions,
+        use_23atom_uniform=args.use_23atom_uniform
     )
     
     # Load raw data
