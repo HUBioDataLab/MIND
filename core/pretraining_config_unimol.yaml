@@ -1,0 +1,155 @@
+# ===================================================================
+# MIND Project - UniMol Single-Dataset Pretraining Configuration
+# ===================================================================
+# This config is a Protein-style template adapted for single-dataset
+# UniMol training from chunked PyG files.
+#
+# The loader will auto-detect:
+#   /home/arin/8TB_arin/unimol_pyg_full/universal_unimol_chunk_*
+#
+# Run:
+#   python core/train_pretrain.py --config-yaml-path core/pretraining_config_unimol_single.yaml
+# ===================================================================
+
+# -------------------------
+# Genel ve Çıktı Ayarları
+# -------------------------
+seed: 42
+out_path: "outputs/unimol_pretrain_single"
+wandb_project_name: "MIND-UniMol-Pretraining"
+wandb_run_name: "unimol-single-run-1"
+
+# -------------------------
+# Veri Seti Ayarları
+# -------------------------
+dataset: UNIMOL
+# Base path used for chunk auto-detection: parent_dir / "{base_name}_chunk_*"
+dataset_download_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
+universal_cache_path: null
+use_universal_cache: false
+num_workers: 8
+max_samples: null
+molecule_max_atoms: 128
+
+# -------------------------
+# Eğitim Parametreleri
+# -------------------------
+max_epochs: 80
+batch_size: 256
+lr: 0.0005
+early_stopping_patience: 30
+gradient_clip_val: 0.5
+optimiser_weight_decay: 1.0e-10
+monitor_loss_name: "train_total_loss"
+use_bfloat16: false
+accelerator: auto
+devices: auto
+precision: 16
+num_sanity_val_steps: 0
+fast_dev_run: false
+
+# -------------------------
+# Model Mimarisi (ESA)
+# -------------------------
+apply_attention_on: node
+graph_dim: 512
+edge_dim: 64
+hidden_dims: [512, 512, 512, 512, 512, 512, 512, 512]
+num_heads: [8, 8, 8, 8, 8, 8, 8, 8]
+layer_types: ["M", "S", "S", "M", "S", "M", "S", "P"]
+xformers_or_torch_attn: xformers
+norm_type: LN
+use_3d_coordinates: true
+set_max_items: 0
+triu_attn_mask: false
+
+# -------------------------
+# MLP Ayarları
+# -------------------------
+use_mlps: true
+mlp_hidden_size: 512
+num_mlp_layers: 3
+mlp_type: standard
+mlp_dropout: 0.0
+use_mlp_ln: false
+pre_or_post: pre
+
+# -------------------------
+# Dropout Ayarları
+# -------------------------
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+
+# -------------------------
+# 3D Geometrik Parametreler
+# -------------------------
+molecule_max_atoms: 128
+gaussian_kernels: 128
+cutoff_distance: 5.0
+max_neighbors: 64
+max_distance: 10.0
+distance_bins: 16
+
+# -------------------------
+# UniMol / Small Molecule Settings
+# -------------------------
+use_hybrid_edges: false
+use_hierarchical_features: false
+block_embedding_dim: 0
+position_embedding_dim: 16
+entity_embedding_dim: 0
+max_block_types: 1
+max_position_types: 1
+max_entity_types: 1
+preserve_universal_blocks: false
+use_posenc: false
+use_equivariant_features: true
+equivariant_lmax: 2
+equivariant_num_features: 16
+equivariant_fusion_method: add
+equivariant_cross_connection: true
+
+# -------------------------
+# Ön-Eğitim Görevleri
+# -------------------------
+pretraining_tasks: ["short_range_distance", "mlm", "long_range_distance", "coordinate_denoising"]
+task_weights:
+  long_range_distance: 0.5
+  short_range_distance: 0.5
+  mlm: 1.0
+  coordinate_denoising: 2.0
+mlm_mask_ratio: 0.15
+temperature: 0.1
+coordinate_denoising_noise_std: 0.5
+coordinate_denoising_mask_ratio: 0.25
+log_coord_denoising_debug: true
+log_coord_denoising_debug_interval: 100
+
+# -------------------------
+# Yeni Kod Yapısı İçin Gerekli Diğer Parametreler
+# -------------------------
+# atom_types is used by the current UniMol/ESA encoder and task heads.
+atom_types: 121
+# max_atomic_num is kept for compatibility with any legacy utilities.
+max_atomic_num: 120
+rwse_dim: 24
+lap_dim: 4
+mlp_inter_dim: 128
+pma_num_outputs: 32
+max_node_items: 100
+max_edge_items: 1000
+output_dim: 1
+use_memory_efficient_attention: true
+attention_dropout: 0.1
+
+# -------------------------------------------------------------------
+# Notes
+# -------------------------------------------------------------------
+# - This config is intended for single-dataset UniMol training.
+# - The loader will auto-detect chunked PyG directories under the
+#   dataset_download_dir parent and use LazyUniversalDataset.
+# - If you want to train from a raw universal .pkl instead, point
+#   dataset_download_dir/universal_cache_path to that cache instead.

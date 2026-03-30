@@ -270,8 +270,23 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
     else:
         # SINGLE DATASET (original behavior)
         print(f"📦 Loading single dataset from: {dataset_dir}")
-        
-        if dataset_name.upper() == 'QM9':
+
+        if dataset_name.upper() == 'UNIMOL':
+            from data_loading.cache_to_pyg import OptimizedUniversalUniMolDataset
+            max_samples = getattr(config, 'max_samples', None)
+            print(f"📊 Loading {'all' if max_samples is None else f'{max_samples:,}'} samples from universal cache...")
+
+            full_dataset = OptimizedUniversalUniMolDataset(
+                root=dataset_dir,
+                universal_cache_path=getattr(config, 'universal_cache_path', None),
+                max_samples=max_samples,
+                molecule_max_atoms=getattr(config, 'molecule_max_atoms', None),
+                cutoff_distance=getattr(config, 'cutoff_distance', 5.0),
+                max_neighbors=getattr(config, 'max_neighbors', 32),
+                transform=transforms
+            )
+
+        elif dataset_name.upper() == 'QM9':
             max_samples = getattr(config, 'max_samples', 50000)
             print(f"📊 Loading {max_samples:,} samples from universal cache...")
             

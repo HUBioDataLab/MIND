@@ -43,13 +43,19 @@ multi_domain:
     qm9:
       enabled: true  # QM9 with legacy edges (cutoff 5.0Å, 16 neighbors)
       chunk_dir: "/home/arin/data/qm9_chunks"  # Will match qm9_chunks_chunk_0 through qm9_chunks_chunk_4
-      atom_ratio: 30  
+      atom_ratio: 5  
       chunk_range: null
     
     metabolite:
       enabled: true  # Not yet available
       chunk_dir: "/home/ege/MIND_HuBioDataLab/data/COCONUT/processed"
       atom_ratio: 10  # 10% of atoms from metabolites
+      chunk_range: null
+
+    unimol:
+      enabled: true
+      chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
+      atom_ratio: 25
       chunk_range: null
     
     rna:
@@ -126,6 +132,15 @@ norm_type: LN
 use_3d_coordinates: true
 set_max_items: 0
 triu_attn_mask: false #! Not used
+
+# -------------------------
+# Equivariant Features
+# -------------------------
+use_equivariant_features: true
+equivariant_lmax: 2
+equivariant_num_features: 16
+equivariant_fusion_method: add
+equivariant_cross_connection: true
 
 # -------------------------
 # MLP Ayarları
