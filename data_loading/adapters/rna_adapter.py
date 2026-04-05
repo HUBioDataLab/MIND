@@ -94,9 +94,12 @@ class RNAAdapter(BaseAdapter):
 
     def _get_base_center_position(self, atoms: List[UniversalAtom], res_name: str) -> Tuple[float, float, float]:
         """
-        Get the geometric center of the nucleobase for virtual atom placement.
+        Get the 3D coordinate for virtual atom placement.
         
-        Falls back to C1' position if base atoms are not found.
+        Uses a standardized rule across modalities to prevent bias in the foundation model:
+        1) Primary: C1' position (sugar attachment point).
+        2) Fallback: C4' position on the backbone.
+        3) Final fallback: First atom position.
         
         Args:
             atoms: List of atoms in the residue
@@ -105,32 +108,17 @@ class RNAAdapter(BaseAdapter):
         Returns:
             Position tuple (x, y, z)
         """
-        # Try to find base atoms (N9 for purines, N1 for pyrimidines)
-        base_markers = ['N9', 'N1', 'C8', 'C2', 'C4']
-        base_positions = []
-        
-        for atom in atoms:
-            if atom.pos_code in base_markers:
-                base_positions.append(atom.position)
-        
-        # If we found base atoms, calculate their geometric center
-        if base_positions:
-            avg_x = sum(pos[0] for pos in base_positions) / len(base_positions)
-            avg_y = sum(pos[1] for pos in base_positions) / len(base_positions)
-            avg_z = sum(pos[2] for pos in base_positions) / len(base_positions)
-            return (avg_x, avg_y, avg_z)
-        
-        # Fallback to C1' (anomeric carbon)
+        # 1) Primary target: C1' (anomeric carbon, sugar-base linkage)
         for atom in atoms:
             if atom.pos_code == 'C1\'':
                 return atom.position
         
-        # Fallback to C4' position
+        # 2) Fallback to C4' position
         for atom in atoms:
             if atom.pos_code == 'C4\'':
                 return atom.position
         
-        # Final fallback: first atom position
+        # 3) Final fallback: first atom position
         if atoms:
             return atoms[0].position
         

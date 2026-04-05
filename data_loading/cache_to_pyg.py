@@ -14,8 +14,6 @@ import sys
 import torch
 import pickle
 import shutil
-from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Iterator, Callable
 from itertools import islice
 from torch_geometric.data import Data, InMemoryDataset
@@ -34,29 +32,26 @@ if 'data_types' not in sys.modules:
 from torch_cluster import radius_graph
 warnings.filterwarnings('ignore')
 
-# Periodic table whitelist: all other atoms collapse to R (rare atom).
+# Periodic table: element symbol -> atomic number
 ELEMENT_TO_ATOMIC_NUMBER = {
-    'H': 1,
-    'C': 6,
-    'N': 7,
-    'O': 8,
-    'F': 9,
-    'Na': 11,
-    'P': 15,
-    'S': 16,
-    'Cl': 17,
-    'Br': 35,
-    'I': 53,
+    'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8,
+    'F': 9, 'Ne': 10, 'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15,
+    'S': 16, 'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20, 'Sc': 21, 'Ti': 22,
+    'V': 23, 'Cr': 24, 'Mn': 25, 'Fe': 26, 'Co': 27, 'Ni': 28, 'Cu': 29,
+    'Zn': 30, 'Ga': 31, 'Ge': 32, 'As': 33, 'Se': 34, 'Br': 35, 'Kr': 36,
+    'Rb': 37, 'Sr': 38, 'Y': 39, 'Zr': 40, 'Nb': 41, 'Mo': 42, 'Tc': 43,
+    'Ru': 44, 'Rh': 45, 'Pd': 46, 'Ag': 47, 'Cd': 48, 'In': 49, 'Sn': 50,
+    'Sb': 51, 'Te': 52, 'I': 53, 'Xe': 54, 'Cs': 55, 'Ba': 56, 'La': 57,
+    'Ce': 58, 'Pr': 59, 'Nd': 60, 'Pm': 61, 'Sm': 62, 'Eu': 63, 'Gd': 64,
+    'Tb': 65, 'Dy': 66, 'Ho': 67, 'Er': 68, 'Tm': 69, 'Yb': 70, 'Lu': 71,
+    'Hf': 72, 'Ta': 73, 'W': 74, 'Re': 75, 'Os': 76, 'Ir': 77, 'Pt': 78,
+    'Au': 79, 'Hg': 80, 'Tl': 81, 'Pb': 82, 'Bi': 83, 'Po': 84, 'At': 85,
+    'Rn': 86,
+    # Virtual atom for 14-atom uniform representation
+    # All virtual atoms share the same type to prevent sequence leakage
+    'V': 120,       # Generic virtual atom (used for padding in 14-atom representation)
 }
-RARE_ATOMIC_NUMBER = 119
-DEFAULT_ATOMIC_NUMBER = RARE_ATOMIC_NUMBER
-
-
-def element_to_atomic_number(element: str) -> int:
-    """Map allowed atoms to their atomic numbers and collapse everything else to R."""
-    s = str(element).strip()
-    element_normalized = s.capitalize() if len(s) <= 2 else s
-    return ELEMENT_TO_ATOMIC_NUMBER.get(element_normalized, RARE_ATOMIC_NUMBER)
+DEFAULT_ATOMIC_NUMBER = 6  # Carbon
 
 
 def load_molecules_iteratively(file_path: str) -> Iterator[UniversalMolecule]:
@@ -67,66 +62,6 @@ def load_molecules_iteratively(file_path: str) -> Iterator[UniversalMolecule]:
                 yield pickle.load(f)
             except EOFError:
                 break
-
-
-def process_single_pkl_to_pyg(args_tuple) -> str:
-    """Top-level worker for optional directory-mode conversion."""
-    (
-        input_pkl,
-        output_dir,
-        dataset_type,
-        max_samples,
-        cutoff,
-        max_neighbors,
-        force,
-        use_hybrid_edges,
-        sequence_neighbors_k,
-        max_spatial_neighbors,
-        num_random_edges,
-        random_edge_min_distance,
-    ) = args_tuple
-
-    dataset_class = {
-        "qm9": OptimizedUniversalQM9Dataset,
-        "lba": OptimizedUniversalLBADataset,
-        "pdb": OptimizedUniversalDataset,
-        "coconut": OptimizedUniversalCOCONUTDataset,
-        "rna": OptimizedUniversalRNADataset,
-        "unimol": OptimizedUniversalUniMolDataset,
-    }[dataset_type]
-
-    output_dir_path = Path(output_dir)
-    os.makedirs(output_dir_path, exist_ok=True)
-
-    processed_dir = os.path.join(output_dir_path, "processed")
-    if os.path.exists(processed_dir) and not force:
-        pt_files = [f for f in os.listdir(processed_dir) if f.endswith('.pt')]
-        if pt_files:
-            return f"✅ Output already exists: {os.path.join(processed_dir, pt_files[0])}"
-
-    if dataset_type == "pdb" and use_hybrid_edges:
-        dataset = dataset_class(
-            root=str(output_dir_path),
-            universal_cache_path=str(input_pkl),
-            max_samples=max_samples,
-            cutoff_distance=cutoff,
-            max_neighbors=max_neighbors,
-            use_hybrid_edges=True,
-            sequence_neighbors_k=sequence_neighbors_k,
-            max_spatial_neighbors=max_spatial_neighbors,
-            num_random_edges=num_random_edges,
-            random_edge_min_distance=random_edge_min_distance,
-        )
-    else:
-        dataset = dataset_class(
-            root=str(output_dir_path),
-            universal_cache_path=str(input_pkl),
-            max_samples=max_samples,
-            cutoff_distance=cutoff,
-            max_neighbors=max_neighbors,
-        )
-
-    return f"✅ Created {dataset_type.upper()} dataset: {len(dataset)} samples -> {dataset.processed_paths[0]}"
 
 class OptimizedUniversalDataset(InMemoryDataset):
     """
@@ -581,7 +516,9 @@ class OptimizedUniversalDataset(InMemoryDataset):
 
     def _element_to_atomic_number(self, element: str) -> int:
         """Convert element symbol to atomic number using dictionary lookup."""
-        return element_to_atomic_number(element)
+        s = str(element).strip()
+        element_normalized = s.capitalize() if len(s) <= 2 else s
+        return ELEMENT_TO_ATOMIC_NUMBER.get(element_normalized, DEFAULT_ATOMIC_NUMBER)
 
     def _calculate_edge_features(self, positions: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """Calculate edge features (distances) between connected atoms"""
@@ -689,42 +626,17 @@ class OptimizedUniversalRNADataset(OptimizedUniversalDataset):
                         cutoff_distance, max_neighbors, transform, pre_transform, pre_filter)
 
 
-class OptimizedUniversalUniMolDataset(OptimizedUniversalDataset):
-    """UniMol Dataset using cached PyTorch Geometric tensors."""
-
-    def __init__(
-        self,
-        root: Optional[str] = None,
-        universal_cache_path: Optional[str] = None,
-        max_samples: Optional[int] = None,
-        molecule_max_atoms: Optional[int] = None,
-        cutoff_distance: float = 5.0,
-        max_neighbors: int = 32,
-        transform: Optional[Callable] = None,
-        pre_transform: Optional[Callable] = None,
-        pre_filter: Optional[Callable] = None
-    ):
-        if root is None:
-            root = os.path.join(os.path.dirname(__file__), 'processed', 'unimol_optimized')
-        if universal_cache_path is None:
-            universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_unimol_all.pkl')
-        super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
-                        transform, pre_transform, pre_filter)
-
-
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Convert universal .pkl cache to PyG .pt format")
     parser.add_argument("--input-pkl", required=True, help="Path to input .pkl file")
-    parser.add_argument("--input-pkl-dir", default=None, help="Directory containing input .pkl files (optional)")
     parser.add_argument("--output-dir", required=True, help="Output directory for .pt file")
-    parser.add_argument("--dataset-type", choices=["qm9", "lba", "pdb", "coconut", "rna", "unimol"], required=True, help="Dataset type")
+    parser.add_argument("--dataset-type", choices=["qm9", "lba", "pdb", "coconut", "rna"], required=True, help="Dataset type")
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum samples to process")
     parser.add_argument("--cutoff", type=float, default=5.0, help="Distance cutoff for edges (Å)")
     parser.add_argument("--max-neighbors", type=int, default=64, help="Maximum neighbors per atom")
     parser.add_argument("--force", action="store_true", help="Force rebuild if output exists")
-    parser.add_argument("--num-workers", type=int, default=None, help="Parallel workers for directory mode")
     
     # Hybrid edge construction (Salad-inspired)
     parser.add_argument("--use-hybrid-edges", action="store_true", help="Enable 3-tier hybrid edge construction")
@@ -735,64 +647,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.input_pkl and args.input_pkl_dir:
-        parser.error("Use only one of --input-pkl or --input-pkl-dir")
-    if not args.input_pkl:
-        parser.error("Provide --input-pkl")
-
-    # Optional directory mode: if a directory is passed via --input-pkl or --input-pkl-dir,
-    # convert each .pkl file independently, otherwise keep the original single-file behavior.
-    input_path = args.input_pkl_dir or args.input_pkl
-    if os.path.isdir(input_path):
-        input_files = sorted(
-            p for p in Path(input_path).glob("*.pkl")
-            if p.is_file() and not p.name.startswith("pre_")
-        )
-        if not input_files:
-            raise FileNotFoundError(f"No .pkl files found in directory: {input_path}")
-
-        base_output = Path(args.output_dir)
-        base_output.mkdir(parents=True, exist_ok=True)
-        worker_count = args.num_workers if args.num_workers is not None else max(1, (os.cpu_count() or 2) - 1)
-        worker_count = max(1, min(worker_count, len(input_files)))
-        print(f"📦 Converting {len(input_files)} cache files from directory: {input_path}")
-        print(f"🚀 Using {worker_count} parallel workers")
-
-        dataset_classes = {
-            "qm9": OptimizedUniversalQM9Dataset,
-            "lba": OptimizedUniversalLBADataset,
-            "pdb": OptimizedUniversalDataset,
-            "coconut": OptimizedUniversalCOCONUTDataset,
-            "rna": OptimizedUniversalRNADataset,
-            "unimol": OptimizedUniversalUniMolDataset,
-        }
-
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(
-                    process_single_pkl_to_pyg,
-                    (
-                        str(input_pkl),
-                        str(base_output / input_pkl.stem),
-                        args.dataset_type,
-                        args.max_samples,
-                        args.cutoff,
-                        args.max_neighbors,
-                        args.force,
-                        args.use_hybrid_edges,
-                        args.sequence_neighbors_k,
-                        args.max_spatial_neighbors,
-                        args.num_random_edges,
-                        args.random_edge_min_distance,
-                    ),
-                ): input_pkl
-                for input_pkl in input_files
-            }
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Converting caches"):
-                print(future.result())
-        sys.exit(0)
-
-    # Original single-file behavior stays exactly the same below.
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 

@@ -288,7 +288,7 @@ def main() -> int:
         "--dataset",
         type=str,
         default=None,
-        choices=["qm9", "lba", "pdb", "rna", "coconut", "unimol"],
+        choices=["qm9", "lba", "pdb", "rna", "coconut"],
         help="Dataset type"
     )
     parser.add_argument(

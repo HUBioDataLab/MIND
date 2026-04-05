@@ -58,9 +58,6 @@ def _get_adapter_factory(dataset_name: str) -> Tuple[type, str]:
     elif dataset_name == 'pdb':
         from data_loading.adapters.protein_adapter import ProteinAdapter
         return ProteinAdapter, '../data/proteins/raw_structures_hq'
-    elif dataset_name == 'unimol':
-        from data_loading.adapters.unimol_adapter import UniMolAdapter
-        return UniMolAdapter, './data/unimol/train.lmdb'
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -198,7 +195,7 @@ def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(description='Cache universal representations for datasets.')
     parser.add_argument('--dataset', type=str, required=True,
-                       choices=['qm9', 'lba', 'coconut', 'pdb', 'rna', 'unimol', 'all'],
+                       choices=['qm9', 'lba', 'coconut', 'pdb', 'rna', 'all'],
                        help='Dataset to cache.')
     parser.add_argument('--data-path', type=Path, default=None,
                        help='Path to directory containing raw data files (e.g., PDBs).')
@@ -229,7 +226,7 @@ def main() -> int:
         print(f"❌ Error: {e}")
         return 1
     
-    datasets_to_process = ['qm9', 'lba', 'coconut', 'pdb', 'rna', 'unimol'] if args.dataset == 'all' else [args.dataset]
+    datasets_to_process = ['qm9', 'lba', 'coconut', 'pdb', 'rna'] if args.dataset == 'all' else [args.dataset]
     
     success_all = True
     for ds_name in datasets_to_process:
