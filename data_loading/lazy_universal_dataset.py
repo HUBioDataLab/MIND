@@ -21,6 +21,7 @@ Usage:
     loader = DataLoader(dataset, batch_size=8, shuffle=True)
 """
 
+import re
 import torch
 import json
 from torch.utils.data import Dataset
@@ -30,6 +31,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
 from tqdm import tqdm
+
+INDEX_MAP_SUFFIX = "_index_map.json"
 
 
 class LazyUniversalDataset(Dataset):
@@ -101,9 +104,43 @@ class LazyUniversalDataset(Dataset):
             print(f"   Estimated cache RAM: ~{self._estimate_cache_ram():.0f}MB")
             if self.load_metadata:
                 print(f"   Metadata loaded: {'✅ Yes' if self.metadata_loaded else '⚠️ No (fallback mode)'}")
+
+    @staticmethod
+    def _index_map_cache_path(chunk_pt_files: List[str]) -> Path:
+        """Derive an index-map cache path from the chunk layout."""
+        if not chunk_pt_files:
+            raise ValueError("chunk_pt_files is empty")
+
+        first = Path(chunk_pt_files[0]).resolve()
+        chunk_dir = first.parent.parent
+        parent_dir = chunk_dir.parent
+        base_name = re.sub(r"_chunk_\d+$", "", chunk_dir.name)
+        return parent_dir / f"{base_name}{INDEX_MAP_SUFFIX}"
     
     def _build_index_map(self):
-        """Build index map: (global_idx -> (file_idx, local_idx, pt_file))"""
+        """Build index map: (global_idx -> (file_idx, local_idx, pt_file)). Uses a cache when available."""
+        cache_path = self._index_map_cache_path(self.chunk_pt_files)
+        resolved_files = [str(Path(f).resolve()) for f in self.chunk_pt_files]
+
+        if cache_path.exists():
+            try:
+                with open(cache_path, "r") as f:
+                    cached = json.load(f)
+            except Exception:
+                cached = None
+
+            if cached and cached.get("chunk_pt_files") == resolved_files:
+                self.samples_per_file = cached["samples_per_file"]
+                self.total_samples = cached["total_samples"]
+                self.file_ranges = []
+                cumsum = 0
+                for n_samples, pt_file in zip(self.samples_per_file, self.chunk_pt_files):
+                    self.file_ranges.append((cumsum, cumsum + n_samples, pt_file))
+                    cumsum += n_samples
+                if self.verbose:
+                    print(f"   Index map loaded from cache: {cache_path}")
+                return
+
         self.file_ranges = []
         self.samples_per_file = []
         cumsum = 0
@@ -136,6 +173,23 @@ class LazyUniversalDataset(Dataset):
         
         if self.total_samples == 0:
             raise ValueError("No samples found in any chunk files!")
+
+        try:
+            with open(cache_path, "w") as f:
+                json.dump(
+                    {
+                        "chunk_pt_files": resolved_files,
+                        "samples_per_file": self.samples_per_file,
+                        "total_samples": self.total_samples,
+                    },
+                    f,
+                    indent=2,
+                )
+            if self.verbose:
+                print(f"   Index map saved to cache: {cache_path}")
+        except Exception as e:
+            if self.verbose:
+                print(f"   Could not save index map cache: {e}")
     
     def _estimate_cache_ram(self):
         """Estimate RAM usage for cache (in MB)"""
