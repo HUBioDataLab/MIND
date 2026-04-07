@@ -11,12 +11,10 @@ from typing import Optional, List, Dict
 from esa.utils.norm_layers import BN, LN
 from esa.masked_layers import ESA
 from esa.mlp_utils import SmallMLP
-from torch_scatter import scatter_max
-
 # Sub-module imports
 from core.pretraining_config import PretrainingConfig, create_pretraining_config
 from core.molecular_encoder import UniversalMolecularEncoder, nearest_multiple_of_8
-from core.pretraining_tasks import PretrainingTasks, RESIDUE_3TO_IDX, NUM_RESIDUE_TYPES
+from core.pretraining_tasks import PretrainingTasks
 
 # Backward-compatibility re-exports (other files can still import from here)
 __all__ = [
@@ -25,8 +23,6 @@ __all__ = [
     'UniversalMolecularEncoder',
     'nearest_multiple_of_8',
     'PretrainingTasks',
-    'RESIDUE_3TO_IDX',
-    'NUM_RESIDUE_TYPES',
     'PretrainingESAModel',
 ]
 
@@ -267,7 +263,7 @@ class PretrainingESAModel(pl.LightningModule):
 
     def _ensure_mlm_attributes(self, batch):
         """Add MLM masking on-the-fly if not already present.
-        Protein graphs are skipped — residue type prediction provides a richer signal."""
+        Applies to all molecule types including proteins."""
         if "mlm" not in self.config.pretraining_tasks:
             return
         if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
@@ -283,26 +279,9 @@ class PretrainingESAModel(pl.LightningModule):
         mlm_mask = torch.zeros(num_nodes, dtype=torch.bool, device=z.device)
         masked_types = z.clone()
 
-        # Identify protein atoms via pdb_atom_mask (set by _ensure_residue_mask_attributes).
-        # If not yet available, fall back to dataset_type string matching.
-        protein_atom_mask = None
-        if hasattr(batch, 'pdb_atom_mask') and batch.pdb_atom_mask is not None:
-            protein_atom_mask = batch.pdb_atom_mask
-        else:
-            dataset_types = getattr(batch, 'dataset_type', None)
-            if dataset_types is not None and not isinstance(dataset_types, (list, tuple)):
-                dataset_types = dataset_types.tolist() if hasattr(dataset_types, 'tolist') else [dataset_types]
-            if dataset_types is not None and hasattr(batch, 'batch') and batch.batch is not None:
-                protein_graphs = {i for i, dt in enumerate(dataset_types) if str(dt).lower() in ('pdb', 'protein')}
-                if protein_graphs:
-                    pg_tensor = torch.tensor(sorted(protein_graphs), dtype=torch.long, device=z.device)
-                    protein_atom_mask = torch.isin(batch.batch, pg_tensor)
-
         if hasattr(batch, 'batch') and batch.batch is not None:
             graph_idx = batch.batch
             for g in graph_idx.unique().tolist():
-                if protein_atom_mask is not None and protein_atom_mask[graph_idx == g].any():
-                    continue  # residue masking handles proteins
                 node_mask = (graph_idx == g)
                 indices = torch.where(node_mask)[0]
                 n = indices.size(0)
@@ -351,96 +330,6 @@ class PretrainingESAModel(pl.LightningModule):
             coord_mask[torch.randperm(num_nodes, device=batch.pos.device)[:k]] = True
         batch.coord_mask = coord_mask
 
-    def _ensure_residue_mask_attributes(self, batch):
-        """
-        Pre-encoder masking for residue type prediction (PDB graphs only).
-
-        Selects ~15% of residues per protein graph, zeros their atoms' z values so
-        the encoder cannot see the true atom types, and stores bookkeeping tensors
-        needed by PretrainingTasks.residue_type_prediction_loss.
-        """
-        if "residue_type_prediction" not in self.config.pretraining_tasks:
-            return
-        if hasattr(batch, 'residue_mlm_mask') and batch.residue_mlm_mask is not None:
-            return
-        if not hasattr(batch, 'block_idx') or not hasattr(batch, 'block_symbols'):
-            return
-        if not hasattr(batch, 'dataset_type'):
-            return
-
-        device = batch.z.device
-        dataset_types = batch.dataset_type
-        if not isinstance(dataset_types, (list, tuple)):
-            dataset_types = dataset_types.tolist() if hasattr(dataset_types, 'tolist') else [dataset_types]
-
-        num_graphs = len(dataset_types)
-        pdb_graph_set = {i for i, dt in enumerate(dataset_types) if str(dt).lower() in ('pdb', 'protein')}
-
-        if not pdb_graph_set:
-            batch.pdb_atom_mask = torch.zeros(batch.z.size(0), dtype=torch.bool, device=device)
-            batch.pdb_flat_residue_idx = torch.zeros(0, dtype=torch.long, device=device)
-            batch.residue_labels = torch.zeros(0, dtype=torch.long, device=device)
-            batch.residue_mlm_mask = torch.zeros(0, dtype=torch.bool, device=device)
-            batch._total_pdb_residues = 0
-            return
-
-        batch_vec = batch.batch
-        block_idx = batch.block_idx.long()
-        # PyG collates list attributes as list-of-lists: block_symbols[g] = list of symbols for graph g
-        block_symbols = batch.block_symbols
-
-        max_block_per_graph, _ = scatter_max(block_idx, batch_vec, dim=0, dim_size=num_graphs)
-        num_blocks_per_graph = max_block_per_graph + 1
-
-        pdb_graph_tensor = torch.tensor(sorted(pdb_graph_set), dtype=torch.long, device=device)
-        pdb_atom_mask = torch.isin(batch_vec, pdb_graph_tensor)
-
-        pdb_residues_per_graph = torch.zeros(num_graphs, dtype=torch.long, device=device)
-        for g in pdb_graph_set:
-            pdb_residues_per_graph[g] = num_blocks_per_graph[g]
-
-        pdb_residue_offset = torch.zeros(num_graphs, dtype=torch.long, device=device)
-        if num_graphs > 1:
-            pdb_residue_offset[1:] = pdb_residues_per_graph.cumsum(0)[:-1]
-
-        total_pdb_residues = int(pdb_residues_per_graph.sum().item())
-
-        pdb_atoms_graph = batch_vec[pdb_atom_mask]
-        pdb_atoms_local_block = block_idx[pdb_atom_mask]
-        pdb_flat_residue_idx = pdb_residue_offset[pdb_atoms_graph] + pdb_atoms_local_block
-
-        residue_labels = torch.full((total_pdb_residues,), -1, dtype=torch.long, device=device)
-        for g in pdb_graph_set:
-            n_res = num_blocks_per_graph[g].item()
-            res_offset = pdb_residue_offset[g].item()
-            g_symbols = block_symbols[g]
-            for local_r in range(n_res):
-                sym = g_symbols[local_r] if local_r < len(g_symbols) else ''
-                residue_labels[res_offset + local_r] = RESIDUE_3TO_IDX.get(sym, -1)
-
-        mask_ratio = getattr(self.config, 'residue_mask_ratio', 0.15)
-        residue_mlm_mask = torch.zeros(total_pdb_residues, dtype=torch.bool, device=device)
-        for g in pdb_graph_set:
-            res_offset = pdb_residue_offset[g].item()
-            n_res = num_blocks_per_graph[g].item()
-            if n_res == 0:
-                continue
-            k = max(1, int(n_res * mask_ratio))
-            perm = torch.randperm(n_res, device=device)[:k]
-            residue_mlm_mask[res_offset + perm] = True
-
-        atom_residue_masked = residue_mlm_mask[pdb_flat_residue_idx]
-        full_atom_residue_masked = torch.zeros(batch.z.size(0), dtype=torch.bool, device=device)
-        full_atom_residue_masked[pdb_atom_mask] = atom_residue_masked
-        batch.z = batch.z.clone()
-        batch.z[full_atom_residue_masked] = 0
-
-        batch.pdb_atom_mask = pdb_atom_mask
-        batch.pdb_flat_residue_idx = pdb_flat_residue_idx
-        batch.residue_labels = residue_labels
-        batch.residue_mlm_mask = residue_mlm_mask
-        batch._total_pdb_residues = total_pdb_residues
-
     # ------------------------------------------------------------------
     # Loss computation
     # ------------------------------------------------------------------
@@ -469,11 +358,6 @@ class PretrainingESAModel(pl.LightningModule):
         if "mlm" in self.config.pretraining_tasks:
             losses['mlm'] = self.pretraining_tasks.mlm_loss(node_embeddings, batch)
             total_loss += self.config.task_weights['mlm'] * losses['mlm']
-
-        if "residue_type_prediction" in self.config.pretraining_tasks:
-            losses['residue_type_prediction'] = self.pretraining_tasks.residue_type_prediction_loss(node_embeddings, batch)
-            w = self.config.task_weights.get('residue_type_prediction', 1.0)
-            total_loss += w * losses['residue_type_prediction']
 
         if "coordinate_denoising" in self.config.pretraining_tasks:
             losses['coordinate_denoising'] = self.pretraining_tasks.coordinate_denoising_loss(node_embeddings, batch)
@@ -589,8 +473,7 @@ class PretrainingESAModel(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def training_step(self, batch, batch_idx):
-        self._ensure_residue_mask_attributes(batch)   # first: sets pdb_atom_mask
-        self._ensure_mlm_attributes(batch)             # uses pdb_atom_mask to skip proteins
+        self._ensure_mlm_attributes(batch)
         self._ensure_coord_denoising_attributes(batch)
 
         if getattr(self.config, 'log_batch_stats', False) and batch_idx % 10 == 0:
@@ -660,7 +543,6 @@ class PretrainingESAModel(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        self._ensure_residue_mask_attributes(batch)
         self._ensure_mlm_attributes(batch)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
@@ -679,7 +561,6 @@ class PretrainingESAModel(pl.LightningModule):
         return total_loss
 
     def test_step(self, batch, batch_idx):
-        self._ensure_residue_mask_attributes(batch)
         self._ensure_mlm_attributes(batch)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)

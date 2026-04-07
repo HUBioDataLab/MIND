@@ -2,18 +2,8 @@ import torch
 
 from torch import nn
 from torch.nn import functional as F
-from torch_scatter import scatter_mean
 
 from core.pretraining_config import PretrainingConfig
-
-
-RESIDUE_3TO_IDX = {
-    'ALA': 0, 'ARG': 1, 'ASN': 2, 'ASP': 3, 'CYS': 4,
-    'GLN': 5, 'GLU': 6, 'GLY': 7, 'HIS': 8, 'ILE': 9,
-    'LEU': 10, 'LYS': 11, 'MET': 12, 'PHE': 13, 'PRO': 14,
-    'SER': 15, 'THR': 16, 'TRP': 17, 'TYR': 18, 'VAL': 19,
-}
-NUM_RESIDUE_TYPES = 20
 
 
 class PretrainingTasks(nn.Module):
@@ -27,7 +17,6 @@ class PretrainingTasks(nn.Module):
         self.distance_head = self._create_distance_head()  # Used by short_range_distance
         self.mlm_head = self._create_mlm_head()
         self.coordinate_denoising_head = self._create_coordinate_denoising_head()
-        self.residue_head = self._create_residue_head()
 
     def _create_coordinate_denoising_head(self):
         """Predict 3D noise vector from node embeddings (invariant head; loss is SE(3)-invariant).
@@ -62,14 +51,6 @@ class PretrainingTasks(nn.Module):
             nn.Linear(self.config.graph_dim, self.config.graph_dim // 2),
             nn.ReLU(),
             nn.Linear(self.config.graph_dim // 2, max_types)
-        )
-
-    def _create_residue_head(self):
-        """Head for residue type prediction (20 standard amino acids)"""
-        return nn.Sequential(
-            nn.Linear(self.config.graph_dim, self.config.graph_dim // 2),
-            nn.ReLU(),
-            nn.Linear(self.config.graph_dim // 2, NUM_RESIDUE_TYPES)
         )
 
     def long_range_distance_loss(self, node_embeddings, data):
@@ -157,42 +138,6 @@ class PretrainingTasks(nn.Module):
 
         logits = self.mlm_head(node_embeddings)
         loss = F.cross_entropy(logits[mask], original_types[mask], reduction='mean')
-        return loss
-
-    def residue_type_prediction_loss(self, node_embeddings, batch):
-        """
-        Residue type prediction loss for protein pretraining.
-
-        For each masked residue, aggregates its atom embeddings (scatter_mean),
-        then predicts the amino acid type from the aggregated embedding.
-        Only PDB graphs participate; non-standard residues are ignored (label=-1).
-        """
-        if not hasattr(batch, 'residue_mlm_mask'):
-            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
-
-        pdb_atom_mask = batch.pdb_atom_mask            # [num_atoms] bool
-        flat_residue_idx = batch.pdb_flat_residue_idx  # [num_pdb_atoms] long
-        residue_mlm_mask = batch.residue_mlm_mask      # [total_pdb_residues] bool
-        residue_labels = batch.residue_labels           # [total_pdb_residues] long
-        total_pdb_residues = batch._total_pdb_residues
-
-        if pdb_atom_mask.sum() == 0 or residue_mlm_mask.sum() == 0:
-            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
-
-        pdb_embeddings = node_embeddings[pdb_atom_mask]  # [num_pdb_atoms, graph_dim]
-        residue_embeddings = scatter_mean(
-            pdb_embeddings, flat_residue_idx, dim=0, dim_size=total_pdb_residues
-        )  # [total_pdb_residues, graph_dim]
-
-        masked_embeddings = residue_embeddings[residue_mlm_mask]  # [num_masked, graph_dim]
-        true_labels = residue_labels[residue_mlm_mask]            # [num_masked]
-
-        valid_mask = true_labels >= 0
-        if valid_mask.sum() == 0:
-            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
-
-        logits = self.residue_head(masked_embeddings[valid_mask])  # [valid, 20]
-        loss = F.cross_entropy(logits, true_labels[valid_mask], reduction='mean')
         return loss
 
     def coordinate_denoising_loss(self, node_embeddings, data):

@@ -1,0 +1,147 @@
+# ===================================================================
+# MIND - Fast Sanity Check Config (~10 min)
+# ===================================================================
+# Inherits all values from multidomain; only overrides for speed.
+# Usage: make train GPU=6 CONFIG=f LOG=fast_test
+# ===================================================================
+
+seed: 42
+out_path: "outputs/fast_test"
+wandb_project_name: "MIND-Project-Pretraining"
+wandb_run_name: "fast-sanity-check"
+
+multi_domain:
+  enabled: true
+  datasets:
+    pdb:
+      enabled: true
+      chunk_dir: "/home/yusuf/data/proteins/processed_14atom"
+      atom_ratio: 60
+      chunk_range: [0, 0]
+    qm9:
+      enabled: true
+      chunk_dir: "/home/arin/data/qm9_chunks"
+      atom_ratio: 5
+      chunk_range: [0, 0]
+    metabolite:
+      enabled: true
+      chunk_dir: "/home/ege/MIND_HuBioDataLab/data/COCONUT/processed"
+      atom_ratio: 10
+      chunk_range: [0, 0]
+    unimol:
+      enabled: false
+      chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
+      atom_ratio: 25
+      chunk_range: [0, 0]
+    rna:
+      enabled: false
+      chunk_dir: "../data/rna/processed_chunks"
+      atom_ratio: 0
+    dna:
+      enabled: false
+      chunk_dir: "../data/dna/processed_chunks"
+      atom_ratio: 0
+  max_cache_chunks: 4
+  fallback_to_single_domain: true
+
+dataset: PDB
+universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
+dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"
+
+num_workers: 0
+max_samples: null
+use_universal_cache: true
+
+max_epochs: 3
+batch_size: 32
+use_dynamic_batching: true
+use_improved_sampler: true
+max_atoms_per_batch: 12000
+log_batch_statistics: true
+batch_stats_log_frequency: 10
+
+compute_per_type_losses: true
+log_per_type_frequency: 10
+
+lr: 0.0005
+early_stopping_patience: 15
+gradient_clip_val: 0.5
+optimiser_weight_decay: 1.0e-10
+monitor_loss_name: "val_total_loss"
+use_bfloat16: true
+accelerator: gpu
+devices: 1
+precision: bfloat16
+num_sanity_val_steps: 0
+val_check_interval: 0.5
+log_every_n_steps: 1
+fast_dev_run: false
+
+apply_attention_on: node
+graph_dim: 256
+edge_dim: 64
+hidden_dims: [256, 256, 256, 256, 256, 256, 256, 256]
+num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
+layer_types: ["M", "S", "M", "S", "M", "S", "P", "P"]
+xformers_or_torch_attn: flash_varlen
+norm_type: LN
+use_3d_coordinates: true
+set_max_items: 0
+triu_attn_mask: false
+
+use_equivariant_features: true
+equivariant_lmax: 2
+equivariant_num_features: 16
+equivariant_fusion_method: add
+equivariant_cross_connection: true
+
+use_mlps: true
+mlp_hidden_size: 512
+num_mlp_layers: 3
+mlp_type: standard
+mlp_dropout: 0.0
+use_mlp_ln: false
+pre_or_post: pre
+
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+
+molecule_max_atoms: null
+gaussian_kernels: 128
+cutoff_distance: 5.0
+max_neighbors: 64
+max_distance: 20.0
+distance_bins: 5
+
+use_hybrid_edges: true
+sequence_neighbors_k: 3
+max_spatial_neighbors: 48
+num_random_edges: 8
+random_edge_min_distance: 10.0
+
+use_dynamic_random_edges: true
+replace_existing_random_edges: true
+
+pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
+task_weights:
+  long_range_distance: 1.5
+  short_range_distance: 1.0
+  mlm: 0.3
+mlm_mask_ratio: 0.15
+temperature: 0.2
+
+max_block_types: 150
+max_position_types: 15
+max_entity_types: 6
+block_embedding_dim: 32
+position_embedding_dim: 16
+entity_embedding_dim: 8
+use_hierarchical_features: false
+max_atomic_num: 118
+rwse_dim: 24
+lap_dim: 4
+mlp_inter_dim: 128
+pma_num_outputs: 32

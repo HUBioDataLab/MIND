@@ -196,12 +196,11 @@ replace_existing_random_edges: true    # If true, removes static Tier 3 from .pt
 # -------------------------
 # Ön-Eğitim Görevleri
 # -------------------------
-pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm", "residue_type_prediction"]
+pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
 task_weights:
   long_range_distance: 1.5
   short_range_distance: 1.0
   mlm: 0.3
-  residue_type_prediction: 1.0
 mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task
 temperature: 0.2 #! Not used
 
