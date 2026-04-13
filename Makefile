@@ -5,17 +5,20 @@
 #   make train GPU=6 CONFIG=m                  # multidomain, default log
 #   make train GPU=6 CONFIG=f                  # fast test (~10 min)
 #   make train GPU=6 CONFIG=m LOG=my_run       # custom log name
-#   make train GPU=1 CONFIG=f LOG=fast_check   # fast on GPU 1
+#   make train GPU=auto CONFIG=f               # auto-pick least used GPU
 #
 # CONFIG shortcuts:
 #   m  = pretraining_config_multidomain.yaml
 #   f  = pretraining_config_fast.yaml
 #   (or pass full filename without .yaml)
 #
-# Defaults: GPU=6, CONFIG=m, LOG=train_<config>
+# Defaults: GPU=auto, CONFIG=m, LOG=train_<config>
 # ===================================================================
 
-GPU ?= 6
+SHELL := /bin/bash
+CONDA_RUN := source /opt/anaconda3/bin/activate && conda activate mind_esa3d &&
+
+GPU ?= auto
 CONFIG ?= m
 LOG ?=
 
@@ -38,15 +41,32 @@ else
   LOG_FILE := $(LOG).log
 endif
 
+MIN_VRAM_MB ?= 15000
+
+# Resolve GPU: if "auto", pick GPU with most free memory (must have >= MIN_VRAM_MB free)
+RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
+	best=$$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null | \
+		awk -F', ' '$$2 >= $(MIN_VRAM_MB) {print $$1, $$2}' | sort -k2 -rn | head -1 | cut -d' ' -f1); \
+	if [ -z "$$best" ]; then echo "NONE"; else echo "$$best"; fi; \
+	else echo "$(GPU)"; fi)
+
 .PHONY: train stop status logs help
 
 train:
+	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then \
+		echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; \
+		echo "Available GPUs:"; \
+		nvidia-smi --query-gpu=index,memory.free,memory.total --format=csv,noheader 2>/dev/null; \
+		echo ""; \
+		echo "Use GPU=<number> to force a specific GPU, or wait for one to free up."; \
+		exit 1; \
+	fi
 	@echo "=== MIND Training ==="
-	@echo "  GPU:    $(GPU)"
+	@echo "  GPU:    $(RESOLVED_GPU) $(if $(filter auto,$(GPU)),(auto-selected))"
 	@echo "  Config: $(CONFIG_FILE)"
 	@echo "  Log:    $(LOG_FILE)"
 	@echo "====================="
-	CUDA_VISIBLE_DEVICES=$(GPU) nohup python -m core.train_pretrain \
+	$(CONDA_RUN) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -m core.train_pretrain \
 		--config-yaml-path $(CONFIG_FILE) \
 		> $(LOG_FILE) 2>&1 &
 	@echo "PID: $$!"

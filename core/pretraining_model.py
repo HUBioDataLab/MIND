@@ -529,6 +529,17 @@ class PretrainingESAModel(pl.LightningModule):
 
         self.log("train_total_loss", total_loss, prog_bar=True, on_step=True, on_epoch=True, logger=True)
 
+        num_atoms = batch.num_nodes if hasattr(batch, 'num_nodes') else batch.x.size(0)
+        self.log("batch_total_atoms", float(num_atoms), on_step=True, logger=True)
+        if hasattr(batch, 'dataset_type') and isinstance(batch.dataset_type, (list, tuple)) and hasattr(batch, 'batch'):
+            num_graphs = batch.num_graphs if hasattr(batch, 'num_graphs') else 1
+            atoms_per_graph = [(batch.batch == i).sum().item() for i in range(num_graphs)]
+            from collections import Counter
+            type_counts = Counter(batch.dataset_type)
+            for dtype, count in type_counts.items():
+                dtype_atoms = sum(atoms_per_graph[i] for i, dt in enumerate(batch.dataset_type) if dt == dtype)
+                self.log(f"batch_{dtype}_atom_ratio", dtype_atoms / num_atoms, on_step=True, logger=True)
+
         if self.config.compute_per_type_losses and batch_idx % self.config.log_per_type_frequency == 0:
             type_losses = self._compute_per_type_losses(batch, graph_embeddings, node_embeddings)
             for dtype, dtype_losses in type_losses.items():
@@ -577,6 +588,14 @@ class PretrainingESAModel(pl.LightningModule):
                     self.log(f"test_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
 
         return total_loss
+
+    def on_before_optimizer_step(self, optimizer):
+        total_norm = 0.0
+        for p in self.parameters():
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        total_norm = total_norm ** 0.5
+        self.log("grad_norm_before_clip", total_norm, on_step=True, logger=True)
 
     def configure_optimizers(self):
         optimizer = bnb.optim.AdamW8bit(
