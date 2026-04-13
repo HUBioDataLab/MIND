@@ -58,10 +58,27 @@ stop:
 	@echo "Done."
 
 status:
-	@echo "=== Running MIND processes ==="
-	@ps aux | grep train_pretrain | grep -v grep || echo "No training processes found."
+	@echo "=== MIND Training (all users) ==="
+	@ps -eo user:12,pid,etime,args | grep '[t]rain_pretrain\|core[./]train' | grep -v grep || echo "  (no MIND training running)"
 	@echo ""
+	@echo "=== MIND Data Processing (all users) ==="
+	@ps -eo user:12,pid,args | grep '[c]ache_to_pyg\|create_chunk' | grep -v grep | \
+		awk '{print $$1}' | sort | uniq -c | \
+		awk '{printf "  %s: %d worker processes\n", $$2, $$1}' || echo "  (none)"
+	@echo ""
+	@echo "=== GPU Usage ==="
 	@nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || true
+	@echo ""
+	@echo "=== GPU Processes ==="
+	@nvidia-smi --query-compute-apps=gpu_name,pid,used_gpu_memory,process_name --format=csv,noheader 2>/dev/null | \
+		while IFS=, read gpu pid mem name; do \
+		usr=$$(ps -o user= -p $$(echo $$pid | tr -d ' ') 2>/dev/null | tr -d ' '); \
+		idx=$$(nvidia-smi --query-compute-apps=gpu_bus_id,pid --format=csv,noheader 2>/dev/null | \
+			grep "$$(echo $$pid | tr -d ' ')" | head -1 | cut -d, -f1 | tr -d ' '); \
+		gpuidx=$$(nvidia-smi --query-gpu=index,gpu_bus_id --format=csv,noheader 2>/dev/null | \
+			grep "$$idx" | head -1 | cut -d, -f1 | tr -d ' '); \
+		printf "  GPU %-2s | %-14s | PID %-8s |%s\n" "$${gpuidx:-?}" "$${usr:-?}" "$$pid" "$$mem"; \
+	done 2>/dev/null || true
 
 logs:
 	@ls -lt *.log 2>/dev/null | head -5 || echo "No log files found."
