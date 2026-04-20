@@ -23,9 +23,9 @@ use_universal_cache: true
 # -------------------------
 # RNA-SPECIFIC: Size filtering to prevent OOM
 # -------------------------
-molecule_max_atoms: 5000  # Filter out extremely large RNA structures (>5000 atoms)
-# 60,769 atoms is too large! This filters that out. 
-# not: burayı daha sonra küçültücem, sonra büyük rna ları datasetten çıkarıcam
+molecule_max_atoms: 1000  # Reduced from 5000 to prevent OOM - batch got 2641 atoms before
+# Filtering to max 1000 atoms per RNA structure
+
 
 # -------------------------
 # Eğitim Parametreleri
