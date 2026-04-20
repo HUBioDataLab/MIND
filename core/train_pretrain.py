@@ -15,7 +15,7 @@ torch.manual_seed(42)
 from torch_geometric.loader import DataLoader as GeometricDataLoader
 from torch.utils.data import DataLoader
 from torch.utils.data import random_split
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar, Callback
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar, Callback, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 
 # Imports from this project
@@ -710,6 +710,7 @@ def train_universal_pretraining(
         ),
         TQDMProgressBar(refresh_rate=10),  # Reduce log clutter
         ChunkSamplerEpochCallback(),  # Update chunk sampler each epoch
+        LearningRateMonitor(logging_interval='step'),
     ]
     
     # Add batch statistics callback if enabled
@@ -736,6 +737,7 @@ def train_universal_pretraining(
         project=wandb_project,
         name=wandb_run_name,
         save_dir=output_dir,
+        config=vars(config),
     )
     
     # Validation and logging frequency (from config)
