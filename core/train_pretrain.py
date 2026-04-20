@@ -15,7 +15,7 @@ torch.manual_seed(42)
 from torch_geometric.loader import DataLoader as GeometricDataLoader
 from torch.utils.data import DataLoader
 from torch.utils.data import random_split
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar, Callback, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar, Callback
 from pytorch_lightning.loggers import WandbLogger
 
 # Imports from this project
@@ -28,6 +28,7 @@ sys.path.insert(0, parent_dir)
 
 from core.pretraining_model import PretrainingESAModel, PretrainingConfig, create_pretraining_config
 from core.batch_statistics_callback import BatchStatisticsCallback
+from core.per_atom_metrics_callback import PerAtomMetricsCallback
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes, AddRandomNoise
 from data_loading.chunk_sampler import ChunkAwareSampler
@@ -626,6 +627,12 @@ def create_data_loaders(dataset, config: PretrainingConfig):
         elif train_sampler is not None:
             train_loader.sampler_obj = train_sampler  # For regular chunk-aware sampling
 
+    print(f"\n📋 Validation Data Loader Info:")
+    print(f"   Validation batches: {len(val_loader)}")
+    print(f"   Validation samples: {len(val_dataset)}")
+    print(f"   Test batches: {len(test_loader)}")
+    print(f"   Test samples: {len(test_dataset)}")
+    
     return train_loader, val_loader, test_loader
 
 
@@ -703,7 +710,6 @@ def train_universal_pretraining(
         ),
         TQDMProgressBar(refresh_rate=10),  # Reduce log clutter
         ChunkSamplerEpochCallback(),  # Update chunk sampler each epoch
-        LearningRateMonitor(logging_interval='step'),
     ]
     
     # Add batch statistics callback if enabled
@@ -715,12 +721,21 @@ def train_universal_pretraining(
             enabled=True
         ))
     
+    # Add per-atom metrics callback for RNA atom classification tracking
+    metrics_callback = PerAtomMetricsCallback(
+        enabled=True,
+        only_rna=True,
+        compute_groups=True,
+        log_every_n_epochs=1
+    )
+    callbacks.append(metrics_callback)
+    print("✅ Per-atom metrics callback enabled for validation monitoring")
+    
     # Create wandb logger
     wandb_logger = WandbLogger(
         project=wandb_project,
         name=wandb_run_name,
         save_dir=output_dir,
-        config=vars(config),
     )
     
     # Validation and logging frequency (from config)
