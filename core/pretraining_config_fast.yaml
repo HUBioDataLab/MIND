@@ -114,7 +114,11 @@ gaussian_kernels: 128
 cutoff_distance: 5.0
 max_neighbors: 64
 max_distance: 20.0
-distance_bins: 5
+distance_bins: 16
+distance_bin_boundaries: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.5, 17.5, 20.0]
+short_range_max_distance: 5.0
+short_range_distance_bins: 10
+short_range_bin_boundaries: [0.8, 1.2, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
 
 use_hybrid_edges: true
 sequence_neighbors_k: 3

@@ -50,7 +50,25 @@ RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
 	if [ -z "$$best" ]; then echo "NONE"; else echo "$$best"; fi; \
 	else echo "$(GPU)"; fi)
 
-.PHONY: train stop status logs help
+# ===================================================================
+# Data Processing
+# ===================================================================
+#   make process-protein                   # sequential (all 10 chunks)
+#   make process-protein PARALLEL=2        # 2 parallel groups (nohup)
+# ===================================================================
+
+NUM_CHUNKS ?= 10
+PARALLEL ?= 1
+PROCESS_ARGS = --config-yaml-path core/pretraining_config_multidomain.yaml \
+	--dataset pdb \
+	--data-path /home/yusuf/data/proteins/raw_structures_hq_40k \
+	--manifest-file /home/yusuf/data/proteins/afdb_clusters/manifest_hq_40k_len512.csv \
+	--output-base /home/yusuf/data/proteins/processed_14atom \
+	--cache-dir /home/yusuf/data/proteins/cache_14atom \
+	--num-chunks $(NUM_CHUNKS) \
+	--use-hybrid-edges --force
+
+.PHONY: train stop status logs help process-protein
 
 train:
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then \
@@ -100,15 +118,45 @@ status:
 		printf "  GPU %-2s | %-14s | PID %-8s |%s\n" "$${gpuidx:-?}" "$${usr:-?}" "$$pid" "$$mem"; \
 	done 2>/dev/null || true
 
+process-protein:
+ifeq ($(PARALLEL),1)
+	@echo "=== Processing protein data (sequential, all $(NUM_CHUNKS) chunks) ==="
+	$(CONDA_RUN) nohup python data_loading/process_chunked_dataset.py \
+		$(PROCESS_ARGS) > process_protein.log 2>&1 &
+	@echo "PID: $$!"
+	@echo "Follow: tail -f process_protein.log"
+else
+	@echo "=== Processing protein data ($(PARALLEL) parallel groups) ==="
+	@chunks_per_group=$$(( ($(NUM_CHUNKS) + $(PARALLEL) - 1) / $(PARALLEL) )); \
+	for g in $$(seq 0 $$(($(PARALLEL)-1))); do \
+		start=$$((g * chunks_per_group)); \
+		end_idx=$$((start + chunks_per_group - 1)); \
+		if [ $$end_idx -ge $(NUM_CHUNKS) ]; then end_idx=$$(($(NUM_CHUNKS)-1)); fi; \
+		if [ $$start -ge $(NUM_CHUNKS) ]; then continue; fi; \
+		echo "  Group $$g: chunks $$start-$$end_idx -> process_protein_$${g}.log"; \
+		$(CONDA_RUN) nohup python data_loading/process_chunked_dataset.py \
+			$(PROCESS_ARGS) --chunk-range "$$start-$$end_idx" \
+			> process_protein_$${g}.log 2>&1 & \
+	done
+	@echo ""
+	@echo "Follow: tail -f process_protein_*.log"
+endif
+
 logs:
 	@ls -lt *.log 2>/dev/null | head -5 || echo "No log files found."
 
 help:
-	@echo "MIND Training Commands:"
-	@echo "  make train GPU=6 CONFIG=m LOG=run1   Full multidomain training"
-	@echo "  make train GPU=6 CONFIG=f             Fast sanity check (~10 min)"
-	@echo "  make stop GPU=6                       Kill training on GPU 6"
-	@echo "  make status                           Show running processes + GPU usage"
-	@echo "  make logs                             List recent log files"
+	@echo "MIND Commands:"
 	@echo ""
-	@echo "CONFIG shortcuts: m=multidomain, f=fast"
+	@echo "  Training:"
+	@echo "    make train CONFIG=m LOG=run1         Full multidomain training"
+	@echo "    make train CONFIG=f                  Fast sanity check (~10 min)"
+	@echo "    make stop GPU=6                      Kill training on GPU 6"
+	@echo "    make status                          Show all processes + GPUs"
+	@echo "    make logs                            List recent log files"
+	@echo ""
+	@echo "  Data Processing:"
+	@echo "    make process-protein                 All chunks (sequential, nohup)"
+	@echo "    make process-protein PARALLEL=2      2 parallel groups (nohup)"
+	@echo ""
+	@echo "  CONFIG shortcuts: m=multidomain, f=fast"

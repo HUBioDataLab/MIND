@@ -149,7 +149,8 @@ class ProteinAdapter(BaseAdapter):
         self, 
         atoms: List[UniversalAtom], 
         res_name: str,
-        block_idx: int
+        block_idx: int,
+        entity_idx: int = 0
     ) -> List[UniversalAtom]:
         """
         Standardize a residue to exactly 14 atoms (4 backbone + 10 sidechain).
@@ -204,7 +205,7 @@ class ProteinAdapter(BaseAdapter):
                     pos_code=f'V{i+1}',  # V1, V2, V3, ... for virtual atoms
                     block_idx=block_idx,
                     atom_idx_in_block=len(backbone_atoms) + i,
-                    entity_idx=0,  # Protein entity
+                    entity_idx=entity_idx,
                     is_virtual=True,
                     virtual_type=virtual_type
                 )
@@ -345,9 +346,21 @@ class ProteinAdapter(BaseAdapter):
 
         blocks: List[UniversalBlock] = []
         
+        # Per-chain entity indices to prevent false cross-chain sequence edges.
+        # Each polypeptide chain gets a unique entity_idx so Tier 1 (sequence)
+        # edges in cache_to_pyg never bridge separate chains.
+        chain_to_entity: dict = {}
+        next_entity_idx: int = 0
+        
         # Iterate through hierarchy: model -> chain -> residue
         for model in structure:
             for chain in model:
+                chain_id = chain.get_id()
+                if chain_id not in chain_to_entity:
+                    chain_to_entity[chain_id] = next_entity_idx
+                    next_entity_idx += 1
+                chain_entity = chain_to_entity[chain_id]
+                
                 for residue in chain:
                     # Check if residue is a standard amino acid
                     is_standard_aa = (
@@ -361,7 +374,7 @@ class ProteinAdapter(BaseAdapter):
                     
                     block_atoms: List[UniversalAtom] = []
                     res_name = residue.get_resname()
-                    entity_idx = 0 if is_standard_aa else 1
+                    entity_idx = chain_entity if is_standard_aa else next_entity_idx
                     
                     for atom in residue:
                         # Skip hydrogen atoms to reduce complexity
@@ -390,7 +403,8 @@ class ProteinAdapter(BaseAdapter):
                             block_atoms = self._standardize_residue_to_14_atoms(
                                 block_atoms, 
                                 res_name, 
-                                len(blocks)
+                                len(blocks),
+                                entity_idx=chain_entity
                             )
                         
                         # Create a UniversalBlock for the residue if it contains any atoms after filtering.

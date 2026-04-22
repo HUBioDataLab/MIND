@@ -53,7 +53,7 @@ multi_domain:
       chunk_range: null
 
     unimol:
-      enabled: true
+      enabled: false
       chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
       atom_ratio: 25
       chunk_range: null
@@ -91,7 +91,7 @@ use_universal_cache: true
 # -------------------------
 # Eğitim Parametreleri
 # -------------------------
-max_epochs: 50
+max_epochs: 30
 batch_size: 32  # Used for validation/test (training uses dynamic batching)
 use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
 use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
@@ -169,8 +169,17 @@ molecule_max_atoms: null #! Not used in chunked datasets.
 gaussian_kernels: 128
 cutoff_distance: 5.0 #? Graph representation max distance is n angstrom. (used .pkl -> .pt)
 max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
-max_distance: 20.0  #? Used in training. 
-distance_bins: 5
+# Long-range distance loss: random atom pairs, spans entire molecule (0-20Å)
+max_distance: 20.0
+distance_bins: 16  # = len(distance_bin_boundaries) + 1
+# 8 fine bins 0-5Å + 8 coarse bins 5-20Å
+distance_bin_boundaries: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.5, 17.5, 20.0]
+
+# Short-range distance loss: graph edges only, all within cutoff_distance (5Å)
+short_range_max_distance: 5.0
+short_range_distance_bins: 10  # = len(short_range_bin_boundaries) + 1
+# Fine bins across the full 0-5Å chemical interaction range
+short_range_bin_boundaries: [0.8, 1.2, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
 
 # -------------------------
 # Hybrid Edge Construction (Salad-inspired)

@@ -60,10 +60,19 @@ class PretrainingConfig:
     pretraining_tasks: List[str] = None  # ["long_range_distance", "short_range_distance", "mlm", ...]
     task_weights: Dict[str, float] = None
 
-    # Distance prediction
+    # Distance prediction — long-range loss (random atom pairs, 0-20Å)
     distance_prediction_weight: float = 1.0
     distance_bins: int = 16
-    max_distance: float = 10.0
+    max_distance: float = 20.0
+    # Non-uniform boundaries: len must equal distance_bins - 1. None → uniform linear.
+    distance_bin_boundaries: Optional[List[float]] = None
+
+    # Distance prediction — short-range loss (graph edges, bounded by cutoff_distance ≤5Å)
+    # Separate head/bins so we don't waste capacity on distances that never appear in edges.
+    short_range_distance_bins: int = 10
+    short_range_max_distance: float = 5.0
+    # None → uniform linear over [0, short_range_max_distance]
+    short_range_bin_boundaries: Optional[List[float]] = None
 
     # Long-range distance loss configuration
     long_range_ranking_margin: float = 1.0

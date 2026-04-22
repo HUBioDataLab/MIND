@@ -334,7 +334,7 @@ class PretrainingESAModel(pl.LightningModule):
     # Loss computation
     # ------------------------------------------------------------------
 
-    def _compute_pretraining_losses(self, batch, graph_embeddings, node_embeddings):
+    def _compute_pretraining_losses(self, batch, graph_embeddings, node_embeddings, is_training: bool = True):
         """Dispatch to all active task loss functions and accumulate total loss."""
         losses = {}
         total_loss = 0.0
@@ -348,7 +348,10 @@ class PretrainingESAModel(pl.LightningModule):
                 edge_index = batch.edge_index
                 pos = batch.pos
                 distances = torch.norm(pos[edge_index[1]] - pos[edge_index[0]], dim=1)
-                mask = (torch.rand(edge_index.size(1)) < 0.15).to(distances.device)
+                if is_training:
+                    mask = (torch.rand(edge_index.size(1)) < 0.15).to(distances.device)
+                else:
+                    mask = torch.ones(edge_index.size(1), dtype=torch.bool, device=distances.device)
                 dist_loss = self.pretraining_tasks.short_range_distance_loss(
                     node_embeddings, edge_index, distances, mask
                 )
@@ -366,7 +369,7 @@ class PretrainingESAModel(pl.LightningModule):
 
         return losses, total_loss
 
-    def _compute_per_type_losses(self, batch, graph_embeddings, node_embeddings):
+    def _compute_per_type_losses(self, batch, graph_embeddings, node_embeddings, is_training: bool = True):
         """
         Compute losses separately for each dataset type using the same embeddings.
 
@@ -407,7 +410,10 @@ class PretrainingESAModel(pl.LightningModule):
                         distances = torch.norm(
                             masked_pos[remapped_edge_index[1]] - masked_pos[remapped_edge_index[0]], dim=1
                         )
-                        random_mask = (torch.rand(remapped_edge_index.size(1)) < 0.15).to(distances.device)
+                        if is_training:
+                            random_mask = (torch.rand(remapped_edge_index.size(1)) < 0.15).to(distances.device)
+                        else:
+                            random_mask = torch.ones(remapped_edge_index.size(1), dtype=torch.bool, device=distances.device)
                         masked_node_emb = node_embeddings[node_mask]
                         dist_loss = self.pretraining_tasks.short_range_distance_loss(
                             masked_node_emb, remapped_edge_index, distances, random_mask
@@ -557,14 +563,18 @@ class PretrainingESAModel(pl.LightningModule):
         self._ensure_mlm_attributes(batch)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
-        losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
+        losses, total_loss = self._compute_pretraining_losses(
+            batch, graph_embeddings, node_embeddings, is_training=False
+        )
 
         for task_name, loss_value in losses.items():
             self.log(f"val_{task_name}_loss", loss_value, on_epoch=True, logger=True)
         self.log("val_total_loss", total_loss, on_epoch=True, logger=True)
 
         if self.config.compute_per_type_losses:
-            type_losses = self._compute_per_type_losses(batch, graph_embeddings, node_embeddings)
+            type_losses = self._compute_per_type_losses(
+                batch, graph_embeddings, node_embeddings, is_training=False
+            )
             for dtype, dtype_losses in type_losses.items():
                 for task_name, loss_value in dtype_losses.items():
                     self.log(f"val_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
@@ -575,14 +585,18 @@ class PretrainingESAModel(pl.LightningModule):
         self._ensure_mlm_attributes(batch)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
-        losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
+        losses, total_loss = self._compute_pretraining_losses(
+            batch, graph_embeddings, node_embeddings, is_training=False
+        )
 
         for task_name, loss_value in losses.items():
             self.log(f"test_{task_name}_loss", loss_value, on_epoch=True, logger=True)
         self.log("test_total_loss", total_loss, on_epoch=True, logger=True)
 
         if self.config.compute_per_type_losses:
-            type_losses = self._compute_per_type_losses(batch, graph_embeddings, node_embeddings)
+            type_losses = self._compute_per_type_losses(
+                batch, graph_embeddings, node_embeddings, is_training=False
+            )
             for dtype, dtype_losses in type_losses.items():
                 for task_name, loss_value in dtype_losses.items():
                     self.log(f"test_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)

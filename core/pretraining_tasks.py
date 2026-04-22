@@ -13,8 +13,30 @@ class PretrainingTasks(nn.Module):
         super().__init__()
         self.config = config
 
+        # Long-range bin boundaries (0 – max_distance, typically 0-20Å)
+        if config.distance_bin_boundaries is not None:
+            boundaries = config.distance_bin_boundaries
+            assert len(boundaries) == config.distance_bins - 1, (
+                f"distance_bin_boundaries must have distance_bins-1={config.distance_bins - 1} "
+                f"entries, got {len(boundaries)}"
+            )
+            self.register_buffer('bin_boundaries', torch.tensor(boundaries, dtype=torch.float32))
+        else:
+            self.bin_boundaries = None
+
+        # Short-range bin boundaries (0 – short_range_max_distance, typically 0-5Å)
+        if config.short_range_bin_boundaries is not None:
+            sr_boundaries = config.short_range_bin_boundaries
+            assert len(sr_boundaries) == config.short_range_distance_bins - 1, (
+                f"short_range_bin_boundaries must have short_range_distance_bins-1="
+                f"{config.short_range_distance_bins - 1} entries, got {len(sr_boundaries)}"
+            )
+            self.register_buffer('sr_bin_boundaries', torch.tensor(sr_boundaries, dtype=torch.float32))
+        else:
+            self.sr_bin_boundaries = None
+
         self.long_range_distance_head = self._create_long_range_distance_head()
-        self.distance_head = self._create_distance_head()  # Used by short_range_distance
+        self.distance_head = self._create_distance_head()  # short-range, output = short_range_distance_bins
         self.mlm_head = self._create_mlm_head()
         self.coordinate_denoising_head = self._create_coordinate_denoising_head()
 
@@ -37,12 +59,26 @@ class PretrainingTasks(nn.Module):
         )
 
     def _create_distance_head(self):
-        """Head for distance prediction"""
+        """Short-range distance head — output size matches short_range_distance_bins."""
         return nn.Sequential(
             nn.Linear(self.config.graph_dim * 2, self.config.graph_dim),
             nn.ReLU(),
-            nn.Linear(self.config.graph_dim, self.config.distance_bins)
+            nn.Linear(self.config.graph_dim, self.config.short_range_distance_bins)
         )
+
+    def _distances_to_bins(self, distances: torch.Tensor) -> torch.Tensor:
+        """Long-range binning: non-uniform boundaries if configured, else uniform over [0, max_distance]."""
+        if self.bin_boundaries is not None:
+            return torch.bucketize(distances, self.bin_boundaries.to(distances.device))
+        bins = (distances / self.config.max_distance * (self.config.distance_bins - 1e-6)).long()
+        return torch.clamp(bins, 0, self.config.distance_bins - 1)
+
+    def _short_range_distances_to_bins(self, distances: torch.Tensor) -> torch.Tensor:
+        """Short-range binning: non-uniform boundaries if configured, else uniform over [0, short_range_max_distance]."""
+        if self.sr_bin_boundaries is not None:
+            return torch.bucketize(distances, self.sr_bin_boundaries.to(distances.device))
+        bins = (distances / self.config.short_range_max_distance * (self.config.short_range_distance_bins - 1e-6)).long()
+        return torch.clamp(bins, 0, self.config.short_range_distance_bins - 1)
 
     def _create_mlm_head(self):
         """Head for masked language modeling"""
@@ -104,22 +140,20 @@ class PretrainingTasks(nn.Module):
         pos_j = pos[j_indices]
         true_distances = torch.norm(pos_i - pos_j, dim=1)
 
-        distance_bins = (true_distances / self.config.max_distance * (self.config.distance_bins - 1e-6)).long()
-        distance_bins = torch.clamp(distance_bins, 0, self.config.distance_bins - 1)
+        distance_bins = self._distances_to_bins(true_distances)
 
         loss = F.cross_entropy(distance_logits, distance_bins, reduction='mean')
         return loss
 
     def short_range_distance_loss(self, node_embeddings, edge_index, distances, mask):
-        """Compute short-range distance loss (local chemical bonds)"""
+        """Short-range distance loss over graph edges (all within cutoff_distance ≤ 5Å)."""
         source_emb = node_embeddings[edge_index[0]]
         target_emb = node_embeddings[edge_index[1]]
         edge_emb = torch.cat([source_emb, target_emb], dim=-1)
 
         logits = self.distance_head(edge_emb)
 
-        distance_bins = (distances / self.config.max_distance * (self.config.distance_bins - 1e-6)).long()
-        distance_bins = torch.clamp(distance_bins, 0, self.config.distance_bins - 1)
+        distance_bins = self._short_range_distances_to_bins(distances)
 
         valid_mask = torch.isfinite(distances) & mask
         if valid_mask.sum() == 0:
