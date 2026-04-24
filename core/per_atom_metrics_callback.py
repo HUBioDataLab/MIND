@@ -19,7 +19,19 @@ from collections import defaultdict
 from typing import Optional, Dict, Any
 
 from core.per_atom_metrics import PerAtomMetricsCalculator
-from core.rna_atom_types import ALL_RNA_ATOMS, map_atomic_num_to_rna_idx
+from core.rna_atom_types import ALL_RNA_ATOMS, ATOMIC_NUM_TO_ELEMENT
+
+
+def _pos_code_to_element(pos_code: str) -> str:
+    """
+    RNA pos_code → element sembolü. İlk karakter elementi verir (P, O*, C*, N*).
+    Virtual atomlar ('V', 'V1', ...) → 'V'.
+    """
+    if not pos_code:
+        return 'V'
+    if pos_code == 'V' or pos_code.startswith('V'):
+        return 'V'
+    return pos_code[0]
 
 
 class PerAtomMetricsCallback(Callback):
@@ -91,7 +103,7 @@ class PerAtomMetricsCallback(Callback):
         except Exception as e:
             # Silently skip if we can't compute metrics
             pass
-    
+
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         """Process test batch."""
         if not self.enabled:
@@ -118,9 +130,13 @@ class PerAtomMetricsCallback(Callback):
 
         if not hasattr(batch, 'pos_code') or batch.pos_code is None:
             return
-        
+
         # 1. Model Tahminlerini Al (Tensör olduğu için zaten düzdür)
-        with torch.no_grad():
+        # Lightning'in autocast context'i callback dışında kaldığı için burada manuel kuruyoruz.
+        # bf16 training'de dtype mismatch'i önler; fp32 run'larda enabled=False → no-op (davranış değişmez).
+        use_bf16 = getattr(pl_module.config, 'use_bfloat16', False)
+        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+        with torch.no_grad(), torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=use_bf16):
             _, node_emb = pl_module.forward(batch)
             mlm_logits = pl_module.pretraining_tasks.mlm_head(node_emb)
             preds_atomic_num = mlm_logits.argmax(dim=1).cpu().numpy()
@@ -138,11 +154,22 @@ class PerAtomMetricsCallback(Callback):
         # 3. Hizalama (Alignment)
         try:
             # Gerçek değerleri RNA indekslerine çevir
-            y_true_indices = np.array([ALL_RNA_ATOMS.index(c) if c in ALL_RNA_ATOMS else ALL_RNA_ATOMS.index('V') 
+            y_true_indices = np.array([ALL_RNA_ATOMS.index(c) if c in ALL_RNA_ATOMS else ALL_RNA_ATOMS.index('V')
                                       for c in flattened_pos_codes])
-            
-            # Tahminleri RNA indekslerine çevir
-            y_pred_indices = np.array([map_atomic_num_to_rna_idx(num) for num in preds_atomic_num])
+
+            # FIX: "first-matching-element" lock-in bug'ı yerine element-aware eşleşme.
+            # Her pozisyon için: modelin tahmin ettiği element (C/N/O/P/...) pos_code'un
+            # beklenen elementi ile uyuşuyorsa y_pred = y_true (yani "o pozisyondaki atomu
+            # doğru bildi" sayılır); uyuşmuyorsa vocabulary dışı bir idx verilir.
+            # Bu sayede:
+            #   Recall (per-atom) = doğru-element-tahmin-edilen / toplam = element accuracy
+            #   Precision by construction ≈ 1.0 (artefakt), anlamlı kolon Recall'dır
+            #   F1 = 2R/(1+R) Recall ile monotonik — anlamlı
+            pred_elements = np.array([ATOMIC_NUM_TO_ELEMENT.get(int(n), 'V') for n in preds_atomic_num])
+            true_elements = np.array([_pos_code_to_element(c) for c in flattened_pos_codes])
+            is_correct_element = (pred_elements == true_elements)
+            OUT_OF_VOCAB = len(ALL_RNA_ATOMS)  # 24 — ALL_RNA_ATOMS idx space dışında
+            y_pred_indices = np.where(is_correct_element, y_true_indices, OUT_OF_VOCAB)
             
             # Boyut Kontrolü (Hata almamak için savunma hattı)
             if len(y_true_indices) != len(y_pred_indices):
@@ -178,28 +205,52 @@ class PerAtomMetricsCallback(Callback):
         """Log validation metrics at epoch end."""
         if not self.enabled:
             return
-        
+
         if trainer.current_epoch % self.log_every_n_epochs != 0:
             return
-        
+
         if len(self.val_metrics.all_predictions) == 0:
             return
-        
+
         # Compute metrics
         metrics = self.val_metrics.compute()
-        
+
         # Log to wandb
         self._log_metrics(trainer, metrics, stage='val')
-        
-        # Print summary
+
+        # Son validation snapshot'ını sakla — on_train_end'de final tablo için kullanılacak.
+        self._last_val_metrics_snapshot = {
+            'per_atom': dict(self.val_metrics.per_atom_metrics),
+            'per_group': dict(self.val_metrics.per_group_metrics),
+            'overall': dict(self.val_metrics.overall_metrics),
+            'epoch': trainer.current_epoch,
+        }
+
+        # Print summary (periyodik; eskiden sadece epoch 0'da tetikleniyordu)
         if trainer.current_epoch % (self.log_every_n_epochs * 5) == 0:
             print("\n" + "="*80)
             print(f"VALIDATION METRICS - Epoch {trainer.current_epoch}")
             print("="*80)
             self.val_metrics.print_summary()
-        
+
         # Reset for next epoch
         self.val_metrics.reset()
+
+    def on_train_end(self, trainer, pl_module):
+        """Final metric tablosu — eğitim bittikten sonra log'un en sonunda göster."""
+        if not self.enabled:
+            return
+        snap = getattr(self, '_last_val_metrics_snapshot', None)
+        if snap is None:
+            return
+        print("\n" + "="*100)
+        print(f"🏁 FINAL PER-ATOM METRICS (last validation, epoch {snap['epoch']})")
+        print("="*100)
+        # Snapshot'ı calculator'a geri yükle ve basit print_summary API'sini kullan
+        self.val_metrics.per_atom_metrics = snap['per_atom']
+        self.val_metrics.per_group_metrics = snap['per_group']
+        self.val_metrics.overall_metrics = snap['overall']
+        self.val_metrics.print_summary()
     
     def on_test_epoch_end(self, trainer, pl_module):
         """Log test metrics at epoch end."""

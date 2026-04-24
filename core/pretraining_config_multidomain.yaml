@@ -59,9 +59,9 @@ multi_domain:
       chunk_range: null
     
     rna:
-      enabled: false  # Future expansion
-      chunk_dir: "../data/rna/processed_chunks"
-      atom_ratio: 0   # 5% of atoms from RNA
+      enabled: true
+      chunk_dir: "/home/arya/rna3db-main/MIND/data/rna/processed_graphs"
+      atom_ratio: 5   # 5% of atoms from RNA
     
     dna:
       enabled: false  # Future expansion
@@ -95,7 +95,7 @@ max_epochs: 30
 batch_size: 32  # Used for validation/test (training uses dynamic batching)
 use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
 use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
-max_atoms_per_batch: 12000  # Reduced for DENSE path memory efficiency in multi-domain training
+max_atoms_per_batch: 8000  # Reduced from 12000 — RNA molecules (up to ~2400 atoms each) add variance; safety margin for multi-domain batching
 log_batch_statistics: true  # Print batch composition statistics during training
 batch_stats_log_frequency: 25  # Log every N batches
 
