@@ -17,7 +17,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from sklearn.metrics import classification_report, confusion_matrix
 from collections import defaultdict
 
-from core.rna_atom_types import (
+from core.metrics.rna_atom_types import (
     ALL_RNA_ATOMS,
     RNA_BACKBONE_ATOMS,
     RNA_SIDECHAIN_ATOMS,

@@ -60,7 +60,7 @@ multi_domain:
     
     rna:
       enabled: true
-      chunk_dir: "/home/arya/rna3db-main/MIND/data/rna/processed_graphs"
+      chunk_dir: "/home/yusuf/data/rna/processed_graphs"
       atom_ratio: 5   # 5% of atoms from RNA
     
     dna:

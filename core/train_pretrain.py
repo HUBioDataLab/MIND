@@ -28,7 +28,8 @@ sys.path.insert(0, parent_dir)
 
 from core.pretraining_model import PretrainingESAModel, PretrainingConfig, create_pretraining_config
 from core.batch_statistics_callback import BatchStatisticsCallback
-from core.per_atom_metrics_callback import PerAtomMetricsCallback
+from core.metrics.rna_per_atom_metrics_callback import PerAtomMetricsCallback
+from core.metrics.protein_per_atom_metrics_callback import ProteinPerAtomMetricsCallback
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes, AddRandomNoise
 from data_loading.chunk_sampler import ChunkAwareSampler
@@ -195,9 +196,10 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         
         # Add metadata search paths (for cases where we can't write to original chunk directories)
         metadata_search_paths = []
-        metadata_dir = Path(__file__).parent.parent / "metadata" / "proteins"
-        if metadata_dir.exists():
-            metadata_search_paths.append(str(metadata_dir))
+        base_metadata_dir = Path(__file__).parent.parent / "metadata"
+        for sub in base_metadata_dir.iterdir() if base_metadata_dir.exists() else []:
+            if sub.is_dir():
+                metadata_search_paths.append(str(sub))
         
         full_dataset = LazyUniversalDataset(
             chunk_pt_files=all_chunk_files,
@@ -731,6 +733,19 @@ def train_universal_pretraining(
     )
     callbacks.append(metrics_callback)
     print("✅ Per-atom metrics callback enabled for validation monitoring")
+
+    # Add per-atom + per-AA metrics callback for protein batches (bf16-safe,
+    # element-aware; logs under val_protein_atom_metrics/* and
+    # val_protein_aa_metrics/* so protein metrics don't collide with RNA ones).
+    protein_metrics_callback = ProteinPerAtomMetricsCallback(
+        enabled=True,
+        only_protein=True,
+        compute_groups=True,
+        compute_per_aa=True,
+        log_every_n_epochs=1,
+    )
+    callbacks.append(protein_metrics_callback)
+    print("✅ Protein per-atom + per-AA metrics callback enabled")
     
     # Create wandb logger
     wandb_logger = WandbLogger(

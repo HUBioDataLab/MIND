@@ -6,6 +6,10 @@ interactions, not just protein-specific structural features.
 
 Base tasks (`long_range_distance`, `short_range_distance`, `mlm`) work well across all molecule types.
 
+Current MLM version
+
+MLM masking only replaces batch.z (atom type) with token 0. Positions are never touched. So the centroid is computed from all real positions, which is correct. All distance losses use correctly centered real coordinates.
+
 ---
 
 ## Run 1: Residue Type Prediction (`residue_loss.log`)

@@ -18,8 +18,8 @@ from pytorch_lightning.loggers import WandbLogger
 from collections import defaultdict
 from typing import Optional, Dict, Any
 
-from core.per_atom_metrics import PerAtomMetricsCalculator
-from core.rna_atom_types import ALL_RNA_ATOMS, ATOMIC_NUM_TO_ELEMENT
+from core.metrics.per_atom_metrics import PerAtomMetricsCalculator
+from core.metrics.rna_atom_types import ALL_RNA_ATOMS, ATOMIC_NUM_TO_ELEMENT
 
 
 def _pos_code_to_element(pos_code: str) -> str:
