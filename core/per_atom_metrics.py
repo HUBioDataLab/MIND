@@ -234,35 +234,37 @@ class PerAtomMetricsCalculator:
             'Total_Samples': int(len(y_true)),
         }
     
-    def get_wandb_logs(self, prefix: str = '') -> Dict[str, float]:
+    def get_wandb_logs(self, prefix: str = '', namespace: str = 'atom_metrics') -> Dict[str, float]:
         """
         Format metrics for WandB logging.
-        
+
         Args:
             prefix: Prefix for metric names (e.g., 'val_', 'test_')
-        
+            namespace: Top-level W&B section name (e.g., 'rna_atom_metrics', 'protein_atom_metrics').
+                       Used to separate domain-specific metrics in the W&B UI.
+
         Returns:
             Dict with flat keys suitable for wandb.log()
         """
         logs = {}
-        
+
         # Overall metrics
         for metric_name, value in self.overall_metrics.items():
-            key = f"{prefix}atom_metrics/{metric_name}"
+            key = f"{prefix}{namespace}/{metric_name}"
             logs[key] = value
-        
+
         # Per-atom metrics
         for atom, atom_metrics in self.per_atom_metrics.items():
             for metric_name, value in atom_metrics.items():
-                key = f"{prefix}atom_metrics/atom_{atom}/{metric_name}"
+                key = f"{prefix}{namespace}/atom_{atom}/{metric_name}"
                 # Skip support in wandb for cleaner interface
                 if metric_name != 'Support':
                     logs[key] = value
-        
+
         # Per-group metrics
         for group, group_metrics in self.per_group_metrics.items():
             for metric_name, value in group_metrics.items():
-                key = f"{prefix}atom_metrics/group_{group}/{metric_name}"
+                key = f"{prefix}{namespace}/group_{group}/{metric_name}"
                 if metric_name != 'Support':
                     logs[key] = value
         

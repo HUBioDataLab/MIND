@@ -296,7 +296,12 @@ class PerAtomMetricsCallback(Callback):
         
         # Get flat metrics dict for logging
         prefix = f"{stage}_"
-        flat_metrics = self.val_metrics.get_wandb_logs(prefix=prefix) if stage == 'val' else self.test_metrics.get_wandb_logs(prefix=prefix)
+        # Domain-specific namespace — RNA-only callback → val_rna_atom_metrics/*
+        # (protein callback will use 'protein_atom_metrics' with a different callback class)
+        namespace = 'rna_atom_metrics'
+        flat_metrics = (self.val_metrics.get_wandb_logs(prefix=prefix, namespace=namespace)
+                        if stage == 'val'
+                        else self.test_metrics.get_wandb_logs(prefix=prefix, namespace=namespace))
         
         # Log to wandb
         for metric_name, value in flat_metrics.items():
