@@ -1,0 +1,267 @@
+# ===================================================================
+# MIND Project - Multi-Domain Pretraining Configuration
+# ===================================================================
+# This config enables training on multiple molecular dataset types simultaneously
+# (proteins, small molecules, metabolites, RNA, DNA) with cross-modal batching.
+#
+# Key Features:
+# - Atom-aware rotational sampling for balanced training
+# - Cross-modal batches (proteins + small molecules in same batch)
+# - Efficient memory usage (LRU cache with chunked datasets)
+# - Graceful fallback (works even if some datasets are missing)
+#
+# Usage:
+#   python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain.yaml
+# ===================================================================
+
+# -------------------------
+# Genel ve Çıktı Ayarları
+# -------------------------
+seed: 42
+out_path: "outputs/multidomain_pretrain"
+wandb_project_name: "MIND-Project-Pretraining"
+wandb_run_name: "multidomain-random"
+
+# -------------------------
+# Multi-Domain Configuration
+# -------------------------
+multi_domain:
+  enabled: true  # ✅ Set to true to enable multi-domain training
+  
+  # Dataset Configurations
+  # - enabled: Whether to include this dataset type
+  # - chunk_dir: Parent directory containing chunked .pt files
+  # - atom_ratio: Target percentage of atoms from this dataset type (will be normalized)
+  datasets:
+    # chunk_range: [start, end] inclusive; null = use all chunks. atom_ratio: not yet used.
+    pdb:
+      enabled: false
+      chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks
+      atom_ratio: 60  
+      chunk_range: [0,0]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
+    
+    qm9:
+      enabled: false  # QM9 with legacy edges (cutoff 5.0Å, 16 neighbors)
+      chunk_dir: "/home/arin/data/qm9_chunks"  # Will match qm9_chunks_chunk_0 through qm9_chunks_chunk_4
+      atom_ratio: 5  
+      chunk_range: null
+    
+    metabolite:
+      enabled: true  # Not yet available
+      chunk_dir: "/home/ege/MIND_HuBioDataLab/data/COCONUT/processed"
+      atom_ratio: 40  # 10% of atoms from metabolites
+      chunk_range: [0, 29]
+
+    unimol:
+      enabled: false
+      chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
+      atom_ratio: 25
+      chunk_range: null
+    
+    rna:
+      enabled: false
+      chunk_dir: "/home/arya/rna3db-main/MIND/data/rna/processed_graphs"
+      atom_ratio: 5   # 5% of atoms from RNA
+    
+    dna:
+      enabled: false  # Future expansion
+      chunk_dir: "../data/dna/processed_chunks"
+      atom_ratio: 0
+  
+  # Rotational Sampling Parameters
+  target_atoms_per_rotation: 50000  #! Not used anymore. Target total atoms per rotation (adjust based on GPU RAM) 
+  max_cache_chunks: 15              # Maximum chunks in LRU cache (adjust based on system RAM)
+  fallback_to_single_domain: true   # If metadata missing, fall back to ChunkAwareSampler
+
+# -------------------------
+# Single-Domain Fallback Settings
+# (Used when multi_domain.enabled = false OR only one dataset type is enabled)
+# -------------------------
+dataset: PDB
+universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
+dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform chunks
+
+# -------------------------
+# Data Loading Settings
+# -------------------------
+num_workers: 0  # Required for dynamic batching with lazy datasets (avoids hanging)
+max_samples: null  # null = use all available samples
+use_universal_cache: true
+
+# -------------------------
+# Eğitim Parametreleri
+# -------------------------
+max_epochs: 30
+batch_size: 32  # Used for validation/test (training uses dynamic batching)
+use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
+use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
+max_atoms_per_batch: 8000  # Reduced from 12000 — RNA molecules (up to ~2400 atoms each) add variance; safety margin for multi-domain batching
+log_batch_statistics: true  # Print batch composition statistics during training
+batch_stats_log_frequency: 25  # Log every N batches
+
+# Per-Type Loss Tracking (for multi-domain analysis)
+compute_per_type_losses: true   # ✅ Track losses per dataset type (protein, qm9, etc.)
+log_per_type_frequency: 25      # Log per-type losses every N batches (reduce overhead)  
+
+lr: 0.0005
+early_stopping_patience: 15
+gradient_clip_val: 0.5
+optimiser_weight_decay: 1.0e-10
+monitor_loss_name: "val_total_loss"
+use_bfloat16: true  # Required for flash_varlen
+accelerator: gpu #! Not used
+devices: 1  # Use single GPU (will be GPU 6 via CUDA_VISIBLE_DEVICES) #! Not used
+precision: bfloat16  # Required for flash_varlen
+num_sanity_val_steps: 0
+# Validation and logging: run validation and log to wandb more often than once per epoch
+val_check_interval: 0.25  # Fraction of epoch (0.25 = 4x per epoch). Use int for "every N steps"
+val_check_interval_steps: 100
+log_every_n_steps: 1       # Log train metrics to wandb every N steps
+fast_dev_run: false #! Not used
+
+# -------------------------
+# Model Mimarisi (ESA)
+# -------------------------
+apply_attention_on: node
+graph_dim: 256
+edge_dim: 64 #! Not used
+hidden_dims: [256, 256, 256, 256, 256, 256, 256, 256]
+num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
+layer_types: ["M", "S", "M", "S", "M", "S", "P", "P"]
+xformers_or_torch_attn: flash_varlen  # ⚡ Padding-free for mixed sizes (CORRECT: flash_varlen not varlen_flash!)
+norm_type: LN
+use_3d_coordinates: true
+set_max_items: 0
+triu_attn_mask: false #! Not used
+
+# -------------------------
+# Equivariant Features
+# -------------------------
+use_equivariant_features: true
+equivariant_lmax: 2
+equivariant_num_features: 16
+equivariant_fusion_method: add
+equivariant_cross_connection: true
+
+# -------------------------
+# MLP Ayarları
+# -------------------------
+use_mlps: true
+mlp_hidden_size: 512
+num_mlp_layers: 3
+mlp_type: standard
+mlp_dropout: 0.0
+use_mlp_ln: false
+pre_or_post: pre
+
+# -------------------------
+# Dropout Ayarları
+# -------------------------
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+
+# -------------------------
+# 3D Geometrik Parametreler
+# -------------------------
+molecule_max_atoms: null #! Not used in chunked datasets.
+gaussian_kernels: 128
+cutoff_distance: 5.0 #? Graph representation max distance is n angstrom. (used .pkl -> .pt)
+max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
+# Long-range distance loss: random atom pairs, spans entire molecule (0-20Å)
+max_distance: 20.0
+distance_bins: 16  # = len(distance_bin_boundaries) + 1
+# 8 fine bins 0-5Å + 8 coarse bins 5-20Å
+distance_bin_boundaries: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.5, 17.5, 20.0]
+
+# Short-range distance loss: graph edges only, all within cutoff_distance (5Å)
+short_range_max_distance: 5.0
+short_range_distance_bins: 10  # = len(short_range_bin_boundaries) + 1
+# Fine bins across the full 0-5Å chemical interaction range
+short_range_bin_boundaries: [0.8, 1.2, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+
+# -------------------------
+# Hybrid Edge Construction (Salad-inspired)
+# -------------------------
+# Enables 3-tier hybrid edge construction:
+# Tier 1: Sequence-based edges (backbone connectivity)
+# Tier 2: Spatial edges (filtered to exclude Tier 1)
+# Tier 3: Random long-range edges
+use_hybrid_edges: true
+sequence_neighbors_k: 3          # Tier 1: Connect residue i to i±k neighbors in sequence
+max_spatial_neighbors: 48        # Tier 2: Spatial neighbors (reduced from 64, some covered by Tier 1)
+num_random_edges: 8              # Tier 3: Random long-range edges (scaled for proteins <1024 AA)
+random_edge_min_distance: 10.0   # Tier 3: Minimum distance (Å) for random edges
+
+# -------------------------
+# Dynamic Random Edges (Runtime)
+# -------------------------
+# Enable this to generate different Tier 3 edges each epoch (prevents bias)
+# NOTE: This happens at runtime during data loading, not preprocessing
+use_dynamic_random_edges: true         # Set to true to enable dynamic Tier 3 edges
+replace_existing_random_edges: true    # If true, removes static Tier 3 from .pt files
+
+# -------------------------
+# Ön-Eğitim Görevleri
+# -------------------------
+pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
+task_weights:
+  long_range_distance: 1.5
+  short_range_distance: 1.0
+  mlm: 0.3
+mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task
+metabolite_masking_strategy: legacy_random  # Set brics_fragment for BRICS-based metabolite masking or legacy_random for random masking
+metabolite_brics_source: precomputed
+metabolite_mask_target_ratio: 0.15
+metabolite_max_mask_ratio_per_graph: 0.6
+metabolite_allow_partial_fragment_masking: false
+temperature: 0.2 #! Not used
+
+# -------------------------
+# Yeni Kod Yapısı İçin Gerekli Diğer Parametreler
+# -------------------------
+max_block_types: 150 #! Not used
+max_position_types: 15 #! Not used
+max_entity_types: 6 #! Not used
+block_embedding_dim: 32 #! Not used
+position_embedding_dim: 16 #! Not used
+entity_embedding_dim: 8 #! Not used
+use_hierarchical_features: false #! Not used
+max_atomic_num: 118 #! Not used
+rwse_dim: 24 #! Not used
+lap_dim: 4 #! Not used
+mlp_inter_dim: 128 #! Not used
+pma_num_outputs: 32 #! Not used
+
+# ===================================================================
+# Quick Start Guide
+# ===================================================================
+#
+# 1. PROTEIN-ONLY MODE (Default):
+#    - Set multi_domain.enabled = false
+#    - Run: python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain.yaml
+#
+# 2. MULTI-DOMAIN MODE (When you have QM9 and Metabolite data):
+#    a. Generate metadata for all chunks:
+#       python data_loading/create_chunk_metadata.py --chunk-dir ../data/proteins/processed_graphs_40k
+#       python data_loading/create_chunk_metadata.py --chunk-dir ../data/small_molecules/qm9/processed_chunks
+#       python data_loading/create_chunk_metadata.py --chunk-dir ../data/metabolites/processed_chunks
+#
+#    b. Update this config:
+#       - Set multi_domain.enabled = true
+#       - Set multi_domain.datasets.qm9.enabled = true
+#       - Set multi_domain.datasets.metabolite.enabled = true
+#       - Adjust atom_ratio values if needed (will be auto-normalized)
+#
+#    c. Run training:
+#       python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain.yaml
+#
+# 3. TUNING PARAMETERS:
+#    - target_atoms_per_rotation: Increase if you have more GPU RAM, decrease if OOM
+#    - max_cache_chunks: Increase if you have more system RAM
+#    - atom_ratio: Adjust to control dataset contribution (doesn't need to sum to 100)
+#
+# ===================================================================
+

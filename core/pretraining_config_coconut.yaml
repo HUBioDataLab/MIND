@@ -80,6 +80,11 @@ task_weights:
   coordinate_denoising: 1.2  # Higher weight for complex natural product conformations
 
 mlm_mask_ratio: 0  # Required parameter (not used since MLM task is removed)
+metabolite_masking_strategy: legacy_random  # Switch to brics_fragment for the new metabolite masking approach
+metabolite_brics_source: precomputed
+metabolite_mask_target_ratio: 0.15
+metabolite_max_mask_ratio_per_graph: 0.5
+metabolite_allow_partial_fragment_masking: false
 temperature: 0.1
 
 lr: 0.0005  # Match working model exactly

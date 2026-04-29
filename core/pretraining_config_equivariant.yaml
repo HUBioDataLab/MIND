@@ -191,6 +191,11 @@ task_weights:
   short_range_distance: 1.0
   mlm: 0.3
 mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task
+metabolite_masking_strategy: legacy_random  # Set brics_fragment for BRICS-based metabolite masking
+metabolite_brics_source: precomputed
+metabolite_mask_target_ratio: 0.15
+metabolite_max_mask_ratio_per_graph: 0.5
+metabolite_allow_partial_fragment_masking: false
 temperature: 0.2
 
 # -------------------------

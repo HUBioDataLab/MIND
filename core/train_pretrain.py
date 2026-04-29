@@ -71,19 +71,25 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
             seed=None  # None = different edges each epoch
         ))
     
-    # Add MLM transform if MLM is in pretraining tasks
-    if "mlm" in config.pretraining_tasks:
-        mask_ratio = getattr(config, 'mlm_mask_ratio', 0.15)
-        transforms.append(MaskAtomTypes(
-            mask_ratio=mask_ratio,
-            mask_token=0  # Assuming 0 is the mask token
-        ))
+    # Keep masking/noise generation in model hooks when requested, so strategy
+    # switches (random vs BRICS metabolite masking) are controlled by config.
+    use_on_the_fly_masking = getattr(config, 'use_on_the_fly_masking', True)
+    if not use_on_the_fly_masking:
+        # Add MLM transform if MLM is in pretraining tasks
+        if "mlm" in config.pretraining_tasks:
+            mask_ratio = getattr(config, 'mlm_mask_ratio', 0.15)
+            transforms.append(MaskAtomTypes(
+                mask_ratio=mask_ratio,
+                mask_token=0  # Assuming 0 is the mask token
+            ))
 
-    # Add coordinate denoising transform (noise on pos, clean_pos + coord_mask)
-    if "coordinate_denoising" in config.pretraining_tasks:
-        noise_std = getattr(config, 'coordinate_denoising_noise_std', 0.1)
-        mask_ratio = getattr(config, 'coordinate_denoising_mask_ratio', 0.15)
-        transforms.append(AddRandomNoise(noise_std=noise_std, mask_ratio=mask_ratio))
+        # Add coordinate denoising transform (noise on pos, clean_pos + coord_mask)
+        if "coordinate_denoising" in config.pretraining_tasks:
+            noise_std = getattr(config, 'coordinate_denoising_noise_std', 0.1)
+            mask_ratio = getattr(config, 'coordinate_denoising_mask_ratio', 0.15)
+            transforms.append(AddRandomNoise(noise_std=noise_std, mask_ratio=mask_ratio))
+    else:
+        print("ℹ️  Using on-the-fly masking/noise in model hooks (transforms disabled)")
     
     return Compose(transforms) if len(transforms) > 0 else None
 
@@ -740,8 +746,20 @@ def train_universal_pretraining(
         config=vars(config),
     )
     
-    # Validation and logging frequency (from config)
-    val_check_interval = getattr(config, 'val_check_interval', 0.25)
+    # Validation and logging frequency (step-based by default, robust for dynamic batching)
+    val_check_interval_steps = getattr(config, 'val_check_interval_steps', None)
+    if val_check_interval_steps is not None:
+        val_check_interval = max(1, int(val_check_interval_steps))
+    else:
+        # Backward compatibility: if old float-style val_check_interval exists, convert to steps.
+        # Fractional intervals are unreliable with dynamic batch samplers.
+        raw_val_interval = getattr(config, 'val_check_interval', 0.25)
+        if isinstance(raw_val_interval, float) and raw_val_interval > 0 and raw_val_interval < 1:
+            est_steps = max(1, int(len(train_loader) * raw_val_interval))
+            val_check_interval = est_steps
+            print(f"ℹ️  Converted fractional val_check_interval={raw_val_interval} to step-based interval={val_check_interval}")
+        else:
+            val_check_interval = max(1, int(raw_val_interval))
     log_every_n_steps = getattr(config, 'log_every_n_steps', 1)
 
     # Create trainer with ESA optimizations
@@ -773,7 +791,7 @@ def train_universal_pretraining(
         print(f"   • Validation batches: {len(val_loader)}")
     
     vi = trainer.val_check_interval
-    val_desc = f"{vi} steps" if isinstance(vi, int) else f"{vi} of epoch ({1/vi:.0f}x per epoch)"
+    val_desc = f"{int(vi)} steps"
     print(f"   • Log every N steps: {log_every_n_steps}")
     print(f"   • Validation: every {val_desc}")
     

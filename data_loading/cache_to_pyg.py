@@ -14,6 +14,7 @@ import sys
 import torch
 import pickle
 import shutil
+from collections import defaultdict
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Iterator, Callable
@@ -33,6 +34,17 @@ if 'data_types' not in sys.modules:
 
 from torch_cluster import radius_graph
 warnings.filterwarnings('ignore')
+
+_rdkit_cache = None
+
+
+def _lazy_rdkit():
+    global _rdkit_cache
+    if _rdkit_cache is None:
+        from rdkit import Chem
+        from rdkit.Chem import BRICS
+        _rdkit_cache = (Chem, BRICS)
+    return _rdkit_cache
 
 # Periodic table whitelist: all other atoms collapse to R (rare atom).
 ELEMENT_TO_ATOMIC_NUMBER = {
@@ -532,8 +544,20 @@ class OptimizedUniversalDataset(InMemoryDataset):
                 return int(v) if v is not None else default
             block_indices = torch.tensor([_safe_int(getattr(atom, 'block_idx', None)) for atom in atoms], dtype=torch.long)
             entity_indices = torch.tensor([_safe_int(getattr(atom, 'entity_idx', None)) for atom in atoms], dtype=torch.long)
+            source_atom_indices = torch.tensor([_safe_int(getattr(atom, 'source_atom_idx', None), -1) for atom in atoms], dtype=torch.long)
             pos_codes = [atom.pos_code for atom in atoms]
             block_symbols = [str(getattr(block, 'symbol', '')) for block in mol.blocks]
+            smiles_value = str(getattr(mol, 'properties', {}).get('smiles', '') or '')
+
+            brics_frag_atom_index = torch.empty((0,), dtype=torch.long)
+            brics_frag_ptr = torch.tensor([0], dtype=torch.long)
+            has_brics = torch.tensor([False], dtype=torch.bool)
+            if str(getattr(mol, 'dataset_type', '')).lower() == 'coconut' and smiles_value:
+                brics_frag_atom_index, brics_frag_ptr, has_brics = self._compute_brics_fragments_from_smiles(
+                    smiles=smiles_value,
+                    source_atom_indices=source_atom_indices,
+                    num_nodes=len(atoms),
+                )
 
             num_atoms = len(atoms)
             if num_atoms > 1:
@@ -562,6 +586,10 @@ class OptimizedUniversalDataset(InMemoryDataset):
                 entity_idx=entity_indices,
                 pos_code=pos_codes,
                 block_symbols=block_symbols,
+                smiles=smiles_value,
+                brics_frag_atom_index=brics_frag_atom_index,
+                brics_frag_ptr=brics_frag_ptr,
+                has_brics=has_brics,
                 mol_id=str(getattr(mol, 'id', 'unknown')),
                 dataset_type=str(getattr(mol, 'dataset_type', 'unknown')),
                 num_nodes=len(atoms),
@@ -578,6 +606,66 @@ class OptimizedUniversalDataset(InMemoryDataset):
                 raise
             warnings.warn(f"Unexpected error converting molecule {getattr(mol, 'id', '?')}: {e}", UserWarning)
             return None
+
+    def _compute_brics_fragments_from_smiles(
+        self,
+        smiles: str,
+        source_atom_indices: torch.Tensor,
+        num_nodes: int,
+    ):
+        Chem, BRICS = _lazy_rdkit()
+        fallback_idx = torch.arange(num_nodes, dtype=torch.long)
+        fallback_ptr = torch.tensor([0, num_nodes], dtype=torch.long)
+        if num_nodes == 0:
+            return torch.empty((0,), dtype=torch.long), torch.tensor([0], dtype=torch.long), torch.tensor([False], dtype=torch.bool)
+        if not smiles:
+            return fallback_idx, fallback_ptr, torch.tensor([False], dtype=torch.bool)
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return fallback_idx, fallback_ptr, torch.tensor([False], dtype=torch.bool)
+            mol_no_h = Chem.RemoveHs(mol, sanitize=True)
+            brics_bonds = list(BRICS.FindBRICSBonds(mol_no_h))
+            frag_mol = mol_no_h
+            if brics_bonds:
+                cut_bond_idxs = []
+                for b in brics_bonds:
+                    a, c = b[0]
+                    bond = mol_no_h.GetBondBetweenAtoms(int(a), int(c))
+                    if bond is not None:
+                        cut_bond_idxs.append(int(bond.GetIdx()))
+                if cut_bond_idxs:
+                    frag_mol = Chem.FragmentOnBonds(mol_no_h, cut_bond_idxs, addDummies=False)
+            frags = Chem.GetMolFrags(frag_mol, asMols=False, sanitizeFrags=False)
+            if not frags:
+                return fallback_idx, fallback_ptr, torch.tensor([False], dtype=torch.bool)
+
+            src_to_data = defaultdict(list)
+            for data_idx, src_idx in enumerate(source_atom_indices.tolist()):
+                if src_idx >= 0:
+                    src_to_data[int(src_idx)].append(int(data_idx))
+            frag_lists = []
+            for frag in frags:
+                mapped = []
+                for src_idx in frag:
+                    mapped.extend(src_to_data.get(int(src_idx), []))
+                mapped = sorted(set(mapped))
+                if mapped:
+                    frag_lists.append(mapped)
+            if not frag_lists:
+                return fallback_idx, fallback_ptr, torch.tensor([False], dtype=torch.bool)
+            atom_index = []
+            ptr = [0]
+            for frag in frag_lists:
+                atom_index.extend(frag)
+                ptr.append(len(atom_index))
+            return (
+                torch.tensor(atom_index, dtype=torch.long),
+                torch.tensor(ptr, dtype=torch.long),
+                torch.tensor([True], dtype=torch.bool),
+            )
+        except Exception:
+            return fallback_idx, fallback_ptr, torch.tensor([False], dtype=torch.bool)
 
     def _element_to_atomic_number(self, element: str) -> int:
         """Convert element symbol to atomic number using dictionary lookup."""

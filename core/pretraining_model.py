@@ -26,7 +26,6 @@ __all__ = [
     'PretrainingESAModel',
 ]
 
-
 class PretrainingESAModel(pl.LightningModule):
     """
     Universal pretraining ESA model for all molecular systems.
@@ -113,6 +112,259 @@ class PretrainingESAModel(pl.LightningModule):
 
         if self.config.apply_attention_on == "node":
             self.config.is_node_task = True
+
+        # Cumulative masking counters for metabolite-only BRICS budgeting.
+        self.register_buffer("metabolite_mlm_atoms_seen", torch.tensor(0.0), persistent=True)
+        self.register_buffer("metabolite_mlm_atoms_masked", torch.tensor(0.0), persistent=True)
+        self.register_buffer("metabolite_coord_atoms_seen", torch.tensor(0.0), persistent=True)
+        self.register_buffer("metabolite_coord_atoms_masked", torch.tensor(0.0), persistent=True)
+
+    @staticmethod
+    def _normalize_metabolite_strategy(strategy: str) -> str:
+        s = str(strategy).strip().lower()
+        if s == "random":
+            return "legacy_random"
+        if s == "brics":
+            return "brics_fragment"
+        return s
+
+    @staticmethod
+    def _is_metabolite_type(dataset_type_value: str) -> bool:
+        s = str(dataset_type_value).strip().lower()
+        return s in {"coconut", "metabolite"}
+
+    def _per_graph_dataset_types(self, batch, num_graphs: int) -> List[str]:
+        if not hasattr(batch, "dataset_type"):
+            return [""] * num_graphs
+        dtype = batch.dataset_type
+        if isinstance(dtype, (list, tuple)):
+            if len(dtype) == num_graphs:
+                return [str(x) for x in dtype]
+            if len(dtype) == 1:
+                return [str(dtype[0])] * num_graphs
+        if torch.is_tensor(dtype):
+            if dtype.dim() == 0:
+                return [str(dtype.item())] * num_graphs
+            if dtype.numel() == num_graphs:
+                return [str(x.item()) for x in dtype]
+        return [str(dtype)] * num_graphs
+
+    def _select_fragment_mask_indices(
+        self,
+        fragment_groups: List[torch.Tensor],
+        k_target: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        n = int(sum(int(g.numel()) for g in fragment_groups))
+        if n == 0 or k_target <= 0:
+            return torch.empty((0,), dtype=torch.long, device=device)
+
+        fragment_groups = [g for g in fragment_groups if int(g.numel()) > 0]
+        if not fragment_groups:
+            return torch.empty((0,), dtype=torch.long, device=device)
+
+        target = int(k_target)
+        selected_groups: List[torch.Tensor] = []
+        selected_count = 0
+        remaining = sorted(fragment_groups, key=lambda g: int(g.numel()), reverse=True)
+
+        # Greedy closest-to-remaining-budget selection.
+        while remaining:
+            rem_budget = max(0, target - selected_count)
+            best_i = 0
+            best_score = None
+            for i, grp in enumerate(remaining):
+                size = int(grp.numel())
+                score = abs(size - rem_budget)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_i = i
+            picked = remaining.pop(best_i)
+            selected_groups.append(picked)
+            selected_count += int(picked.numel())
+            if selected_count >= target:
+                break
+
+        selected = (
+            torch.cat(selected_groups, dim=0)
+            if selected_groups
+            else torch.empty((0,), dtype=torch.long, device=device)
+        )
+        allow_partial = bool(getattr(self.config, "metabolite_allow_partial_fragment_masking", True))
+        if int(selected.numel()) > target and allow_partial:
+            # Keep full fragments first; trim only the last fragment if required.
+            if len(selected_groups) == 1:
+                grp = selected_groups[0]
+                perm = torch.randperm(int(grp.numel()), device=device)[:target]
+                return grp[perm]
+            keep = selected_groups[:-1]
+            kept = torch.cat(keep, dim=0) if keep else torch.empty((0,), dtype=torch.long, device=device)
+            deficit = max(0, target - int(kept.numel()))
+            if deficit == 0:
+                return kept
+            last = selected_groups[-1]
+            perm = torch.randperm(int(last.numel()), device=device)[:deficit]
+            return torch.cat([kept, last[perm]], dim=0)
+
+        return selected
+
+    def _extract_precomputed_fragment_groups_for_graph(
+        self,
+        batch,
+        graph_indices: torch.Tensor,
+    ) -> Optional[List[torch.Tensor]]:
+        if not hasattr(batch, "brics_frag_atom_index") or not hasattr(batch, "brics_frag_ptr"):
+            return None
+        atom_index = batch.brics_frag_atom_index
+        ptr = batch.brics_frag_ptr
+        if atom_index is None or ptr is None:
+            return None
+        if ptr.numel() < 2:
+            return None
+        graph_set = set(int(i) for i in graph_indices.tolist())
+        groups = []
+        for i in range(int(ptr.numel()) - 1):
+            s = int(ptr[i].item())
+            e = int(ptr[i + 1].item())
+            if e <= s:
+                continue
+            frag = atom_index[s:e]
+            keep = [int(idx.item()) for idx in frag if int(idx.item()) in graph_set]
+            if keep:
+                groups.append(torch.tensor(keep, dtype=torch.long, device=graph_indices.device))
+        if not groups:
+            return None
+        return groups
+
+    def _select_metabolite_mask_indices_for_task(
+        self,
+        batch,
+        graph_indices: torch.Tensor,
+        task_name: str,
+        default_ratio: float,
+    ) -> torch.Tensor:
+        if int(graph_indices.numel()) == 0:
+            return graph_indices[:0]
+
+        strategy = self._normalize_metabolite_strategy(
+            getattr(self.config, "metabolite_masking_strategy", "legacy_random")
+        )
+        if strategy != "brics_fragment":
+            n = int(graph_indices.numel())
+            k = max(1, int(n * float(default_ratio)))
+            perm = torch.randperm(n, device=graph_indices.device)[:k]
+            return graph_indices[perm]
+
+        brics_source = str(getattr(self.config, "metabolite_brics_source", "precomputed")).lower()
+        fragment_groups = None
+        if brics_source == "precomputed":
+            fragment_groups = self._extract_precomputed_fragment_groups_for_graph(batch, graph_indices)
+        # If BRICS cannot be used, fallback to legacy random selection.
+        if fragment_groups is None:
+            n = int(graph_indices.numel())
+            k = max(1, int(n * float(default_ratio)))
+            perm = torch.randperm(n, device=graph_indices.device)[:k]
+            return graph_indices[perm]
+
+        # Keep eval behavior stable without mutating cumulative training budgets.
+        if not self.training:
+            n = int(graph_indices.numel())
+            k = max(1, int(n * float(default_ratio)))
+            return self._select_fragment_mask_indices(
+                fragment_groups=fragment_groups,
+                k_target=k,
+                device=graph_indices.device,
+            )
+
+        target_ratio = float(getattr(self.config, "metabolite_mask_target_ratio", 0.15))
+        max_graph_ratio = float(getattr(self.config, "metabolite_max_mask_ratio_per_graph", 0.5))
+        cap = max(1, int(graph_indices.numel() * max_graph_ratio))
+
+        if task_name == "mlm":
+            seen = float(self.metabolite_mlm_atoms_seen.item())
+            masked = float(self.metabolite_mlm_atoms_masked.item())
+        else:
+            seen = float(self.metabolite_coord_atoms_seen.item())
+            masked = float(self.metabolite_coord_atoms_masked.item())
+
+        n = int(graph_indices.numel())
+        desired_cumulative = target_ratio * (seen + n)
+        needed = max(0, int(round(desired_cumulative - masked)))
+        k_target = min(cap, n, needed)
+        if k_target == 0:
+            return graph_indices[:0]
+
+        # If every BRICS fragment is larger than allowed selection target, fallback to legacy random.
+        if fragment_groups and min(int(g.numel()) for g in fragment_groups) > k_target:
+            perm = torch.randperm(n, device=graph_indices.device)[:k_target]
+            return graph_indices[perm]
+
+        return self._select_fragment_mask_indices(fragment_groups, k_target, graph_indices.device)
+
+    def _ensure_shared_metabolite_fragment_mask(self, batch):
+        """Create one shared metabolite BRICS mask reused by MLM and coordinate denoising."""
+        if hasattr(batch, "shared_metabolite_mask") and batch.shared_metabolite_mask is not None:
+            return
+        if not hasattr(batch, "batch") or batch.batch is None:
+            return
+        if not hasattr(batch, "z") or batch.z is None:
+            return
+        if "mlm" not in self.config.pretraining_tasks and "coordinate_denoising" not in self.config.pretraining_tasks:
+            return
+        strategy = self._normalize_metabolite_strategy(
+            getattr(self.config, "metabolite_masking_strategy", "legacy_random")
+        )
+        if strategy != "brics_fragment":
+            return
+
+        graph_idx = batch.batch
+        num_nodes = int(batch.z.size(0))
+        shared_mask = torch.zeros(num_nodes, dtype=torch.bool, device=batch.z.device)
+        unique_graphs = graph_idx.unique().tolist()
+        dtype_by_graph = self._per_graph_dataset_types(batch, len(unique_graphs))
+        graph_to_dtype = {int(g): dtype_by_graph[i] for i, g in enumerate(unique_graphs)}
+        default_ratio = float(getattr(self.config, "mlm_mask_ratio", 0.15))
+
+        batch_metabolite_seen = 0
+        batch_metabolite_masked = 0
+        for g in unique_graphs:
+            if not self._is_metabolite_type(graph_to_dtype.get(int(g), "")):
+                continue
+            node_mask = (graph_idx == g)
+            indices = torch.where(node_mask)[0]
+            n = int(indices.size(0))
+            if n == 0:
+                continue
+            selected = self._select_metabolite_mask_indices_for_task(
+                batch=batch,
+                graph_indices=indices,
+                task_name="mlm",
+                default_ratio=default_ratio,
+            )
+            if selected.numel() > 0:
+                shared_mask[selected] = True
+            batch_metabolite_seen += n
+            batch_metabolite_masked += int(selected.numel())
+
+        batch.shared_metabolite_mask = shared_mask
+
+        if self.training and batch_metabolite_seen > 0:
+            # Keep both task-specific counters aligned to the same selected atoms.
+            self.metabolite_mlm_atoms_seen += float(batch_metabolite_seen)
+            self.metabolite_mlm_atoms_masked += float(batch_metabolite_masked)
+            self.metabolite_coord_atoms_seen += float(batch_metabolite_seen)
+            self.metabolite_coord_atoms_masked += float(batch_metabolite_masked)
+
+            batch_ratio = batch_metabolite_masked / max(1, batch_metabolite_seen)
+            cumulative_ratio = float(self.metabolite_mlm_atoms_masked.item()) / max(
+                1.0, float(self.metabolite_mlm_atoms_seen.item())
+            )
+            self.log("train_mlm_metabolite_mask_ratio_batch", batch_ratio, on_step=True, logger=True)
+            self.log("train_mlm_metabolite_mask_ratio_cumulative", cumulative_ratio, on_step=True, logger=True)
+            self.log("train_mlm_metabolite_masking_is_brics", 1.0, on_step=True, logger=True)
+            self.log("train_coord_metabolite_mask_ratio_batch", batch_ratio, on_step=True, logger=True)
+            self.log("train_coord_metabolite_mask_ratio_cumulative", cumulative_ratio, on_step=True, logger=True)
+            self.log("train_coord_metabolite_masking_is_brics", 1.0, on_step=True, logger=True)
 
     def forward(self, batch):
         """
@@ -281,16 +533,56 @@ class PretrainingESAModel(pl.LightningModule):
 
         if hasattr(batch, 'batch') and batch.batch is not None:
             graph_idx = batch.batch
-            for g in graph_idx.unique().tolist():
+            unique_graphs = graph_idx.unique().tolist()
+            dtype_by_graph = self._per_graph_dataset_types(batch, len(unique_graphs))
+            graph_to_dtype = {int(g): dtype_by_graph[i] for i, g in enumerate(unique_graphs)}
+
+            batch_metabolite_seen = 0
+            batch_metabolite_masked = 0
+            strategy_name = self._normalize_metabolite_strategy(
+                getattr(self.config, "metabolite_masking_strategy", "legacy_random")
+            )
+
+            for g in unique_graphs:
                 node_mask = (graph_idx == g)
                 indices = torch.where(node_mask)[0]
                 n = indices.size(0)
-                if n > 0:
+                if n == 0:
+                    continue
+
+                if self._is_metabolite_type(graph_to_dtype.get(int(g), "")):
+                    if hasattr(batch, "shared_metabolite_mask") and batch.shared_metabolite_mask is not None:
+                        selected = indices[batch.shared_metabolite_mask[indices]]
+                    else:
+                        selected = self._select_metabolite_mask_indices_for_task(
+                            batch=batch,
+                            graph_indices=indices,
+                            task_name="mlm",
+                            default_ratio=mask_ratio,
+                        )
+                    batch_metabolite_seen += int(n)
+                    batch_metabolite_masked += int(selected.numel())
+                else:
                     k = max(1, int(n * mask_ratio))
                     perm = torch.randperm(n, device=z.device)[:k]
                     selected = indices[perm]
+
+                if selected.numel() > 0:
                     mlm_mask[selected] = True
                     masked_types[selected] = mask_token
+
+            if self.training and batch_metabolite_seen > 0 and not (
+                hasattr(batch, "shared_metabolite_mask") and batch.shared_metabolite_mask is not None
+            ):
+                self.metabolite_mlm_atoms_seen += float(batch_metabolite_seen)
+                self.metabolite_mlm_atoms_masked += float(batch_metabolite_masked)
+                batch_ratio = batch_metabolite_masked / max(1, batch_metabolite_seen)
+                cumulative_ratio = float(self.metabolite_mlm_atoms_masked.item()) / max(
+                    1.0, float(self.metabolite_mlm_atoms_seen.item())
+                )
+                self.log("train_mlm_metabolite_mask_ratio_batch", batch_ratio, on_step=True, logger=True)
+                self.log("train_mlm_metabolite_mask_ratio_cumulative", cumulative_ratio, on_step=True, logger=True)
+                self.log("train_mlm_metabolite_masking_is_brics", 1.0 if strategy_name == "brics_fragment" else 0.0, on_step=True, logger=True)
         else:
             k = max(1, int(num_nodes * mask_ratio))
             selected = torch.randperm(num_nodes, device=z.device)[:k]
@@ -318,13 +610,53 @@ class PretrainingESAModel(pl.LightningModule):
         num_nodes = batch.pos.size(0)
         coord_mask = torch.zeros(num_nodes, dtype=torch.bool, device=batch.pos.device)
         if hasattr(batch, 'batch') and batch.batch is not None:
-            for g in batch.batch.unique().tolist():
-                node_mask = (batch.batch == g)
+            graph_idx = batch.batch
+            unique_graphs = graph_idx.unique().tolist()
+            dtype_by_graph = self._per_graph_dataset_types(batch, len(unique_graphs))
+            graph_to_dtype = {int(g): dtype_by_graph[i] for i, g in enumerate(unique_graphs)}
+            strategy_name = self._normalize_metabolite_strategy(
+                getattr(self.config, "metabolite_masking_strategy", "legacy_random")
+            )
+
+            batch_metabolite_seen = 0
+            batch_metabolite_masked = 0
+            for g in unique_graphs:
+                node_mask = (graph_idx == g)
                 indices = torch.where(node_mask)[0]
                 n = indices.size(0)
-                k = max(1, int(n * mask_ratio))
-                perm = torch.randperm(n, device=batch.pos.device)[:k]
-                coord_mask[indices[perm]] = True
+                if n == 0:
+                    continue
+                if self._is_metabolite_type(graph_to_dtype.get(int(g), "")):
+                    if hasattr(batch, "shared_metabolite_mask") and batch.shared_metabolite_mask is not None:
+                        selected = indices[batch.shared_metabolite_mask[indices]]
+                    else:
+                        selected = self._select_metabolite_mask_indices_for_task(
+                            batch=batch,
+                            graph_indices=indices,
+                            task_name="coord",
+                            default_ratio=mask_ratio,
+                        )
+                    batch_metabolite_seen += int(n)
+                    batch_metabolite_masked += int(selected.numel())
+                else:
+                    k = max(1, int(n * mask_ratio))
+                    perm = torch.randperm(n, device=batch.pos.device)[:k]
+                    selected = indices[perm]
+                if selected.numel() > 0:
+                    coord_mask[selected] = True
+
+            if self.training and batch_metabolite_seen > 0 and not (
+                hasattr(batch, "shared_metabolite_mask") and batch.shared_metabolite_mask is not None
+            ):
+                self.metabolite_coord_atoms_seen += float(batch_metabolite_seen)
+                self.metabolite_coord_atoms_masked += float(batch_metabolite_masked)
+                batch_ratio = batch_metabolite_masked / max(1, batch_metabolite_seen)
+                cumulative_ratio = float(self.metabolite_coord_atoms_masked.item()) / max(
+                    1.0, float(self.metabolite_coord_atoms_seen.item())
+                )
+                self.log("train_coord_metabolite_mask_ratio_batch", batch_ratio, on_step=True, logger=True)
+                self.log("train_coord_metabolite_mask_ratio_cumulative", cumulative_ratio, on_step=True, logger=True)
+                self.log("train_coord_metabolite_masking_is_brics", 1.0 if strategy_name == "brics_fragment" else 0.0, on_step=True, logger=True)
         else:
             k = max(1, int(num_nodes * mask_ratio))
             coord_mask[torch.randperm(num_nodes, device=batch.pos.device)[:k]] = True
@@ -479,6 +811,7 @@ class PretrainingESAModel(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def training_step(self, batch, batch_idx):
+        self._ensure_shared_metabolite_fragment_mask(batch)
         self._ensure_mlm_attributes(batch)
         self._ensure_coord_denoising_attributes(batch)
 
@@ -560,6 +893,7 @@ class PretrainingESAModel(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
+        self._ensure_shared_metabolite_fragment_mask(batch)
         self._ensure_mlm_attributes(batch)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
@@ -582,6 +916,7 @@ class PretrainingESAModel(pl.LightningModule):
         return total_loss
 
     def test_step(self, batch, batch_idx):
+        self._ensure_shared_metabolite_fragment_mask(batch)
         self._ensure_mlm_attributes(batch)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)

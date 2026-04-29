@@ -198,6 +198,22 @@ class COCONUTAdapter(BaseAdapter):
             for prop_name in mol.GetPropNames():
                 if prop_name != 'IDENTIFIER':
                     sample['properties'][prop_name.lower()] = mol.GetProp(prop_name)
+            smiles_candidates = [
+                'SMILES', 'smiles', 'CanonicalSMILES', 'canonical_smiles', 'SMILE', 'smi'
+            ]
+            smiles_value = None
+            for key in smiles_candidates:
+                if mol.HasProp(key):
+                    smiles_value = mol.GetProp(key).strip()
+                    if smiles_value:
+                        break
+            if not smiles_value:
+                try:
+                    mol_no_h = Chem.RemoveHs(mol, sanitize=False)
+                    smiles_value = Chem.MolToSmiles(mol_no_h, canonical=True)
+                except Exception:
+                    smiles_value = ""
+            sample['properties']['smiles'] = smiles_value
             
             samples.append(sample)
             
@@ -281,7 +297,8 @@ class COCONUTAdapter(BaseAdapter):
                     pos_code='sm',  # Small molecule position code (vocabulary index 13)
                     block_idx=0,  # Will be updated later
                     atom_idx_in_block=len(fragment_atoms),
-                    entity_idx=0  # Single entity for COCONUT natural products
+                    entity_idx=0,  # Single entity for COCONUT natural products
+                    source_atom_idx=int(atom_idx),
                 )
                 fragment_atoms.append(atom)
 

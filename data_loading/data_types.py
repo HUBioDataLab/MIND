@@ -34,6 +34,7 @@ class UniversalAtom:
     entity_idx: int                 # Index identifying the molecular entity this atom belongs to
                                     # (e.g., 0 for protein, 1 for ligand). Crucial for modeling
                                     # interactions in a multi-component complex.
+    source_atom_idx: Optional[int] = None  # Optional atom index in source molecule ordering (after H filtering for small molecules).
     is_virtual: bool = False        # Flag indicating if this is a virtual atom (for 14-atom uniform representation)
     virtual_type: Optional[str] = None  # Always 'V' for virtual atoms (generic type to prevent sequence leakage)
 

@@ -80,6 +80,22 @@ class PretrainingConfig:
     # Masked language modeling
     mlm_weight: float = 1.0
     mlm_mask_ratio: float = 0.15
+    # If true, MLM/coordinate masking is generated in model hooks at runtime.
+    # Keep this enabled when comparing random vs BRICS metabolite masking.
+    use_on_the_fly_masking: bool = True
+    # Strategy for metabolite (COCONUT) masking.
+    # - legacy_random: old behavior
+    # - brics_fragment: fragment-based behavior (uses fragment/block groups in data)
+    # Backward-compatible aliases are supported in code: random->legacy_random, brics->brics_fragment.
+    metabolite_masking_strategy: str = "brics_fragment"
+    # BRICS source for metabolite masking: precomputed (from chunks) or runtime.
+    metabolite_brics_source: str = "precomputed"
+    # Global target ratio for masked metabolite atoms across training.
+    metabolite_mask_target_ratio: float = 0.15
+    # Optional cap used in BRICS mode to avoid masking too many atoms from one graph.
+    metabolite_max_mask_ratio_per_graph: float = 0.5
+    # If True, allows partial masking inside an oversized selected fragment to stay near budget.
+    metabolite_allow_partial_fragment_masking: bool = False
 
     # Coordinate denoising (predict added noise from node embeddings; SE(3)-invariant loss)
     coordinate_denoising_noise_std: float = 0.1
@@ -91,6 +107,9 @@ class PretrainingConfig:
     # Per-type loss tracking (for multi-domain analysis)
     compute_per_type_losses: bool = False
     log_per_type_frequency: int = 10
+
+    # Validation cadence (step-based; robust with dynamic batching)
+    val_check_interval_steps: int = 100
 
     # Verbose batch logging (BATCH N, dataset mix, step loss prints); set true to enable
     log_batch_stats: bool = False
