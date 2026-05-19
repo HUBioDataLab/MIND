@@ -735,17 +735,20 @@ def train_universal_pretraining(
     print("✅ Per-atom metrics callback enabled for validation monitoring")
 
     # Add per-atom + per-AA metrics callback for protein batches (bf16-safe,
-    # element-aware; logs under val_protein_atom_metrics/* and
-    # val_protein_aa_metrics/* so protein metrics don't collide with RNA ones).
+    # element-aware; logs under val_protein_atom_metrics/*,
+    # val_protein_aa_metrics/* (binary 1/0 residue) and val_protein_aa_block/*
+    # (atom-level backbone vs sidechain accuracy) so protein metrics don't
+    # collide with RNA ones).
     protein_metrics_callback = ProteinPerAtomMetricsCallback(
         enabled=True,
         only_protein=True,
         compute_groups=True,
         compute_per_aa=True,
+        compute_per_aa_block=True,
         log_every_n_epochs=1,
     )
     callbacks.append(protein_metrics_callback)
-    print("✅ Protein per-atom + per-AA metrics callback enabled")
+    print("✅ Protein per-atom + per-AA (binary & block) metrics callback enabled")
     
     # Create wandb logger
     wandb_logger = WandbLogger(

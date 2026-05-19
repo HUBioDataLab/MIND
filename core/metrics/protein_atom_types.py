@@ -175,6 +175,17 @@ def is_virtual_atom(pos_code: str) -> bool:
     return pos_code == PROTEIN_VIRTUAL_ATOM or pos_code.startswith('V')
 
 
+def is_sidechain_slot(pos_code: str) -> bool:
+    """True if pos_code occupies a sidechain slot (real sidechain atom OR virtual padding).
+
+    In the 14-atom layout (4 backbone + 10 sidechain slots), every non-backbone
+    position is a "sidechain slot" — used for the block-level AA metric so
+    sidechain accuracy is computed over the full 10-slot window regardless of
+    how many slots are real vs virtual for a given residue.
+    """
+    return not is_backbone_atom(pos_code)
+
+
 def get_atom_group(pos_code: str, group_type: str = 'backbone_vs_sidechain') -> str:
     atom_class = pos_code_to_atom_class(pos_code)
     groups = PROTEIN_ATOM_GROUPS.get(group_type, {})
