@@ -211,29 +211,59 @@ class ProteinPerAtomMetricsCallback(Callback):
         y_pred_indices = np.where(is_correct_element, y_true_indices, out_of_vocab)
 
         # 5. Apply MLM mask if present; only masked atoms are MLM-supervised.
+        #    Also restrict to protein-graph atoms — in mixed-modality batches
+        #    (PDB + RNA) the non-protein atoms would otherwise leak into the
+        #    per-atom classification table. RNA pos_codes ('P', "C5'", ...) are
+        #    not in ALL_PROTEIN_ATOMS so they collapse to the 'V' class and
+        #    inflate the Virtual row otherwise.
         mlm_mask_np: Optional[np.ndarray] = None
         if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
             mlm_mask_np = batch.mlm_mask.cpu().numpy().astype(bool)
-            if len(mlm_mask_np) == len(y_true_indices):
-                y_true_masked = y_true_indices[mlm_mask_np]
-                y_pred_masked = y_pred_indices[mlm_mask_np]
-            else:
+            if len(mlm_mask_np) != len(y_true_indices):
                 # Size mismatch → fall back to no masking
-                y_true_masked = y_true_indices
-                y_pred_masked = y_pred_indices
                 mlm_mask_np = None
+
+        # Build per-atom protein mask (True for atoms whose graph dtype is
+        # protein/pdb). When no dtype info is available, treat everything as
+        # protein — preserves single-domain protein-only behaviour.
+        is_protein_per_atom = np.ones(len(y_true_indices), dtype=bool)
+        graph_dtypes = self._graph_dtype_list(batch)
+        if (graph_dtypes is not None
+                and hasattr(batch, 'batch')
+                and batch.batch is not None):
+            mol_idx = batch.batch.cpu().numpy()
+            if len(mol_idx) == len(y_true_indices):
+                protein_set = PROTEIN_DATASET_TYPES
+                is_protein_graph = np.array(
+                    [
+                        (g < len(graph_dtypes)
+                         and str(graph_dtypes[g]).lower() in protein_set)
+                        for g in mol_idx
+                    ],
+                    dtype=bool,
+                )
+                is_protein_per_atom = is_protein_graph
+
+        if mlm_mask_np is not None:
+            effective_mask = mlm_mask_np & is_protein_per_atom
+            y_true_masked = y_true_indices[effective_mask]
+            y_pred_masked = y_pred_indices[effective_mask]
         else:
-            y_true_masked = y_true_indices
-            y_pred_masked = y_pred_indices
+            y_true_masked = y_true_indices[is_protein_per_atom]
+            y_pred_masked = y_pred_indices[is_protein_per_atom]
 
         if len(y_true_masked) > 0:
             metrics_calculator.update(y_pred_masked, y_true_masked)
 
         # 6. Per-AA metric: for each residue that has ≥1 masked atom, check
         #    whether ALL masked atoms in that residue got correct element.
+        #    Real-only column is computed in the same pass by excluding virtual
+        #    atoms from the per-residue "all correct" check — useful because
+        #    virtuals are easy (V recall ~0.94) and inflate the binary signal.
         if self.compute_per_aa and mlm_mask_np is not None:
             self._accumulate_aa_stats(
                 batch=batch,
+                flattened_pos_codes=flattened_pos_codes,
                 mlm_mask_np=mlm_mask_np,
                 is_correct_element=is_correct_element,
                 aa_stats=aa_stats,
@@ -253,13 +283,32 @@ class ProteinPerAtomMetricsCallback(Callback):
                 aa_block_stats=aa_block_stats,
             )
 
-    def _accumulate_aa_stats(self, batch, mlm_mask_np, is_correct_element, aa_stats):
-        """Aggregate per-residue correctness into per-AA stats."""
+    def _accumulate_aa_stats(self, batch, flattened_pos_codes, mlm_mask_np,
+                              is_correct_element, aa_stats):
+        """Aggregate per-residue correctness into per-AA stats.
+
+        Two parallel binary scores per residue:
+        - `correct`/`total`: all masked atoms in the residue got correct element
+          (virtuals included — easy slots inflate this).
+        - `real_correct`/`real_total`: all masked NON-virtual atoms got correct
+          element (virtuals excluded). Counts only residues that had at least
+          one masked real atom — so a GLY residue (no real sidechain) where
+          only virtuals were masked contributes to `total` but not `real_total`.
+
+        Per-graph dtype filter: residues belonging to non-protein graphs
+        (e.g. RNA mixed in the same batch) are skipped. Without this filter,
+        RNA nucleotides ('A','U','G','C') fall through `STANDARD_AMINO_ACIDS`
+        and pollute the `UNKNOWN` bucket of the protein table.
+        """
         if not hasattr(batch, 'block_idx') or not hasattr(batch, 'block_symbols'):
             return
         if not hasattr(batch, 'batch') or batch.batch is None:
             # Can't group atoms by molecule without PyG's batch index.
             return
+
+        # Per-graph dtype list (len = batch.num_graphs) — used to skip non-protein
+        # graphs in mixed-modality batches.
+        graph_dtypes = self._graph_dtype_list(batch)
 
         mol_idx_per_atom = batch.batch.cpu().numpy()
         block_idx_per_atom = batch.block_idx.cpu().numpy()
@@ -276,8 +325,21 @@ class ProteinPerAtomMetricsCallback(Callback):
             # Flat fallback — assume single molecule or already-flat list.
             per_mol_symbols = [list(raw_block_symbols)]
 
-        # Unique (molecule, block) pairs that contain at least one masked atom.
+        # Pre-classify each atom as "real" (non-virtual). Aligned with the
+        # flattened pos_code order, identical to the atom ordering of
+        # mol_idx_per_atom / block_idx_per_atom.
         n_atoms = len(mol_idx_per_atom)
+        if len(flattened_pos_codes) == n_atoms:
+            is_real_per_atom = np.array(
+                [not is_virtual_atom(c) for c in flattened_pos_codes], dtype=bool
+            )
+        else:
+            # Size mismatch — defensive fallback: treat everything as real so
+            # the "real" column behaves like the regular column rather than
+            # silently dropping data.
+            is_real_per_atom = np.ones(n_atoms, dtype=bool)
+
+        # Unique (molecule, block) pairs that contain at least one masked atom.
         # Encode the pair as a single int for np.unique grouping.
         # Assumption: block_idx per molecule < 100_000 (protein residues cap).
         residue_key = mol_idx_per_atom.astype(np.int64) * 100_000 + block_idx_per_atom.astype(np.int64)
@@ -289,6 +351,14 @@ class ProteinPerAtomMetricsCallback(Callback):
             mol_i = int(rkey // 100_000)
             block_i = int(rkey % 100_000)
 
+            # Skip non-protein graphs (e.g. RNA mixed in the same batch). The
+            # batch-level filter only checks if ANY graph is protein; we still
+            # need a per-graph filter so RNA nucleotides don't end up in the
+            # UNKNOWN bucket of the protein per-AA table.
+            if graph_dtypes is not None and mol_i < len(graph_dtypes):
+                if str(graph_dtypes[mol_i]).lower() not in PROTEIN_DATASET_TYPES:
+                    continue
+
             # Mask for atoms that belong to this residue AND are masked.
             residue_mask = (residue_key == rkey)
             residue_masked_atoms = residue_mask & mlm_mask_np
@@ -297,6 +367,14 @@ class ProteinPerAtomMetricsCallback(Callback):
                 continue
 
             all_correct = bool(is_correct_element[residue_masked_atoms].all())
+
+            # Real-only subset: same residue, masked atoms that are NOT virtual.
+            residue_masked_real = residue_masked_atoms & is_real_per_atom
+            has_real_masked = bool(residue_masked_real.any())
+            real_all_correct = (
+                bool(is_correct_element[residue_masked_real].all())
+                if has_real_masked else False
+            )
 
             # Resolve true AA symbol. Bounds-check both indices.
             if mol_i >= len(per_mol_symbols):
@@ -310,6 +388,10 @@ class ProteinPerAtomMetricsCallback(Callback):
             aa_stats[bucket]['total'] += 1
             if all_correct:
                 aa_stats[bucket]['correct'] += 1
+            if has_real_masked:
+                aa_stats[bucket]['real_total'] += 1
+                if real_all_correct:
+                    aa_stats[bucket]['real_correct'] += 1
 
     def _accumulate_aa_block_stats(self, batch, flattened_pos_codes,
                                     mlm_mask_np, is_correct_element, aa_block_stats):
@@ -332,6 +414,11 @@ class ProteinPerAtomMetricsCallback(Callback):
             return
         if not hasattr(batch, 'batch') or batch.batch is None:
             return
+
+        # Per-graph dtype list — used to skip non-protein graphs (e.g. RNA)
+        # in mixed-modality batches. Without this filter RNA residues end up
+        # in the UNKNOWN bucket and dominate the protein BLOCK table.
+        graph_dtypes = self._graph_dtype_list(batch)
 
         mol_idx_per_atom = batch.batch.cpu().numpy()
         block_idx_per_atom = batch.block_idx.cpu().numpy()
@@ -367,6 +454,11 @@ class ProteinPerAtomMetricsCallback(Callback):
         for rkey in unique_masked_residues:
             mol_i = int(rkey // 100_000)
             block_i = int(rkey % 100_000)
+
+            # Skip non-protein graphs in mixed-modality batches.
+            if graph_dtypes is not None and mol_i < len(graph_dtypes):
+                if str(graph_dtypes[mol_i]).lower() not in PROTEIN_DATASET_TYPES:
+                    continue
 
             residue_mask = (residue_key == rkey)
             masked_in_residue = residue_mask & mlm_mask_np
@@ -495,22 +587,36 @@ class ProteinPerAtomMetricsCallback(Callback):
 
     @staticmethod
     def _fresh_aa_stats() -> Dict[str, Dict[str, int]]:
-        stats = {aa: {'correct': 0, 'total': 0} for aa in STANDARD_AMINO_ACIDS}
-        stats['UNKNOWN'] = {'correct': 0, 'total': 0}
+        keys = ['correct', 'total', 'real_correct', 'real_total']
+        stats = {aa: {k: 0 for k in keys} for aa in STANDARD_AMINO_ACIDS}
+        stats['UNKNOWN'] = {k: 0 for k in keys}
         return stats
 
     @staticmethod
     def _finalize_aa_stats(aa_stats: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, float]]:
-        """Compute accuracies from {correct, total} counts."""
+        """Compute accuracies from {correct, total} counts.
+
+        `accuracy`        — residue counts as correct when ALL masked atoms
+                            (incl. virtuals) had correct element.
+        `real_accuracy`   — same check but restricted to non-virtual masked
+                            atoms; residue must have had ≥1 real masked atom
+                            (real_total). Residues whose masked atoms were
+                            entirely virtual (e.g. GLY) are excluded from this
+                            denominator.
+        """
         result: Dict[str, Dict[str, float]] = {}
         for aa, counts in aa_stats.items():
             total = counts['total']
             if total == 0:
                 continue  # Skip amino acids not seen in this epoch's masks.
+            real_total = counts['real_total']
             result[aa] = {
                 'accuracy': counts['correct'] / total,
                 'correct': counts['correct'],
                 'total': total,
+                'real_accuracy': (counts['real_correct'] / real_total) if real_total > 0 else 0.0,
+                'real_correct': counts['real_correct'],
+                'real_total': real_total,
             }
         return result
 
@@ -557,6 +663,22 @@ class ProteinPerAtomMetricsCallback(Callback):
             return any(str(dt).lower() in PROTEIN_DATASET_TYPES for dt in dtypes)
         return str(dtypes).lower() in PROTEIN_DATASET_TYPES
 
+    @staticmethod
+    def _graph_dtype_list(batch):
+        """Per-graph dtype list (len = batch.num_graphs) or None.
+
+        Used by per-AA accumulators to filter out non-protein graphs in
+        mixed-modality batches (e.g. PDB + RNA).
+        """
+        if not hasattr(batch, 'dataset_type') or batch.dataset_type is None:
+            return None
+        dt = batch.dataset_type
+        if isinstance(dt, (list, tuple)):
+            return list(dt)
+        # Single string fallback → broadcast to num_graphs entries.
+        n = getattr(batch, 'num_graphs', 1) or 1
+        return [dt] * n
+
     def _log_metrics(self, trainer, metrics, aa_accuracies, aa_block_accuracies, stage: str):
         """Push per-atom + per-AA (binary) + per-AA-block (atom-level) metrics to W&B."""
         wandb_logger = next(
@@ -576,14 +698,21 @@ class ProteinPerAtomMetricsCallback(Callback):
         if self.compute_per_aa and aa_accuracies:
             total_correct = sum(v['correct'] for v in aa_accuracies.values())
             total_count = sum(v['total'] for v in aa_accuracies.values())
+            real_total_correct = sum(v['real_correct'] for v in aa_accuracies.values())
+            real_total_count = sum(v['real_total'] for v in aa_accuracies.values())
             overall = total_correct / total_count if total_count > 0 else 0.0
+            real_overall = (real_total_correct / real_total_count) if real_total_count > 0 else 0.0
             flat[f"{prefix}{WANDB_NAMESPACE_AA}/overall_accuracy"] = overall
+            flat[f"{prefix}{WANDB_NAMESPACE_AA}/overall_real_accuracy"] = real_overall
             flat[f"{prefix}{WANDB_NAMESPACE_AA}/total_residues"] = total_count
+            flat[f"{prefix}{WANDB_NAMESPACE_AA}/total_real_residues"] = real_total_count
 
             for aa, vals in aa_accuracies.items():
                 flat[f"{prefix}{WANDB_NAMESPACE_AA}/AA_{aa}/accuracy"] = vals['accuracy']
-                # Support value kept as separate key so users can spot sparse AAs.
+                flat[f"{prefix}{WANDB_NAMESPACE_AA}/AA_{aa}/real_accuracy"] = vals['real_accuracy']
+                # Support values kept as separate keys so users can spot sparse AAs.
                 flat[f"{prefix}{WANDB_NAMESPACE_AA}/AA_{aa}/support"] = vals['total']
+                flat[f"{prefix}{WANDB_NAMESPACE_AA}/AA_{aa}/real_support"] = vals['real_total']
 
         # Per-AA block metric — atom-level backbone / sidechain accuracy per AA.
         if self.compute_per_aa_block and aa_block_accuracies:
@@ -635,37 +764,59 @@ class ProteinPerAtomMetricsCallback(Callback):
 
     @staticmethod
     def _print_per_aa_table(aa_accuracies: Dict[str, Dict[str, float]]) -> None:
+        """Binary 1/0 per-AA table with two columns:
+
+        - **Accuracy / Correct / Total**: residue counted as correct iff ALL
+          masked atoms (incl. virtual padding) got the right element.
+        - **Real Acc / Real c/t**: same residue-level binary but with virtual
+          atoms removed from the per-residue check. Residue is excluded from
+          the real denominator when its masked atoms are entirely virtual.
+        """
         if not aa_accuracies:
             print("\n(no residues with masked atoms observed — per-AA table empty)\n")
             return
         try:
             from tabulate import tabulate
             rows = [
-                [aa, f"{vals['accuracy']:.4f}", int(vals['correct']), int(vals['total'])]
+                [
+                    aa,
+                    f"{vals['accuracy']:.4f}",
+                    f"{int(vals['correct'])}/{int(vals['total'])}",
+                    f"{vals['real_accuracy']:.4f}",
+                    f"{int(vals['real_correct'])}/{int(vals['real_total'])}",
+                ]
                 for aa, vals in sorted(aa_accuracies.items())
             ]
             table = tabulate(
                 rows,
-                headers=['AA', 'Accuracy', 'Correct', 'Total'],
+                headers=['AA', 'Accuracy', 'c/t', 'Real Acc', 'Real c/t'],
                 tablefmt='grid',
             )
         except ImportError:
-            table_lines = ['AA  | Accuracy | Correct | Total']
+            table_lines = ['AA  | Accuracy | c/t       | Real Acc | Real c/t']
             for aa, vals in sorted(aa_accuracies.items()):
                 table_lines.append(
                     f"{aa:4s} | {vals['accuracy']:.4f}   | "
-                    f"{int(vals['correct']):7d} | {int(vals['total']):5d}"
+                    f"{int(vals['correct'])}/{int(vals['total'])} | "
+                    f"{vals['real_accuracy']:.4f}   | "
+                    f"{int(vals['real_correct'])}/{int(vals['real_total'])}"
                 )
             table = "\n".join(table_lines)
 
         total_correct = sum(v['correct'] for v in aa_accuracies.values())
         total_count = sum(v['total'] for v in aa_accuracies.values())
+        real_correct = sum(v['real_correct'] for v in aa_accuracies.values())
+        real_count = sum(v['real_total'] for v in aa_accuracies.values())
         overall = total_correct / total_count if total_count > 0 else 0.0
+        real_overall = real_correct / real_count if real_count > 0 else 0.0
 
         print("\n📊 PER-AMINO-ACID METRICS — binary 1/0 (residue fully correct on masked atoms):")
+        print("    'Accuracy' counts virtuals; 'Real Acc' = same check on non-virtual atoms only.")
         print(table)
-        print(f"\n   Overall residue accuracy: {overall:.4f}  "
-              f"({total_correct} / {total_count})")
+        print(
+            f"\n   Overall: {overall:.4f}  ({total_correct} / {total_count})  |  "
+            f"Real-only: {real_overall:.4f}  ({real_correct} / {real_count})"
+        )
 
     @staticmethod
     def _print_per_aa_block_table(aa_block_accuracies: Dict[str, Dict[str, float]]) -> None:
