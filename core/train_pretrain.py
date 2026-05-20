@@ -72,8 +72,11 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
             seed=None  # None = different edges each epoch
         ))
     
-    # Add MLM transform if MLM is in pretraining tasks
-    if "mlm" in config.pretraining_tasks:
+    # Add MLM transform if MLM is in pretraining tasks. When protein block-MLM
+    # is enabled we skip the per-sample atom-level transform and let
+    # `_ensure_mlm_attributes` build the mask at batch time (residue-level for
+    # protein graphs, atom-level for everything else).
+    if "mlm" in config.pretraining_tasks and not getattr(config, 'protein_block_mlm', False):
         mask_ratio = getattr(config, 'mlm_mask_ratio', 0.15)
         transforms.append(MaskAtomTypes(
             mask_ratio=mask_ratio,
@@ -655,6 +658,13 @@ def train_universal_pretraining(
     print(f"Max epochs: {config.max_epochs}")
     print(f"Learning rate: {config.lr}")
     print(f"Tasks: {config.pretraining_tasks}")
+    if "mlm" in config.pretraining_tasks:
+        if getattr(config, 'protein_block_mlm', False):
+            block_ratio = getattr(config, 'protein_block_mlm_ratio', 0.15)
+            print(f"✅ Protein Block-MLM ENABLED — residue-level mask "
+                  f"(ratio={block_ratio}); other molecule types stay atom-level.")
+        else:
+            print("ℹ️  Protein Block-MLM disabled — atom-level MLM for all graph types.")
     print("=" * 60)
     
     # Set random seed

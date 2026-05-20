@@ -24,7 +24,7 @@ multi_domain:
       atom_ratio: 5
       chunk_range: [0, 0]
     metabolite:
-      enabled: true
+      enabled: false  # TEMP: smiles attr asymmetry (29 Apr metabolite chunks vs 14 Apr protein chunks). Disabled while validating block-MLM; revert after smiles bug is fixed.
       chunk_dir: "/home/ege/MIND_HuBioDataLab/data/COCONUT/processed"
       atom_ratio: 10
       chunk_range: [0, 0]
@@ -135,6 +135,11 @@ task_weights:
   short_range_distance: 1.0
   mlm: 0.3
 mlm_mask_ratio: 0.15
+
+# Protein-only block MLM (see multidomain config for details).
+protein_block_mlm: true
+protein_block_mlm_ratio: 0.15
+
 temperature: 0.2
 
 max_block_types: 150
