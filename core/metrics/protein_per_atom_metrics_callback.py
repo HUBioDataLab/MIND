@@ -42,6 +42,7 @@ from pytorch_lightning.loggers import WandbLogger
 from core.metrics.per_atom_metrics import PerAtomMetricsCalculator
 from core.metrics.protein_atom_types import (
     ALL_PROTEIN_ATOMS,
+    PROTEIN_SIDECHAIN_ATOMS,
     PROTEIN_ATOM_GROUPS,
     ATOMIC_NUM_TO_ELEMENT,
     STANDARD_AMINO_ACIDS,
@@ -444,7 +445,12 @@ class ProteinPerAtomMetricsCallback(Callback):
                 is_bb[i] = True
             elif is_sidechain_slot(code):
                 is_sc_slot[i] = True
-                if not is_virtual_atom(code):
+                # Real sidechain = atom whose class is an actual sidechain vocab
+                # entry. Non-vocab atoms (terminal OXT, ARG NH1/NH2, ...) collapse
+                # to the V class in the per-atom table, so exclude them here too —
+                # otherwise e.g. a terminal GLY's OXT shows up as a "real
+                # sidechain" atom even though GLY has no sidechain.
+                if pos_code_to_atom_class(code) in PROTEIN_SIDECHAIN_ATOMS:
                     is_sc_real[i] = True
 
         # Group atoms by (molecule, residue).
