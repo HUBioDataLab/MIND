@@ -47,8 +47,8 @@ multi_domain:
       chunk_range: null
     
     metabolite:
-      enabled: false  # TEMP: metabolite chunks (29 Apr) gained a `smiles` attr that PDB/RNA chunks lack — PyG collate fails with KeyError. Re-enable after smiles asymmetry is fixed.
-      chunk_dir: "/home/ege/MIND_HuBioDataLab/data/COCONUT/processed"
+      enabled: false  # Path fixed to 8TB build (497 chunks, proper layout). Earlier `smiles`-asymmetry build is gone; current chunks carry only an unused `bond_edge_index` key that PyG collate drops safely. Enable for the multi-domain mega train.
+      chunk_dir: "/media/ubuntu/8TB/ege/processed"
       atom_ratio: 10  # 10% of atoms from metabolites
       chunk_range: null
 

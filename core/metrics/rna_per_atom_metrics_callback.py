@@ -229,7 +229,7 @@ class PerAtomMetricsCallback(Callback):
         # Print summary (periyodik; eskiden sadece epoch 0'da tetikleniyordu)
         if trainer.current_epoch % (self.log_every_n_epochs * 5) == 0:
             print("\n" + "="*80)
-            print(f"VALIDATION METRICS - Epoch {trainer.current_epoch}")
+            print(f"RNA VALIDATION METRICS - Epoch {trainer.current_epoch}")
             print("="*80)
             self.val_metrics.print_summary()
 
@@ -244,7 +244,7 @@ class PerAtomMetricsCallback(Callback):
         if snap is None:
             return
         print("\n" + "="*100)
-        print(f"🏁 FINAL PER-ATOM METRICS (last validation, epoch {snap['epoch']})")
+        print(f"🏁 FINAL RNA PER-ATOM METRICS (last validation, epoch {snap['epoch']})")
         print("="*100)
         # Snapshot'ı calculator'a geri yükle ve basit print_summary API'sini kullan
         self.val_metrics.per_atom_metrics = snap['per_atom']
@@ -268,7 +268,7 @@ class PerAtomMetricsCallback(Callback):
         
         # Print summary
         print("\n" + "="*80)
-        print(f"TEST METRICS - Epoch {trainer.current_epoch}")
+        print(f"RNA TEST METRICS - Epoch {trainer.current_epoch}")
         print("="*80)
         self.test_metrics.print_summary()
         

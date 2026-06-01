@@ -19,24 +19,25 @@ multi_domain:
       atom_ratio: 60
       chunk_range: [0, 0]
     qm9:
-      enabled: true
+      enabled: false  # Replaced by unimol as the small-molecule domain.
       chunk_dir: "/home/arin/data/qm9_chunks"
       atom_ratio: 5
       chunk_range: [0, 0]
     metabolite:
-      enabled: false  # TEMP: smiles attr asymmetry (29 Apr metabolite chunks vs 14 Apr protein chunks). Disabled while validating block-MLM; revert after smiles bug is fixed.
-      chunk_dir: "/home/ege/MIND_HuBioDataLab/data/COCONUT/processed"
+      enabled: false  # DEFERRED: 8TB build (497 chunks) carries `bond_edge_index` that PDB/RNA/UniMol lack → PyG collate KeyError in mixed batches. Re-enable after we either strip the key or give all domains an empty bond graph (only needed if a bond-masking task is added).
+      chunk_dir: "/media/ubuntu/8TB/ege/processed"
       atom_ratio: 10
       chunk_range: [0, 0]
     unimol:
-      enabled: false
+      enabled: true
       chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
       atom_ratio: 25
       chunk_range: [0, 0]
     rna:
-      enabled: false
-      chunk_dir: "../data/rna/processed_chunks"
-      atom_ratio: 0
+      enabled: true
+      chunk_dir: "/home/yusuf/data/rna/processed_graphs"
+      atom_ratio: 5
+      chunk_range: [0, 0]
     dna:
       enabled: false
       chunk_dir: "../data/dna/processed_chunks"

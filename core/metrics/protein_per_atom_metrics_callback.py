@@ -24,10 +24,12 @@ Per-amino-acid metric:
 - For every residue that has at least one masked atom in the batch, we
   classify the residue as "correctly predicted" iff ALL masked atoms in that
   residue have the correct element prediction. We then aggregate per amino
-  acid type (ALA, ARG, ..., VAL). This is inflated under the current %15
-  atom-level MLM mask (most of the residue is visible) but still provides a
-  relative signal. Replacing the mask with full-residue masking in a future
-  iteration would make the metric a true AA recognition signal.
+  acid type (ALA, ARG, ..., VAL).
+- Under residue-level block masking (config.protein_block_mlm=True) every atom
+  of a masked residue is hidden, so this is a true all-or-nothing AA
+  recognition signal. Under atom-level random masking only a fraction of the
+  residue is hidden, so the same metric is inflated (most of the residue stays
+  visible) and should be read as a relative signal only.
 """
 
 import torch
@@ -810,8 +812,8 @@ class ProteinPerAtomMetricsCallback(Callback):
         overall = total_correct / total_count if total_count > 0 else 0.0
         real_overall = real_correct / real_count if real_count > 0 else 0.0
 
-        print("\n📊 PER-AMINO-ACID METRICS — binary 1/0 (residue fully correct on masked atoms):")
-        print("    'Accuracy' counts virtuals; 'Real Acc' = same check on non-virtual atoms only.")
+        print("\n📊 PER-AMINO-ACID METRICS — residue-level all-or-nothing (1 iff EVERY masked atom in the residue got the right element):")
+        print("    Accuracy = virtual padding counted too (easy slots → optimistic).  Real Acc = non-virtual atoms only (the real recognition signal).")
         print(table)
         print(
             f"\n   Overall: {overall:.4f}  ({total_correct} / {total_count})  |  "
@@ -873,7 +875,8 @@ class ProteinPerAtomMetricsCallback(Callback):
         scr_t = sum(v['sc_real_total'] for v in aa_block_accuracies.values())
         res = sum(v['residues_seen'] for v in aa_block_accuracies.values())
 
-        print("\n📊 PER-AMINO-ACID BLOCK METRICS — atom-level (BB / SC / SC-real):")
+        print("\n📊 PER-AMINO-ACID BLOCK METRICS — atom-level fraction correct (BB / SC / SC-real):")
+        print("    BB = backbone N/CA/C/O.  SC = all 10 sidechain slots incl. virtual padding (so ~0.9 mostly reflects easy padding).  SCr = real sidechain atoms only — the meaningful signal.")
         print(table)
         print(
             f"\n   Overall BB: {(bb_c/bb_t if bb_t else 0):.4f} ({bb_c}/{bb_t})  |  "
