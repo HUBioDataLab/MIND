@@ -20,7 +20,7 @@ Key Improvements:
 import torch
 import random
 from torch.utils.data import BatchSampler, Sampler
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 from collections import defaultdict
 from data_loading.lazy_universal_dataset import LazyUniversalDataset
 
@@ -87,6 +87,8 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         self.enable_cross_modal_batches = enable_cross_modal_batches
         self.epoch = 0
         self.seed = seed
+        self._cached_batches: Optional[List[List[int]]] = None
+        self._cached_batches_epoch: Optional[int] = None
         
         # Validate dataset
         if not hasattr(self.dataset, 'chunk_pt_files'):
@@ -302,34 +304,55 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         
         return batches
     
+    def _build_batches(self) -> List[List[int]]:
+        """Build the batch list for the current epoch (metadata-based atom packing)."""
+        samples_by_chunk = self._organize_samples_by_chunk()
+        if self.enable_cross_modal_batches:
+            return self._create_batches_cross_modal(samples_by_chunk)
+        return self._create_batches_standard(samples_by_chunk)
+    
+    def _get_batches(self, log_progress: bool = False) -> List[List[int]]:
+        """Return cached batches for this epoch, building once if needed."""
+        if (
+            self._cached_batches is not None
+            and self._cached_batches_epoch == self.epoch
+        ):
+            return self._cached_batches
+        
+        if log_progress:
+            print("\r⚡ Organizing samples by chunk...", end="", flush=True)
+        
+        batches = self._build_batches()
+        
+        self._cached_batches = batches
+        self._cached_batches_epoch = self.epoch
+        
+        if log_progress:
+            mode = "cross-modal" if self.enable_cross_modal_batches else "standard"
+            print(
+                f"\r✅ Ready! {len(batches)} batches created "
+                f"(epoch {self.epoch}, {mode} mode)."
+            )
+        
+        return batches
+    
+    def _invalidate_batch_cache(self) -> None:
+        self._cached_batches = None
+        self._cached_batches_epoch = None
+    
     def __iter__(self) -> Iterator[List[int]]:
         """Generate batches for one epoch"""
-        import sys
-        
-        # Step 1: Organize samples by chunk
-        print(f"\r⚡ Organizing samples by chunk...", end='', flush=True)
-        samples_by_chunk = self._organize_samples_by_chunk()
-        
-        # Step 2: Create batches (mode-dependent)
-        print(f"\r⚡ Creating batches (cross-modal={self.enable_cross_modal_batches})...", end='', flush=True)
-        if self.enable_cross_modal_batches:
-            batches = self._create_batches_cross_modal(samples_by_chunk)
-        else:
-            batches = self._create_batches_standard(samples_by_chunk)
-        
-        print(f"\r✅ Ready! {len(batches)} batches created.                    ")
-        
-        # Step 3: Yield batches
+        batches = self._get_batches(log_progress=True)
         for batch in batches:
             yield batch
     
     def __len__(self) -> int:
-        """Estimate number of batches"""
-        total_samples = len(self.subset_indices) if self.subset_indices is not None else len(self.dataset)
-        avg_atoms_per_sample = 500  # Conservative estimate
-        return max(1, (total_samples * avg_atoms_per_sample) // self.max_atoms_per_batch)
+        """Exact batch count for the current epoch (matches __iter__ output)."""
+        return max(1, len(self._get_batches(log_progress=False)))
     
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""
-        self.epoch = epoch
+        if epoch != self.epoch:
+            self.epoch = epoch
+            self._invalidate_batch_cache()
 

@@ -81,6 +81,13 @@ class PretrainingConfig:
     mlm_weight: float = 1.0
     mlm_mask_ratio: float = 0.15
 
+    # COCONUT / metabolite masking (random_atom vs random_walk on bond_edge_index)
+    coconut_masking_method: str = "random_atom"  # random_atom | random_walk
+    coconut_mask_ratio: float = 0.15
+    coconut_num_random_walks: int = 1
+    log_coconut_masking_stats: bool = True  # wandb masking/* metrics for coconut/metabolite
+    log_coconut_masking_frequency: int = 50  # log every N training batches (0 = every step)
+
     # Coordinate denoising (predict added noise from node embeddings; SE(3)-invariant loss)
     coordinate_denoising_noise_std: float = 0.1
     coordinate_denoising_mask_ratio: float = 0.15  # fraction of nodes to compute loss on

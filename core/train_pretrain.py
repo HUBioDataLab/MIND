@@ -74,16 +74,31 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
     # Add MLM transform if MLM is in pretraining tasks
     if "mlm" in config.pretraining_tasks:
         mask_ratio = getattr(config, 'mlm_mask_ratio', 0.15)
+        coconut_mask_ratio = getattr(config, 'coconut_mask_ratio', mask_ratio)
+        coconut_masking_method = getattr(config, 'coconut_masking_method', 'random_atom')
+        coconut_num_random_walks = getattr(config, 'coconut_num_random_walks', 1)
         transforms.append(MaskAtomTypes(
             mask_ratio=mask_ratio,
-            mask_token=0  # Assuming 0 is the mask token
+            mask_token=0,
+            coconut_mask_ratio=coconut_mask_ratio,
+            coconut_masking_method=coconut_masking_method,
+            coconut_num_random_walks=coconut_num_random_walks,
         ))
 
     # Add coordinate denoising transform (noise on pos, clean_pos + coord_mask)
     if "coordinate_denoising" in config.pretraining_tasks:
         noise_std = getattr(config, 'coordinate_denoising_noise_std', 0.1)
         mask_ratio = getattr(config, 'coordinate_denoising_mask_ratio', 0.15)
-        transforms.append(AddRandomNoise(noise_std=noise_std, mask_ratio=mask_ratio))
+        coconut_mask_ratio = getattr(config, 'coconut_mask_ratio', mask_ratio)
+        coconut_masking_method = getattr(config, 'coconut_masking_method', 'random_atom')
+        coconut_num_random_walks = getattr(config, 'coconut_num_random_walks', 1)
+        transforms.append(AddRandomNoise(
+            noise_std=noise_std,
+            mask_ratio=mask_ratio,
+            coconut_mask_ratio=coconut_mask_ratio,
+            coconut_masking_method=coconut_masking_method,
+            coconut_num_random_walks=coconut_num_random_walks,
+        ))
     
     return Compose(transforms) if len(transforms) > 0 else None
 

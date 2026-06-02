@@ -15,6 +15,13 @@ from esa.mlp_utils import SmallMLP
 from core.pretraining_config import PretrainingConfig, create_pretraining_config
 from core.molecular_encoder import UniversalMolecularEncoder, nearest_multiple_of_8
 from core.pretraining_tasks import PretrainingTasks
+from data_loading.masking_utils import (
+    compute_coconut_masking_metrics,
+    get_graph_dataset_type,
+    is_coconut_dataset_type,
+    select_mask_indices,
+    slice_bond_edge_index,
+)
 
 # Backward-compatibility re-exports (other files can still import from here)
 __all__ = [
@@ -261,6 +268,51 @@ class PretrainingESAModel(pl.LightningModule):
     # Pre-encoder masking helpers (called before forward() in each step)
     # ------------------------------------------------------------------
 
+    def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = False):
+        """Ratio and bond edges config for a single graph in a batch."""
+        if is_coconut_dataset_type(dataset_type):
+            ratio = getattr(self.config, 'coconut_mask_ratio', 0.15)
+            method = getattr(self.config, 'coconut_masking_method', 'random_atom')
+            num_walks = getattr(self.config, 'coconut_num_random_walks', 1)
+        else:
+            if for_coord:
+                ratio = getattr(self.config, 'coordinate_denoising_mask_ratio', 0.15)
+            else:
+                ratio = getattr(self.config, 'mlm_mask_ratio', 0.15)
+            method = 'random_atom'
+            num_walks = 1
+        return ratio, method, num_walks
+
+    def _select_graph_mask_indices(
+        self,
+        batch,
+        graph_idx: int,
+        indices: torch.Tensor,
+        for_coord: bool = False,
+    ) -> torch.Tensor:
+        n = indices.size(0)
+        device = indices.device
+        dtype = get_graph_dataset_type(getattr(batch, 'dataset_type', None), graph_idx)
+        ratio, coconut_method, num_walks = self._graph_masking_params(dtype, for_coord=for_coord)
+        bond_edge_index = getattr(batch, 'bond_edge_index', None)
+        bond_sub = None
+        if bond_edge_index is not None and bond_edge_index.numel() > 0:
+            node_offset = int(indices[0].item())
+            bond_sub = slice_bond_edge_index(bond_edge_index, node_offset, n)
+            if bond_sub.numel() > 0:
+                bond_sub = bond_sub.to(device)
+        local_indices = select_mask_indices(
+            n,
+            ratio,
+            method='random_atom',
+            bond_edge_index=bond_sub,
+            dataset_type=dtype,
+            coconut_method=coconut_method,
+            num_walks=num_walks,
+            device=device,
+        )
+        return indices[local_indices]
+
     def _ensure_mlm_attributes(self, batch):
         """Add MLM masking on-the-fly if not already present.
         Applies to all molecule types including proteins."""
@@ -271,7 +323,6 @@ class PretrainingESAModel(pl.LightningModule):
         if not hasattr(batch, 'z') or batch.z is None:
             return
 
-        mask_ratio = getattr(self.config, 'mlm_mask_ratio', 0.15)
         mask_token = 0
         z = batch.z.long()
         batch.original_types = z.clone()
@@ -284,22 +335,60 @@ class PretrainingESAModel(pl.LightningModule):
             for g in graph_idx.unique().tolist():
                 node_mask = (graph_idx == g)
                 indices = torch.where(node_mask)[0]
-                n = indices.size(0)
-                if n > 0:
-                    k = max(1, int(n * mask_ratio))
-                    perm = torch.randperm(n, device=z.device)[:k]
-                    selected = indices[perm]
+                if indices.size(0) > 0:
+                    selected = self._select_graph_mask_indices(batch, int(g), indices, for_coord=False)
                     mlm_mask[selected] = True
                     masked_types[selected] = mask_token
         else:
-            k = max(1, int(num_nodes * mask_ratio))
-            selected = torch.randperm(num_nodes, device=z.device)[:k]
-            mlm_mask[selected] = True
-            masked_types[selected] = mask_token
+            dtype = get_graph_dataset_type(getattr(batch, 'dataset_type', None), 0)
+            ratio, coconut_method, num_walks = self._graph_masking_params(dtype, for_coord=False)
+            bond_edge_index = getattr(batch, 'bond_edge_index', None)
+            local = select_mask_indices(
+                num_nodes,
+                ratio,
+                method='random_atom',
+                bond_edge_index=bond_edge_index,
+                dataset_type=dtype,
+                coconut_method=coconut_method,
+                num_walks=num_walks,
+                device=z.device,
+            )
+            mlm_mask[local] = True
+            masked_types[local] = mask_token
 
         batch.mlm_mask = mlm_mask
         batch.masked_types = masked_types
         batch.z = masked_types  # encoder sees masked input
+
+    def _log_coconut_masking_metrics(self, batch, batch_idx: int) -> None:
+        """Log coconut-only masking diagnostics to wandb under the ``masking/`` namespace."""
+        if "mlm" not in self.config.pretraining_tasks:
+            return
+        if not getattr(self.config, "log_coconut_masking_stats", True):
+            return
+        freq = int(getattr(self.config, "log_coconut_masking_frequency", 50))
+        if freq > 0 and batch_idx % freq != 0:
+            return
+
+        metrics = compute_coconut_masking_metrics(batch, self.config)
+        if metrics is None:
+            return
+
+        for key in (
+            "mask_frac",
+            "mask_target_frac",
+            "mask_connected_frac",
+            "bond_edges_per_graph",
+            "mask_fallback_rate",
+        ):
+            self.log(
+                f"masking/{key}",
+                float(metrics[key]),
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+                batch_size=1,
+            )
 
     def _ensure_coord_denoising_attributes(self, batch):
         """Add coordinate noise on-the-fly if not already present."""
@@ -311,23 +400,38 @@ class PretrainingESAModel(pl.LightningModule):
             return
 
         noise_std = getattr(self.config, 'coordinate_denoising_noise_std', 0.1)
-        mask_ratio = getattr(self.config, 'coordinate_denoising_mask_ratio', 0.15)
         batch.clean_pos = batch.pos.clone()
         noise = torch.randn_like(batch.pos, device=batch.pos.device, dtype=batch.pos.dtype) * noise_std
         batch.pos = batch.clean_pos + noise
         num_nodes = batch.pos.size(0)
+
+        if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
+            batch.coord_mask = batch.mlm_mask.clone()
+            return
+
         coord_mask = torch.zeros(num_nodes, dtype=torch.bool, device=batch.pos.device)
         if hasattr(batch, 'batch') and batch.batch is not None:
             for g in batch.batch.unique().tolist():
                 node_mask = (batch.batch == g)
                 indices = torch.where(node_mask)[0]
-                n = indices.size(0)
-                k = max(1, int(n * mask_ratio))
-                perm = torch.randperm(n, device=batch.pos.device)[:k]
-                coord_mask[indices[perm]] = True
+                if indices.size(0) > 0:
+                    selected = self._select_graph_mask_indices(batch, int(g), indices, for_coord=True)
+                    coord_mask[selected] = True
         else:
-            k = max(1, int(num_nodes * mask_ratio))
-            coord_mask[torch.randperm(num_nodes, device=batch.pos.device)[:k]] = True
+            dtype = get_graph_dataset_type(getattr(batch, 'dataset_type', None), 0)
+            ratio, coconut_method, num_walks = self._graph_masking_params(dtype, for_coord=True)
+            bond_edge_index = getattr(batch, 'bond_edge_index', None)
+            local = select_mask_indices(
+                num_nodes,
+                ratio,
+                method='random_atom',
+                bond_edge_index=bond_edge_index,
+                dataset_type=dtype,
+                coconut_method=coconut_method,
+                num_walks=num_walks,
+                device=batch.pos.device,
+            )
+            coord_mask[local] = True
         batch.coord_mask = coord_mask
 
     # ------------------------------------------------------------------
@@ -481,6 +585,7 @@ class PretrainingESAModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         self._ensure_mlm_attributes(batch)
         self._ensure_coord_denoising_attributes(batch)
+        self._log_coconut_masking_metrics(batch, batch_idx)
 
         if getattr(self.config, 'log_batch_stats', False) and batch_idx % 10 == 0:
             if hasattr(batch, 'dataset_type'):
