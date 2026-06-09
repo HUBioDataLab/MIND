@@ -819,7 +819,7 @@ class ProteinPerAtomMetricsCallback(Callback):
         real_overall = real_correct / real_count if real_count > 0 else 0.0
 
         print("\n📊 PER-AMINO-ACID METRICS — residue-level all-or-nothing (1 iff EVERY masked atom in the residue got the right element):")
-        print("    Accuracy = virtual padding counted too (easy slots → optimistic).  Real Acc = non-virtual atoms only (the real recognition signal).")
+        print("    Accuracy = ALL masked atoms incl. ~10 virtual slots, so imperfect virtual recall makes this STRICTER (often < Real Acc), not easier.  Real Acc = non-virtual atoms only — the AA recognition signal.")
         print(table)
         print(
             f"\n   Overall: {overall:.4f}  ({total_correct} / {total_count})  |  "
