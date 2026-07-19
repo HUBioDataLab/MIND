@@ -6,7 +6,7 @@ PyTorch Lightning callback that mirrors the RNA per-atom metrics callback for
 the protein domain. Differences from the RNA version:
 
 1. Filters to protein batches only (dataset_type in {'pdb', 'protein'}).
-2. Uses the 35-atom protein vocabulary from core.metrics.protein_atom_types.
+2. Uses the protein positional vocabulary from core.metrics.protein_atom_types.
 3. Logs under a distinct W&B namespace (val_protein_atom_metrics/* and
    val_protein_aa_metrics/*) so runs that include both domains don't collide.
 4. Adds a per-amino-acid accuracy metric alongside the per-atom metrics.
@@ -42,8 +42,11 @@ from pytorch_lightning.loggers import WandbLogger
 from core.metrics.per_atom_metrics import PerAtomMetricsCalculator
 from core.metrics.protein_atom_types import (
     ALL_PROTEIN_ATOMS,
+    PROTEIN_BACKBONE_ATOMS,
     PROTEIN_SIDECHAIN_ATOMS,
+    PROTEIN_TERMINAL_ATOMS,
     PROTEIN_ATOM_GROUPS,
+    PROTEIN_UNKNOWN_ATOM,
     ATOMIC_NUM_TO_ELEMENT,
     STANDARD_AMINO_ACIDS,
     pos_code_to_element,
@@ -118,7 +121,12 @@ class ProteinPerAtomMetricsCallback(Callback):
 
         if enabled:
             print("✅ ProteinPerAtomMetricsCallback enabled")
-            print(f"   - Atom types:        {len(ALL_PROTEIN_ATOMS)} (4 backbone + 30 sidechain + 1 virtual)")
+            print(
+                f"   - Atom types:        {len(ALL_PROTEIN_ATOMS)} "
+                f"({len(PROTEIN_BACKBONE_ATOMS)} backbone + "
+                f"{len(PROTEIN_SIDECHAIN_ATOMS)} sidechain + "
+                f"{len(PROTEIN_TERMINAL_ATOMS)} terminal + virtual + unknown)"
+            )
             print(f"   - Group metrics:     {compute_groups}")
             print(f"   - Per-AA binary:     {compute_per_aa}")
             print(f"   - Per-AA block (bb/sc): {compute_per_aa_block}")
@@ -201,7 +209,7 @@ class ProteinPerAtomMetricsCallback(Callback):
             [ALL_PROTEIN_ATOMS.index(pos_code_to_atom_class(c)) for c in flattened_pos_codes]
         )
         pred_elements = np.array(
-            [ATOMIC_NUM_TO_ELEMENT.get(int(n), 'V') for n in preds_atomic_num]
+            [ATOMIC_NUM_TO_ELEMENT.get(int(n), PROTEIN_UNKNOWN_ATOM) for n in preds_atomic_num]
         )
         true_elements = np.array(
             [pos_code_to_element(c) for c in flattened_pos_codes]
@@ -210,15 +218,14 @@ class ProteinPerAtomMetricsCallback(Callback):
 
         # 4. Element-aware y_pred: set to y_true when element matches, else to
         #    an out-of-vocab idx so one-vs-rest precision stays clean.
-        out_of_vocab = len(ALL_PROTEIN_ATOMS)  # 35 — outside idx range [0, 34]
+        out_of_vocab = len(ALL_PROTEIN_ATOMS)
         y_pred_indices = np.where(is_correct_element, y_true_indices, out_of_vocab)
 
         # 5. Apply MLM mask if present; only masked atoms are MLM-supervised.
         #    Also restrict to protein-graph atoms — in mixed-modality batches
         #    (PDB + RNA) the non-protein atoms would otherwise leak into the
-        #    per-atom classification table. RNA pos_codes ('P', "C5'", ...) are
-        #    not in ALL_PROTEIN_ATOMS so they collapse to the 'V' class and
-        #    inflate the Virtual row otherwise.
+        #    per-atom classification table. RNA pos_codes ('P', "C5'", ...)
+        #    belong to neither the protein vocabulary nor its Unknown row.
         mlm_mask_np: Optional[np.ndarray] = None
         if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
             mlm_mask_np = batch.mlm_mask.cpu().numpy().astype(bool)
@@ -446,10 +453,8 @@ class ProteinPerAtomMetricsCallback(Callback):
             elif is_sidechain_slot(code):
                 is_sc_slot[i] = True
                 # Real sidechain = atom whose class is an actual sidechain vocab
-                # entry. Non-vocab atoms (terminal OXT, ARG NH1/NH2, ...) collapse
-                # to the V class in the per-atom table, so exclude them here too —
-                # otherwise e.g. a terminal GLY's OXT shows up as a "real
-                # sidechain" atom even though GLY has no sidechain.
+                # entry. OXT and unknown positions are excluded, so a terminal
+                # GLY does not acquire a fake real sidechain atom.
                 if pos_code_to_atom_class(code) in PROTEIN_SIDECHAIN_ATOMS:
                     is_sc_real[i] = True
 

@@ -34,7 +34,7 @@ class PerAtomMetricsCalculator:
     Calculates per-atom classification metrics for RNA atoms.
     
     Supports:
-    - Per-atom metrics (Acc, P, R, F1) for each of 11+12 atom types
+    - Per-position metrics (Acc, P, R, F1) for the configured vocabulary
     - Group metrics for Backbone and SideChain
     - Accumulated metrics across batches
     - WandB-compatible logging

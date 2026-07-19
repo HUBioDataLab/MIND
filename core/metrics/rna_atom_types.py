@@ -2,65 +2,62 @@
 """
 RNA Atom Type Definitions and Groupings
 
-Defines the 11+12 atom types in RNA molecules and groups them into:
+Defines positional atom types in RNA molecules and groups them into:
 - Backbone: Phosphate and sugar atoms (12 types)
-- SideChain: Nitrogenous base atoms (11 types)
+- SideChain: Nitrogenous-base position labels (18 recognized labels)
 
 This module provides vocabulary for per-atom metrics calculation.
 """
 
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List
+
+from data_loading.atom_position_vocab import (
+    RNA_BACKBONE_ATOMS as SHARED_RNA_BACKBONE_ATOMS,
+    RNA_BASE_ATOMS_BY_NUCLEOTIDE,
+    RNA_BASE_ATOM_PRIORITY,
+    RNA_TERMINAL_ATOMS as SHARED_RNA_TERMINAL_ATOMS,
+    is_virtual_position_code,
+    normalize_rna_position_code,
+)
 
 # =============================================================================
 # RNA BACKBONE ATOMS (12 types)
 # =============================================================================
 # These are the standard atoms in the RNA phosphate-sugar backbone
-RNA_BACKBONE_ATOMS: List[str] = [
-    'P',      # Phosphorus
-    'OP1',    # Oxygen phosphate 1
-    'OP2',    # Oxygen phosphate 2
-    "O5'",    # 5' oxygen (bridging)
-    "C5'",    # 5' carbon (sugar)
-    "C4'",    # 4' carbon (sugar)
-    "O4'",    # 4' oxygen (sugar ring)
-    "C3'",    # 3' carbon (sugar)
-    "O3'",    # 3' oxygen (bridging)
-    "C2'",    # 2' carbon (sugar)
-    "O2'",    # 2' hydroxyl (RNA-specific)
-    "C1'",    # 1' carbon (anomeric - connects to base)
-]
+RNA_BACKBONE_ATOMS: List[str] = list(SHARED_RNA_BACKBONE_ATOMS)
 
 # =============================================================================
-# RNA SIDECHAIN ATOMS (11 types - base atoms)
+# RNA SIDECHAIN POSITION LABELS
 # =============================================================================
-# These are atoms in the nitrogenous bases (A, G, C, U)
-RNA_SIDECHAIN_ATOMS: List[str] = [
-    'N9',     # Purine attachment (A, G)
-    'C8',     # Purine ring
-    'N7',     # Purine ring
-    'C6',     # Ring carbon
-    'C5',     # Ring carbon
-    'C4',     # Ring carbon
-    'N3',     # Ring nitrogen
-    'C2',     # Ring carbon
-    'N1',     # Ring nitrogen / Pyrimidine attachment (C, U)
-    'N2',     # Amino group (G, modified C, A)
-    'O6',     # Carbonyl (G) / alternate
-]
+# A block has at most 11 base slots, while A/G/C/U collectively use 15
+# distinct labels. Modified-base labels recognized by the adapter are included
+# too so they cannot silently enter the virtual row.
+RNA_SIDECHAIN_ATOMS: List[str] = list(RNA_BASE_ATOM_PRIORITY)
+RNA_TERMINAL_ATOMS: List[str] = list(SHARED_RNA_TERMINAL_ATOMS)
 
 # Alternative: Explicitly list by base for reference
-RNA_PURINE_ATOMS = ['N9', 'C8', 'N7', 'C6', 'C5', 'C4', 'N3', 'C2', 'N1', 'N6', 'O6']
-RNA_PYRIMIDINE_ATOMS = ['N1', 'C2', 'N3', 'C4', 'C5', 'C6', 'N4', 'O2', 'O4', 'N2', 'O6']
+RNA_PURINE_ATOMS = list(dict.fromkeys(
+    RNA_BASE_ATOMS_BY_NUCLEOTIDE['A'] + RNA_BASE_ATOMS_BY_NUCLEOTIDE['G']
+))
+RNA_PYRIMIDINE_ATOMS = list(dict.fromkeys(
+    RNA_BASE_ATOMS_BY_NUCLEOTIDE['C'] + RNA_BASE_ATOMS_BY_NUCLEOTIDE['U']
+))
 
 # =============================================================================
 # VIRTUAL ATOM (used in 23-atom uniform representation)
 # =============================================================================
 RNA_VIRTUAL_ATOM = 'V'
+RNA_UNKNOWN_ATOM = 'UNK'
 
 # =============================================================================
 # ALL RNA ATOMS
 # =============================================================================
-ALL_RNA_ATOMS: List[str] = RNA_BACKBONE_ATOMS + RNA_SIDECHAIN_ATOMS + [RNA_VIRTUAL_ATOM]
+ALL_RNA_ATOMS: List[str] = (
+    RNA_BACKBONE_ATOMS
+    + RNA_SIDECHAIN_ATOMS
+    + RNA_TERMINAL_ATOMS
+    + [RNA_VIRTUAL_ATOM, RNA_UNKNOWN_ATOM]
+)
 
 # =============================================================================
 # GROUP DEFINITIONS (for granular analysis)
@@ -69,7 +66,9 @@ RNA_ATOM_GROUPS: Dict[str, Dict[str, List[str]]] = {
     'backbone_vs_sidechain': {
         'Backbone': RNA_BACKBONE_ATOMS,
         'SideChain': RNA_SIDECHAIN_ATOMS,
+        'Terminal': RNA_TERMINAL_ATOMS,
         'Virtual': [RNA_VIRTUAL_ATOM],
+        'Unknown': [RNA_UNKNOWN_ATOM],
     },
     'backbone_by_function': {
         'Phosphate': ['P', 'OP1', 'OP2'],
@@ -118,6 +117,9 @@ RNA_ATOM_TO_GET_CODE: Dict[str, str] = {
     'O4': 'D',
     'O2': 'D',
     'N4': 'P',
+    'N5': 'P',
+    'N8': 'P',
+    'C7': 'H',
     
     # Virtual atom
     'V': 'm',       # Virtual -> mask
@@ -144,18 +146,43 @@ def get_inverse_atom_type_vocabulary() -> Dict[int, str]:
 
 def is_backbone_atom(atom_name: str) -> bool:
     """Check if atom is part of backbone."""
-    return atom_name in RNA_BACKBONE_ATOMS
+    return normalize_rna_position_code(atom_name) in RNA_BACKBONE_ATOMS
 
 def is_sidechain_atom(atom_name: str) -> bool:
     """Check if atom is part of sidechain."""
-    return atom_name in RNA_SIDECHAIN_ATOMS
+    return normalize_rna_position_code(atom_name) in RNA_SIDECHAIN_ATOMS
+
+def is_terminal_atom(atom_name: str) -> bool:
+    """Check if atom is an optional terminal phosphate position."""
+    return normalize_rna_position_code(atom_name) in RNA_TERMINAL_ATOMS
 
 def is_virtual_atom(atom_name: str) -> bool:
     """Check if atom is virtual."""
-    return atom_name == RNA_VIRTUAL_ATOM
+    return is_virtual_position_code(atom_name)
+
+def pos_code_to_element(pos_code: str) -> str:
+    """Map an RNA position label to its chemical element or metric sentinel."""
+    code = normalize_rna_position_code(pos_code)
+    if not code:
+        return RNA_UNKNOWN_ATOM
+    if is_virtual_position_code(code):
+        return RNA_VIRTUAL_ATOM
+    return code[0]
+
+def pos_code_to_atom_class(pos_code: str) -> str:
+    """Map only real virtual padding to V; unexpected real labels become UNK."""
+    code = normalize_rna_position_code(pos_code)
+    if not code:
+        return RNA_UNKNOWN_ATOM
+    if is_virtual_position_code(code):
+        return RNA_VIRTUAL_ATOM
+    if code in ALL_RNA_ATOMS:
+        return code
+    return RNA_UNKNOWN_ATOM
 
 def get_atom_group(atom_name: str, group_type: str = 'backbone_vs_sidechain') -> str:
     """Get the group name for an atom."""
+    atom_name = pos_code_to_atom_class(atom_name)
     groups = RNA_ATOM_GROUPS.get(group_type, {})
     for group_name, atom_list in groups.items():
         if atom_name in atom_list:
@@ -164,7 +191,7 @@ def get_atom_group(atom_name: str, group_type: str = 'backbone_vs_sidechain') ->
 
 def get_get_code(atom_name: str) -> str:
     """Get GET position code for an RNA atom."""
-    return RNA_ATOM_TO_GET_CODE.get(atom_name, "'")
+    return RNA_ATOM_TO_GET_CODE.get(normalize_rna_position_code(atom_name), "'")
 
 # =============================================================================
 # SUMMARY AND PRINTING
@@ -179,7 +206,9 @@ def print_rna_atom_info():
     print(f"\n📍 Total Atom Types: {len(ALL_RNA_ATOMS)}")
     print(f"   - Backbone: {len(RNA_BACKBONE_ATOMS)}")
     print(f"   - SideChain: {len(RNA_SIDECHAIN_ATOMS)}")
+    print(f"   - Terminal: {len(RNA_TERMINAL_ATOMS)}")
     print(f"   - Virtual: 1")
+    print(f"   - Unknown: 1")
     
     print(f"\n🔗 BACKBONE ATOMS ({len(RNA_BACKBONE_ATOMS)}):")
     for i, atom in enumerate(RNA_BACKBONE_ATOMS, 1):
@@ -218,13 +247,13 @@ def map_atomic_num_to_rna_idx(atomic_num: int) -> int:
     Modelin bastığı atom numarasını (örn: 15), 
     ALL_RNA_ATOMS listesindeki en mantıklı indekse (örn: 0) çevirir.
     """
-    element = ATOMIC_NUM_TO_ELEMENT.get(atomic_num, 'V')
+    element = ATOMIC_NUM_TO_ELEMENT.get(atomic_num, RNA_UNKNOWN_ATOM)
     
     # Element ismine göre ALL_RNA_ATOMS içindeki İLK eşleşen indeksi döndür
     for i, atom_name in enumerate(ALL_RNA_ATOMS):
         if atom_name.startswith(element):
             return i
-    return ALL_RNA_ATOMS.index('V')
+    return ALL_RNA_ATOMS.index(RNA_UNKNOWN_ATOM)
 
 
 # Run if executed directly

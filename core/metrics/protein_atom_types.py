@@ -2,7 +2,7 @@
 """
 Protein Atom Type Definitions and Groupings
 
-Defines the 4+30+1 = 35 atom types used in the MIND 14-atom uniform representation
+Defines positional atom types used in the MIND 14-atom uniform representation
 for proteins, along with groupings and helper functions for per-atom metric
 computation.
 
@@ -19,49 +19,43 @@ PerAtomMetricsCalculator and the per-atom metric callback can be reused.
 
 from typing import Dict, List
 
+from data_loading.atom_position_vocab import (
+    PROTEIN_BACKBONE_ATOMS as SHARED_PROTEIN_BACKBONE_ATOMS,
+    PROTEIN_SIDECHAIN_ATOM_PRIORITY,
+    PROTEIN_TERMINAL_ATOMS as SHARED_PROTEIN_TERMINAL_ATOMS,
+    is_virtual_position_code,
+)
+
 
 # =============================================================================
 # PROTEIN BACKBONE ATOMS (4 types) — always present in every residue
 # =============================================================================
-PROTEIN_BACKBONE_ATOMS: List[str] = ['N', 'CA', 'C', 'O']
+PROTEIN_BACKBONE_ATOMS: List[str] = list(SHARED_PROTEIN_BACKBONE_ATOMS)
 
 
 # =============================================================================
-# PROTEIN SIDECHAIN ATOMS (30 types)
+# PROTEIN SIDECHAIN ATOMS (32 types)
 # =============================================================================
-# Priority-ordered list from data_loading/adapters/protein_adapter.py:33-39.
-# Kept in the same order so that atom_idx_in_block in the standardized 14-atom
-# representation maps deterministically to a position in this list.
-PROTEIN_SIDECHAIN_ATOMS: List[str] = [
-    'CB',
-    'CG', 'CG1', 'CG2',
-    'CD', 'CD1', 'CD2',
-    'CE', 'CE1', 'CE2', 'CE3',
-    'CZ', 'CZ2', 'CZ3',
-    'CH2',
-    'ND1', 'ND2',
-    'NE', 'NE1', 'NE2',
-    'NZ',
-    'OD1', 'OD2',
-    'OE1', 'OE2',
-    'OG', 'OG1',
-    'OH',
-    'SG', 'SD',
-]
+PROTEIN_SIDECHAIN_ATOMS: List[str] = list(PROTEIN_SIDECHAIN_ATOM_PRIORITY)
+PROTEIN_TERMINAL_ATOMS: List[str] = list(SHARED_PROTEIN_TERMINAL_ATOMS)
 
 
 # =============================================================================
 # VIRTUAL ATOM — single class collapsing V1..V10
 # =============================================================================
 PROTEIN_VIRTUAL_ATOM = 'V'
+PROTEIN_UNKNOWN_ATOM = 'UNK'
 
 
 # =============================================================================
 # ALL PROTEIN ATOMS (vocabulary for metric computation)
 # =============================================================================
 ALL_PROTEIN_ATOMS: List[str] = (
-    PROTEIN_BACKBONE_ATOMS + PROTEIN_SIDECHAIN_ATOMS + [PROTEIN_VIRTUAL_ATOM]
-)  # 4 + 30 + 1 = 35
+    PROTEIN_BACKBONE_ATOMS
+    + PROTEIN_SIDECHAIN_ATOMS
+    + PROTEIN_TERMINAL_ATOMS
+    + [PROTEIN_VIRTUAL_ATOM, PROTEIN_UNKNOWN_ATOM]
+)
 
 
 # =============================================================================
@@ -92,7 +86,9 @@ PROTEIN_ATOM_GROUPS: Dict[str, Dict[str, List[str]]] = {
     'backbone_vs_sidechain': {
         'Backbone': PROTEIN_BACKBONE_ATOMS,
         'SideChain': PROTEIN_SIDECHAIN_ATOMS,
+        'Terminal': PROTEIN_TERMINAL_ATOMS,
         'Virtual': [PROTEIN_VIRTUAL_ATOM],
+        'Unknown': [PROTEIN_UNKNOWN_ATOM],
     },
     'sidechain_by_shell': {
         # Grouped by distance from CA (Greek letters): β, γ, δ, ε, ζ, η
@@ -101,16 +97,17 @@ PROTEIN_ATOM_GROUPS: Dict[str, Dict[str, List[str]]] = {
         'Delta': ['CD', 'CD1', 'CD2', 'ND1', 'ND2', 'OD1', 'OD2', 'SD'],
         'Epsilon': ['CE', 'CE1', 'CE2', 'CE3', 'NE', 'NE1', 'NE2', 'OE1', 'OE2'],
         'Zeta': ['CZ', 'CZ2', 'CZ3', 'NZ'],
-        'Eta': ['CH2', 'OH'],
+        'Eta': ['CH2', 'OH', 'NH1', 'NH2'],
     },
     'by_element': {
         # Useful when comparing "how well does the model predict each element class"
         'Carbon': ['CA', 'C', 'CB', 'CG', 'CG1', 'CG2', 'CD', 'CD1', 'CD2',
                    'CE', 'CE1', 'CE2', 'CE3', 'CZ', 'CZ2', 'CZ3', 'CH2'],
-        'Nitrogen': ['N', 'ND1', 'ND2', 'NE', 'NE1', 'NE2', 'NZ'],
-        'Oxygen': ['O', 'OD1', 'OD2', 'OE1', 'OE2', 'OG', 'OG1', 'OH'],
+        'Nitrogen': ['N', 'ND1', 'ND2', 'NE', 'NE1', 'NE2', 'NZ', 'NH1', 'NH2'],
+        'Oxygen': ['O', 'OXT', 'OD1', 'OD2', 'OE1', 'OE2', 'OG', 'OG1', 'OH'],
         'Sulfur': ['SG', 'SD'],
         'Virtual': [PROTEIN_VIRTUAL_ATOM],
+        'Unknown': [PROTEIN_UNKNOWN_ATOM],
     },
 }
 
@@ -134,13 +131,13 @@ def pos_code_to_element(pos_code: str) -> str:
     """
     Protein pos_code → element symbol.
 
-    First character of the pos_code is the element for all 30+4 standard
+    First character of the pos_code is the element for all standard
     atoms (N, CA, C, O, CB, CG*, CD*, CE*, CZ*, CH2, ND*, NE*, NZ, OD*,
     OE*, OG*, OH, SG, SD). Virtual atoms ('V', 'V1'..'V10') collapse to 'V'.
     """
     if not pos_code:
-        return 'V'
-    if pos_code == 'V' or pos_code.startswith('V'):
+        return PROTEIN_UNKNOWN_ATOM
+    if is_virtual_position_code(pos_code):
         return 'V'
     return pos_code[0]
 
@@ -151,16 +148,17 @@ def pos_code_to_atom_class(pos_code: str) -> str:
 
     Real atoms return their own pos_code (e.g., 'CA' → 'CA', 'OD1' → 'OD1').
     Virtual atoms ('V1', 'V2', ..., 'V10') collapse to the single 'V' class so
-    the metric vocabulary stays at 35 entries regardless of slot index.
-    Unknown pos_codes fall back to 'V' (treated as virtual/unknown).
+    the metric vocabulary does not grow with slot index.
+    Unknown real pos_codes use a dedicated UNK metric class. Only actual V/V*
+    padding is counted as virtual.
     """
     if not pos_code:
-        return PROTEIN_VIRTUAL_ATOM
-    if pos_code == PROTEIN_VIRTUAL_ATOM or pos_code.startswith('V'):
+        return PROTEIN_UNKNOWN_ATOM
+    if is_virtual_position_code(pos_code):
         return PROTEIN_VIRTUAL_ATOM
     if pos_code in ALL_PROTEIN_ATOMS:
         return pos_code
-    return PROTEIN_VIRTUAL_ATOM
+    return PROTEIN_UNKNOWN_ATOM
 
 
 def is_backbone_atom(pos_code: str) -> bool:
@@ -172,7 +170,7 @@ def is_sidechain_atom(pos_code: str) -> bool:
 
 
 def is_virtual_atom(pos_code: str) -> bool:
-    return pos_code == PROTEIN_VIRTUAL_ATOM or pos_code.startswith('V')
+    return is_virtual_position_code(pos_code)
 
 
 def is_sidechain_slot(pos_code: str) -> bool:
@@ -210,7 +208,9 @@ def print_protein_atom_info() -> None:
     print(f"\nTotal atom types: {len(ALL_PROTEIN_ATOMS)}")
     print(f"  - Backbone:  {len(PROTEIN_BACKBONE_ATOMS)}")
     print(f"  - Sidechain: {len(PROTEIN_SIDECHAIN_ATOMS)}")
+    print(f"  - Terminal:  {len(PROTEIN_TERMINAL_ATOMS)}")
     print(f"  - Virtual:   1 (collapses V1..V10)")
+    print(f"  - Unknown:   1 (unexpected real position names)")
 
     print(f"\nBACKBONE ATOMS ({len(PROTEIN_BACKBONE_ATOMS)}):")
     for i, atom in enumerate(PROTEIN_BACKBONE_ATOMS):
@@ -220,7 +220,8 @@ def print_protein_atom_info() -> None:
     for i, atom in enumerate(PROTEIN_SIDECHAIN_ATOMS, start=len(PROTEIN_BACKBONE_ATOMS)):
         print(f"  [{i:2d}] {atom:5s} → element {pos_code_to_element(atom)}")
 
-    print(f"\nVIRTUAL: [34] V (collapses V1..V10)")
+    print(f"\nVIRTUAL: [{ALL_PROTEIN_ATOMS.index(PROTEIN_VIRTUAL_ATOM)}] V (collapses V1..V10)")
+    print(f"UNKNOWN: [{ALL_PROTEIN_ATOMS.index(PROTEIN_UNKNOWN_ATOM)}] UNK")
 
     print(f"\nGroupings defined:")
     for gname, subs in PROTEIN_ATOM_GROUPS.items():

@@ -18,25 +18,28 @@ from typing import List, Optional, Tuple
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from data_loading.adapters.base_adapter import BaseAdapter
+from data_loading.atom_position_vocab import (
+    PROTEIN_BACKBONE_ATOMS,
+    PROTEIN_SIDECHAIN_ATOM_PRIORITY,
+    PROTEIN_TERMINAL_ATOMS,
+)
 from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 
 # BioPython for reading PDB and CIF files
 from Bio.PDB import PDBParser, MMCIFParser, is_aa
 
 # Constants for 14-atom uniform representation
-BACKBONE_ATOMS = ['N', 'CA', 'C', 'O']  # 4 backbone atoms (standard for all amino acids)
+BACKBONE_ATOMS = list(PROTEIN_BACKBONE_ATOMS)
 MAX_SIDECHAIN_ATOMS = 10  # Tryptophan has 10 non-backbone heavy atoms
 TOTAL_ATOMS_PER_RESIDUE = 14  # 4 backbone + 10 sidechain
 
-# Canonical ordering for sidechain atoms (priority-based)
-# This ensures consistent ordering across different PDB files
-SIDECHAIN_ATOM_PRIORITY = [
-    'CB', 'CG', 'CG1', 'CG2', 'CD', 'CD1', 'CD2', 
-    'CE', 'CE1', 'CE2', 'CE3', 'CZ', 'CZ2', 'CZ3', 'CH2',
-    'ND1', 'ND2', 'NE', 'NE1', 'NE2', 'NZ', 
-    'OD1', 'OD2', 'OE1', 'OE2', 'OG', 'OG1', 'OH',
-    'SG', 'SD'
-]
+# Public aliases retained for existing imports. The shared source is validated
+# against all 20 canonical residue definitions at import time.
+SIDECHAIN_ATOM_PRIORITY = list(PROTEIN_SIDECHAIN_ATOM_PRIORITY)
+SIDECHAIN_ATOM_PRIORITY_INDEX = {
+    atom_name: index for index, atom_name in enumerate(SIDECHAIN_ATOM_PRIORITY)
+}
+TERMINAL_ATOMS = set(PROTEIN_TERMINAL_ATOMS)
 
 # Virtual atom type (single generic type for all virtual atoms)
 # This prevents sequence leakage: model cannot infer residue type from virtual atom type
@@ -116,11 +119,9 @@ class ProteinAdapter(BaseAdapter):
         """
         def get_priority(atom: UniversalAtom) -> int:
             """Get priority index for atom (lower = higher priority)"""
-            try:
-                return SIDECHAIN_ATOM_PRIORITY.index(atom.pos_code)
-            except ValueError:
-                # Atom not in priority list, put at end
-                return len(SIDECHAIN_ATOM_PRIORITY)
+            return SIDECHAIN_ATOM_PRIORITY_INDEX.get(
+                atom.pos_code, len(SIDECHAIN_ATOM_PRIORITY)
+            )
         
         return sorted(atoms, key=get_priority)
     
@@ -174,6 +175,10 @@ class ProteinAdapter(BaseAdapter):
         for atom in atoms:
             if atom.pos_code in BACKBONE_ATOMS:
                 backbone_atoms.append(atom)
+            elif atom.pos_code in TERMINAL_ATOMS:
+                # OXT is an optional terminal backbone oxygen, not a sidechain
+                # atom and not part of the fixed 14-slot representation.
+                continue
             else:
                 sidechain_atoms.append(atom)
         
@@ -390,7 +395,7 @@ class ProteinAdapter(BaseAdapter):
                         uni_atom = UniversalAtom(
                             element=element,
                             position=tuple(atom.get_coord().tolist()),
-                            pos_code=atom.get_name(),
+                            pos_code=atom.get_name().strip(),
                             block_idx=len(blocks),
                             atom_idx_in_block=len(block_atoms),
                             entity_idx=entity_idx
