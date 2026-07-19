@@ -50,7 +50,7 @@ torch.backends.cudnn.allow_tf32 = True
 def create_pretraining_data_transforms(config: PretrainingConfig):
     """Create data transforms for pretraining"""
     transforms = []
-    
+
     # Add dynamic random edges transform if enabled
     # This generates different random edges each epoch to prevent bias
     use_dynamic_random_edges = getattr(config, 'use_dynamic_random_edges', False)
@@ -58,20 +58,20 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
         num_random_edges = getattr(config, 'num_random_edges', 8)
         random_edge_min_distance = getattr(config, 'random_edge_min_distance', 10.0)
         replace_existing = getattr(config, 'replace_existing_random_edges', False)
-        
+
         print(f"⚡ Dynamic Random Edges enabled:")
         print(f"   - Edges per CA atom: {num_random_edges}")
         print(f"   - Min distance: {random_edge_min_distance}Å")
         print(f"   - Replace existing: {replace_existing}")
         print(f"   - Different edges each epoch (prevents bias)")
-        
+
         transforms.append(OptimizedProteinDynamicRandomEdges(
             num_random_edges=num_random_edges,
             min_distance=random_edge_min_distance,
             replace_existing_random_edges=replace_existing,
             seed=None  # None = different edges each epoch
         ))
-    
+
     # Add MLM transform if MLM is in pretraining tasks. When protein block-MLM
     # is enabled we skip the per-sample atom-level transform and let
     # `_ensure_mlm_attributes` build the mask at batch time (residue-level for
@@ -88,51 +88,51 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
         noise_std = getattr(config, 'coordinate_denoising_noise_std', 0.1)
         mask_ratio = getattr(config, 'coordinate_denoising_mask_ratio', 0.15)
         transforms.append(AddRandomNoise(noise_std=noise_std, mask_ratio=mask_ratio))
-    
+
     return Compose(transforms) if len(transforms) > 0 else None
 
 
 def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset_dir: str):
     """
     Load universal dataset with optimized caching.
-    
+
     Automatically detects chunked datasets and uses LazyUniversalDataset
     for memory-efficient loading.
-    
+
     Supports multi-domain training when config.multi_domain.enabled = True
     """
     # Create transform
     transforms = create_pretraining_data_transforms(config)
-    
+
     # Check if multi-domain mode is enabled
     multi_domain_config = getattr(config, 'multi_domain', None)
     is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
-    
+
     if is_multi_domain:
         print("=" * 60)
         print("🌐 MULTI-DOMAIN MODE ENABLED")
         print("=" * 60)
-        
+
         from data_loading.lazy_universal_dataset import LazyUniversalDataset
-        
+
         # Collect chunks from all enabled dataset types
         all_chunk_files = []
         enabled_types = []
-        
+
         for dtype, dtype_config in multi_domain_config['datasets'].items():
             if not dtype_config.get('enabled', False):
                 continue
-            
+
             chunk_dir = dtype_config.get('chunk_dir', '')
             if not chunk_dir:
                 print(f"⚠️  {dtype.upper()}: chunk_dir not specified")
                 continue
-            
+
             # Detect chunk directories for this dataset type
             dataset_dir_path = Path(chunk_dir)
             parent_dir = dataset_dir_path.parent
             base_name = dataset_dir_path.name
-            
+
             # Check if base directory exists, or if chunk directories exist
             if not dataset_dir_path.exists():
                 # Base directory doesn't exist, but chunk directories might
@@ -143,12 +143,12 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             else:
                 # Base directory exists, look for chunks
                 chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
-            
+
             if not chunk_dirs:
                 # Try loading from the directory itself (non-chunked)
                 processed_dir = dataset_dir_path / "processed"
                 if processed_dir.exists():
-                    pt_files = [f for f in processed_dir.glob("*.pt") 
+                    pt_files = [f for f in processed_dir.glob("*.pt")
                                if 'pre_filter' not in f.name and 'pre_transform' not in f.name]
                     if pt_files:
                         all_chunk_files.append(str(pt_files[0]))
@@ -157,7 +157,7 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                 else:
                     print(f"⚠️  {dtype.upper()}: No chunks or processed files found in {chunk_dir}")
                 continue
-            
+
             # Apply chunk_range filter if specified (inclusive [start, end]; null = use all)
             chunk_range = dtype_config.get('chunk_range')
             num_chunks_total = len(chunk_dirs)
@@ -168,42 +168,42 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                     print(f"⚠️  {dtype.upper()}: chunk_range [{start}, {end}] yielded no chunks (have {num_chunks_total} total)")
                     continue
                 print(f"   📌 {dtype.upper()}: using chunks {start}..{end} ({len(chunk_dirs)} of {num_chunks_total})")
-            
+
             # Collect .pt files from chunks
             # Only collect the path of the .pt file
             dtype_chunks = []
             for chunk_dir in chunk_dirs:
                 processed_dir = chunk_dir / "processed"
                 if processed_dir.exists():
-                    pt_files = [f for f in processed_dir.glob("*.pt") 
+                    pt_files = [f for f in processed_dir.glob("*.pt")
                                if 'pre_filter' not in f.name and 'pre_transform' not in f.name]
                     if pt_files:
                         dtype_chunks.append(str(pt_files[0]))
-            
+
             if dtype_chunks:
                 all_chunk_files.extend(dtype_chunks)
                 enabled_types.append(dtype)
                 print(f"   ✓ {dtype.upper()}: {len(dtype_chunks)} chunks loaded")
-        
+
         if not all_chunk_files:
             raise FileNotFoundError("No chunk files found for any enabled dataset type!")
-        
+
         if len(enabled_types) == 1:
             print(f"\n⚠️  WARNING: Only one dataset type ({enabled_types[0]}) is available.")
             print(f"   Multi-domain sampling will fall back to single-domain mode.")
-        
+
         # Create LazyUniversalDataset with metadata loading
         # Load metadata if multi-domain OR if improved sampler is enabled (requires metadata)
         use_improved_sampler = getattr(config, 'use_improved_sampler', True)
         load_metadata = len(enabled_types) > 1 or use_improved_sampler
-        
+
         # Add metadata search paths (for cases where we can't write to original chunk directories)
         metadata_search_paths = []
         base_metadata_dir = Path(__file__).parent.parent / "metadata"
         for sub in base_metadata_dir.iterdir() if base_metadata_dir.exists() else []:
             if sub.is_dir():
                 metadata_search_paths.append(str(sub))
-        
+
         full_dataset = LazyUniversalDataset(
             chunk_pt_files=all_chunk_files,
             transform=transforms,
@@ -212,33 +212,33 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             load_metadata=load_metadata,
             metadata_search_paths=metadata_search_paths if metadata_search_paths else None
         )
-        
+
         print(f"\n✅ Multi-domain dataset loaded:")
         print(f"   Total chunks: {len(all_chunk_files)}")
         print(f"   Total samples: {len(full_dataset):,}")
         print(f"   Dataset types: {', '.join(enabled_types)}")
         print(f"   Metadata loaded: {full_dataset.metadata_loaded}")
         print("=" * 60)
-        
+
         return full_dataset
-    
+
     # SINGLE-DOMAIN MODE (original behavior)
     print(f"🔄 Loading universal representation dataset: {dataset_name}")
-    
+
     # AUTO-DETECT CHUNKED DATASETS
     dataset_dir_path = Path(dataset_dir)
     parent_dir = dataset_dir_path.parent
     base_name = dataset_dir_path.name
-    
+
     # Look for chunk directories: e.g., processed_graphs_40k_chunk_0, processed_graphs_40k_chunk_1, ...
     chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
-    
+
     if chunk_dirs:
         print(f"📦 Detected {len(chunk_dirs)} chunked datasets")
         print(f"📦 Using LazyUniversalDataset for memory-efficient loading...")
-        
+
         from data_loading.lazy_universal_dataset import LazyUniversalDataset
-        
+
         # Collect all .pt files from chunks
         chunk_pt_files = []
         for chunk_dir in chunk_dirs:
@@ -251,14 +251,14 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                 if pt_files:
                     chunk_pt_files.append(str(pt_files[0]))
                     print(f"   ✓ {chunk_dir.name}: {pt_files[0].name}")
-        
+
         if not chunk_pt_files:
             raise FileNotFoundError(f"No processed .pt files found in chunk directories")
-        
+
         # Determine if metadata is needed
         use_improved_sampler = getattr(config, 'use_improved_sampler', True)
         load_metadata = use_improved_sampler  # ImprovedDynamicBatchSampler requires metadata
-        
+
         # Create LazyUniversalDataset
         full_dataset = LazyUniversalDataset(
             chunk_pt_files=chunk_pt_files,
@@ -267,12 +267,12 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             verbose=True,
             load_metadata=load_metadata
         )
-        
+
         print(f"📊 Caching strategy: {len(chunk_pt_files)} chunks will be loaded into RAM")
-        
+
         print(f"✅ LazyDataset loaded: {len(full_dataset):,} total samples")
         return full_dataset
-    
+
     else:
         # SINGLE DATASET (original behavior)
         print(f"📦 Loading single dataset from: {dataset_dir}")
@@ -295,7 +295,7 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         elif dataset_name.upper() == 'QM9':
             max_samples = getattr(config, 'max_samples', 50000)
             print(f"📊 Loading {max_samples:,} samples from universal cache...")
-            
+
             full_dataset = OptimizedUniversalQM9Dataset(
                 root=dataset_dir,
                 universal_cache_path=getattr(config, 'universal_cache_path', None),
@@ -305,12 +305,12 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                 max_neighbors=getattr(config, 'max_neighbors', 32),
                 transform=transforms
             )
-            
+
         elif dataset_name.upper() == 'LBA':
             from data_loading.cache_to_pyg import OptimizedUniversalLBADataset
             max_samples = getattr(config, 'max_samples', 50000)
             print(f"📊 Loading {max_samples:,} samples from universal cache...")
-            
+
             full_dataset = OptimizedUniversalLBADataset(
                 root=dataset_dir,
                 universal_cache_path=getattr(config, 'universal_cache_path', None),
@@ -320,12 +320,12 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                 max_neighbors=getattr(config, 'max_neighbors', 32),
                 transform=transforms
             )
-            
+
         elif dataset_name.upper() == 'PDB':
             from data_loading.cache_to_pyg import OptimizedUniversalDataset
             max_samples = getattr(config, 'max_samples', 50000)
             print(f"📊 Loading {max_samples:,} samples from universal cache...")
-            
+
             full_dataset = OptimizedUniversalDataset(
                 root=dataset_dir,
                 universal_cache_path=getattr(config, 'universal_cache_path', None),
@@ -339,12 +339,12 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         elif dataset_name.upper() == 'RNA':
             from data_loading.cache_to_pyg import OptimizedUniversalRNADataset
             max_samples = getattr(config, 'max_samples', None)
-            
+
             if max_samples:
                 print(f"📊 Loading {max_samples:,} RNA samples from universal cache...")
             else:
                 print(f"📊 Loading all RNA samples from universal cache...")
-            
+
             full_dataset = OptimizedUniversalRNADataset(
                 root=dataset_dir,
                 universal_cache_path=getattr(config, 'universal_cache_path', None),
@@ -354,14 +354,14 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
                 max_neighbors=getattr(config, 'max_neighbors', 32),       # RNA-specific
                 transform=transforms
             )
-            
+
         elif dataset_name.upper() == 'COCONUT':
             from data_loading.cache_to_pyg import OptimizedUniversalCOCONUTDataset
-            
+
             # Get max_samples from config
             max_samples = getattr(config, 'max_samples', 50000)  # Default to 50K for training
             print(f"📊 Loading {max_samples} samples from universal cache...")
-            
+
             full_dataset = OptimizedUniversalCOCONUTDataset(
                 root=os.path.join(dataset_dir, 'processed'),
                 universal_cache_path=getattr(config, 'universal_cache_path', None),
@@ -372,7 +372,7 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             )
         else:
             raise ValueError(f"Unsupported dataset: {dataset_name}")
-        
+
         print(f"✅ Single dataset loaded: {len(full_dataset):,} samples")
         return full_dataset
 
@@ -402,23 +402,23 @@ def create_data_loaders(dataset, config: PretrainingConfig):
     # Check if using LazyUniversalDataset (chunked dataset)
     from data_loading.lazy_universal_dataset import LazyUniversalDataset
     is_lazy_dataset = isinstance(dataset, LazyUniversalDataset)
-    
+
     # Check multi-domain configuration
     multi_domain_config = getattr(config, 'multi_domain', None)
     is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
-    
+
     # Check if using atom-based dynamic batching
     use_dynamic_batching = getattr(config, 'use_dynamic_batching', False)
     max_atoms_per_batch = getattr(config, 'max_atoms_per_batch', None)
-    
+
     # UNIFIED APPROACH: Use DynamicChunkAwareBatchSampler for BOTH single and multi-domain
     train_sampler = None  # Initialize to avoid UnboundLocalError
     train_batch_sampler = None  # Initialize to avoid UnboundLocalError
-    
+
     if use_dynamic_batching and max_atoms_per_batch and is_lazy_dataset:
         # Check if using improved sampler (default: True)
         use_improved_sampler = getattr(config, 'use_improved_sampler', True)
-        
+
         if use_improved_sampler:
             print(f"⚡ Using ImprovedDynamicBatchSampler with max {max_atoms_per_batch:,} atoms/batch")
             print(f"   ✅ Metadata-only (no slow disk access)")
@@ -426,14 +426,14 @@ def create_data_loaders(dataset, config: PretrainingConfig):
             print(f"   ✅ Cache-optimized chunk ordering")
         else:
             print(f"⚡ Using DynamicChunkAwareBatchSampler with max {max_atoms_per_batch:,} atoms/batch")
-        
+
             print(f"   This ensures consistent GPU memory usage across varying molecule sizes")
-        
+
         # Enable cross-modal batching for multi-domain
         if is_multi_domain:
             print(f"   🌐 Multi-domain mode: Enabling cross-modal batching")
             print(f"   💡 Batches will mix different dataset types (PDB, QM9, etc.)")
-        
+
         # Select sampler
         if use_improved_sampler:
             train_batch_sampler = ImprovedDynamicBatchSampler(
@@ -442,7 +442,8 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                 shuffle_chunks=True,
                 shuffle_within_chunk=True,
                 seed=config.seed,
-                enable_cross_modal_batches=is_multi_domain
+                enable_cross_modal_batches=is_multi_domain,
+                cycle_short_domains=is_multi_domain
             )
         else:
             train_batch_sampler = DynamicChunkAwareBatchSampler(
@@ -451,9 +452,10 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                 shuffle_chunks=True,
                 shuffle_within_chunk=True,
                 seed=config.seed,
-                enable_cross_modal_batches=is_multi_domain
+                enable_cross_modal_batches=is_multi_domain,
+                cycle_short_domains=is_multi_domain
             )
-        
+
         # Create DataLoader with batch_sampler
         num_workers = getattr(config, 'num_workers', 0)
         train_loader = GeometricDataLoader(
@@ -462,19 +464,19 @@ def create_data_loaders(dataset, config: PretrainingConfig):
             num_workers=num_workers,
             pin_memory=True
         )
-    
+
     elif is_lazy_dataset:
         # Fallback to ChunkAwareSampler for non-dynamic batching
         print(f"🚀 Using ChunkAwareSampler for chunked dataset:")
         print(f"   - Shuffle chunk order: Yes")
         print(f"   - Sequential chunk reading: Yes (optimal disk I/O)")
-        
+
         train_sampler = ChunkAwareSampler(
             train_dataset,
             shuffle_chunks=True,
             shuffle_within_chunk=True
         )
-        
+
         # Create train loader with sampler
         num_workers = getattr(config, 'num_workers', 0)
         train_loader = GeometricDataLoader(
@@ -502,7 +504,7 @@ def create_data_loaders(dataset, config: PretrainingConfig):
         if use_dynamic_batching and max_atoms_per_batch:
             # Use same dynamic batching as train (but no shuffling)
             use_improved_sampler = getattr(config, 'use_improved_sampler', True)
-            
+
             if use_improved_sampler:
                 val_batch_sampler = ImprovedDynamicBatchSampler(
                     val_dataset,
@@ -510,7 +512,8 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                     shuffle_chunks=False,  # No shuffle for validation
                     shuffle_within_chunk=False,  # No shuffle for validation
                     seed=config.seed,
-                    enable_cross_modal_batches=is_multi_domain  # Same as train
+                    enable_cross_modal_batches=is_multi_domain,  # Same as train
+                    cycle_short_domains=False
                 )
             else:
                 val_batch_sampler = DynamicChunkAwareBatchSampler(
@@ -519,9 +522,10 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                     shuffle_chunks=False,
                     shuffle_within_chunk=False,
                     seed=config.seed,
-                    enable_cross_modal_batches=is_multi_domain
+                    enable_cross_modal_batches=is_multi_domain,
+                    cycle_short_domains=False
                 )
-            
+
             num_workers = getattr(config, 'num_workers', 0)
             val_loader = GeometricDataLoader(
                 val_dataset,
@@ -529,7 +533,7 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                 num_workers=num_workers,
                 pin_memory=True
             )
-            
+
             # Test loader (same as val)
             if use_improved_sampler:
                 test_batch_sampler = ImprovedDynamicBatchSampler(
@@ -538,7 +542,8 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                     shuffle_chunks=False,
                     shuffle_within_chunk=False,
                     seed=config.seed,
-                    enable_cross_modal_batches=is_multi_domain
+                    enable_cross_modal_batches=is_multi_domain,
+                    cycle_short_domains=False
                 )
             else:
                 test_batch_sampler = DynamicChunkAwareBatchSampler(
@@ -547,9 +552,10 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                     shuffle_chunks=False,
                     shuffle_within_chunk=False,
                     seed=config.seed,
-                    enable_cross_modal_batches=is_multi_domain
+                    enable_cross_modal_batches=is_multi_domain,
+                    cycle_short_domains=False
                 )
-            
+
             test_loader = GeometricDataLoader(
                 test_dataset,
                 batch_sampler=test_batch_sampler,
@@ -563,7 +569,7 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                 shuffle_chunks=False,  # Keep chunk order for validation
                 shuffle_within_chunk=False  # Keep sample order too
             )
-            
+
             num_workers = getattr(config, 'num_workers', 0)
             val_loader = GeometricDataLoader(
                 val_dataset,
@@ -574,13 +580,13 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                 persistent_workers=True if num_workers > 0 else False,
                 prefetch_factor=2 if num_workers > 0 else None
             )
-            
+
             test_sampler = ChunkAwareSampler(
                 test_dataset,
                 shuffle_chunks=False,
                 shuffle_within_chunk=False
             )
-            
+
             test_loader = GeometricDataLoader(
                 test_dataset,
                 batch_size=config.batch_size,
@@ -611,7 +617,7 @@ def create_data_loaders(dataset, config: PretrainingConfig):
     print(f"   Train batches: {len(train_loader)}")
     print(f"   Val batches: {len(val_loader)}")
     print(f"   Test batches: {len(test_loader)}")
-    
+
     if is_lazy_dataset:
         print(f"   ⚡ ChunkAwareSampler enabled")
         print(f"   ⚡ Cache hit rate: ~99.97% (chunk-aware reading)")
@@ -637,7 +643,7 @@ def create_data_loaders(dataset, config: PretrainingConfig):
     print(f"   Validation samples: {len(val_dataset)}")
     print(f"   Test batches: {len(test_loader)}")
     print(f"   Test samples: {len(test_dataset)}")
-    
+
     return train_loader, val_loader, test_loader
 
 
@@ -650,7 +656,7 @@ def train_universal_pretraining(
     wandb_run_name: str
 ):
     """Train universal pretraining model with ESA optimizations"""
-    
+
     print("🚀 Starting Universal Representation Pretraining")
     print("=" * 60)
     print(f"Dataset: {dataset_name}")
@@ -666,44 +672,44 @@ def train_universal_pretraining(
         else:
             print("ℹ️  Protein Block-MLM disabled — atom-level MLM for all graph types.")
     print("=" * 60)
-    
+
     # Set random seed
     torch.manual_seed(config.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(config.seed)
         torch.cuda.manual_seed_all(config.seed)
-    
+
     # Load dataset
     print("🔄 Loading universal dataset...")
     full_dataset = load_universal_dataset(config, dataset_name, dataset_dir)
-    
+
     # Create data loaders
     train_loader, val_loader, test_loader = create_data_loaders(full_dataset, config)
-    
+
     # Create model
     print("🔄 Creating model...")
     model = PretrainingESAModel(config)
-    
+
     # Custom callback for chunk-aware sampler epoch updates
     class ChunkSamplerEpochCallback(Callback):
         """Update chunk sampler epoch at the start of each training epoch"""
         def on_train_epoch_start(self, trainer, pl_module):
             epoch = trainer.current_epoch
             train_loader = trainer.train_dataloader
-            
+
             # Update epoch for regular sampler (ChunkAwareSampler)
             if hasattr(train_loader, 'sampler_obj'):
                 train_loader.sampler_obj.set_epoch(epoch)
                 if epoch == 0:
                     print(f"🔄 ChunkAwareSampler: Epoch {epoch} started")
-            
+
             # Update epoch for batch sampler (ImprovedDynamicBatchSampler / DynamicChunkAwareBatchSampler)
             if hasattr(train_loader, 'batch_sampler_obj'):
                 if hasattr(train_loader.batch_sampler_obj, 'set_epoch'):
                     train_loader.batch_sampler_obj.set_epoch(epoch)
                     if epoch == 0:
                         print(f"🔄 DynamicBatchSampler: Epoch {epoch} started")
-    
+
     # Create callbacks
     callbacks = [
         ModelCheckpoint(
@@ -724,7 +730,7 @@ def train_universal_pretraining(
         ChunkSamplerEpochCallback(),  # Update chunk sampler each epoch
         LearningRateMonitor(logging_interval='step'),
     ]
-    
+
     # Add batch statistics callback if enabled
     log_batch_stats = getattr(config, 'log_batch_statistics', False)
     batch_stats_frequency = getattr(config, 'batch_stats_log_frequency', 10)
@@ -733,7 +739,7 @@ def train_universal_pretraining(
             log_every_n_batches=batch_stats_frequency,
             enabled=True
         ))
-    
+
     # Add per-atom metrics callback for RNA atom classification tracking
     metrics_callback = PerAtomMetricsCallback(
         enabled=True,
@@ -759,7 +765,7 @@ def train_universal_pretraining(
     )
     callbacks.append(protein_metrics_callback)
     print("✅ Protein per-atom + per-AA (binary & block) metrics callback enabled")
-    
+
     # Create wandb logger
     wandb_logger = WandbLogger(
         project=wandb_project,
@@ -767,7 +773,7 @@ def train_universal_pretraining(
         save_dir=output_dir,
         config=vars(config),
     )
-    
+
     # Validation and logging frequency (from config)
     val_check_interval = getattr(config, 'val_check_interval', 0.25)
     log_every_n_steps = getattr(config, 'log_every_n_steps', 1)
@@ -785,54 +791,54 @@ def train_universal_pretraining(
         log_every_n_steps=log_every_n_steps,
         val_check_interval=val_check_interval,
     )
-    
+
     print("🚀 Starting training...")
     print(f"📊 Training details:")
-    
+
     # Check if dynamic batching is enabled (for proper batch count display)
     use_dynamic_batching = getattr(config, 'use_dynamic_batching', False)
     max_atoms_per_batch = getattr(config, 'max_atoms_per_batch', None)
-    
+
     if use_dynamic_batching and max_atoms_per_batch:
         print(f"   • Total batches per epoch: Variable (dynamic batching)")
         print(f"   • Validation batches: Variable (dynamic batching)")
     else:
         print(f"   • Total batches per epoch: {len(train_loader)}")
         print(f"   • Validation batches: {len(val_loader)}")
-    
+
     vi = trainer.val_check_interval
     val_desc = f"{vi} steps" if isinstance(vi, int) else f"{vi} of epoch ({1/vi:.0f}x per epoch)"
     print(f"   • Log every N steps: {log_every_n_steps}")
     print(f"   • Validation: every {val_desc}")
-    
+
     # CRITICAL FIX: Re-apply batch_sampler before training
     # PyTorch Lightning sometimes replaces the custom batch_sampler
     if use_dynamic_batching and max_atoms_per_batch:
         from data_loading.lazy_universal_dataset import LazyUniversalDataset
         is_lazy = isinstance(full_dataset, LazyUniversalDataset)
-        
+
         if is_lazy:
             print(f"\n🔧 CRITICAL FIX: Re-applying batch_sampler before training...")
             print(f"   Current batch_sampler: {type(train_loader.batch_sampler).__name__}")
             print(f"   Current batch_size: {train_loader.batch_size}")
-            
+
             # Check if using improved sampler
             use_improved_sampler = getattr(config, 'use_improved_sampler', True)
             expected_sampler = ImprovedDynamicBatchSampler if use_improved_sampler else DynamicChunkAwareBatchSampler
-            
+
             # If batch_sampler is wrong, recreate the DataLoader
             if not isinstance(train_loader.batch_sampler, expected_sampler):
                 print(f"   ⚠️  batch_sampler was replaced! Recreating DataLoader...")
-                
+
                 # Get DataLoader parameters
                 train_dataset = train_loader.dataset
                 num_workers = train_loader.num_workers
                 pin_memory = train_loader.pin_memory
-                
+
                 # Check if multi-domain
                 multi_domain_config = getattr(config, 'multi_domain', None)
                 is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
-                
+
                 # Recreate batch sampler
                 if use_improved_sampler:
                     train_batch_sampler = ImprovedDynamicBatchSampler(
@@ -841,7 +847,8 @@ def train_universal_pretraining(
                         shuffle_chunks=True,
                         shuffle_within_chunk=True,
                         seed=config.seed,
-                        enable_cross_modal_batches=is_multi_domain
+                        enable_cross_modal_batches=is_multi_domain,
+                        cycle_short_domains=is_multi_domain
                     )
                 else:
                     train_batch_sampler = DynamicChunkAwareBatchSampler(
@@ -850,9 +857,10 @@ def train_universal_pretraining(
                         shuffle_chunks=True,
                         shuffle_within_chunk=True,
                         seed=config.seed,
-                        enable_cross_modal_batches=is_multi_domain
+                        enable_cross_modal_batches=is_multi_domain,
+                        cycle_short_domains=is_multi_domain
                     )
-                
+
                 # Recreate DataLoader
                 train_loader = GeometricDataLoader(
                     train_dataset,
@@ -861,14 +869,14 @@ def train_universal_pretraining(
                     pin_memory=pin_memory
                 )
                 print(f"   ✅ Recreated DataLoader with DynamicChunkAwareBatchSampler")
-            
+
             print(f"   ✅ Final check: batch_sampler = {type(train_loader.batch_sampler).__name__}, batch_size = {train_loader.batch_size}")
-    
+
     # Train the model
     trainer.fit(model, train_loader, val_loader)
-    
+
     print("✅ Training completed!")
-    
+
     return model, trainer
 
 
@@ -876,42 +884,42 @@ def main():
     """Main function"""
     # Single-threaded optimization (same as official ESA)
     torch.set_num_threads(1)
-    
+
     print("🚀 Starting optimized ESA pretraining script...")
-    
+
     parser = argparse.ArgumentParser(description="Optimized ESA Universal Pretraining")
     parser.add_argument("--config-yaml-path", type=str, required=True, help="Path to YAML config file")
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum number of samples to use")
     parser.add_argument("--max-epochs", type=int, default=None, help="Maximum number of epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
     parser.add_argument("--output-dir", type=str, default="./outputs/universal_pretrain", help="Output directory")
-    
+
     args = parser.parse_args()
     print(f"📋 Parsed arguments: {args}")
-    
+
     # Load config from YAML
     print(f"📂 Loading config from: {args.config_yaml_path}")
     with open(args.config_yaml_path, 'r') as f:
         config_dict = yaml.safe_load(f)
     print(f"✅ Config loaded: {config_dict['dataset']}")
-    
+
     # Override config with command line arguments
     if args.max_samples is not None:
         config_dict['max_samples'] = args.max_samples
         print(f"🔬 Using max_samples: {args.max_samples} (for testing)")
-    
+
     if args.max_epochs is not None:
         config_dict['max_epochs'] = args.max_epochs
-    
+
     if args.batch_size is not None:
         config_dict['batch_size'] = args.batch_size
-    
+
     # Create config object
     config = create_pretraining_config(**config_dict)
-    
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     # Train the model
     model, trainer = train_universal_pretraining(
         config=config,
@@ -921,7 +929,7 @@ def main():
         wandb_project=config.wandb_project_name,
         wandb_run_name=config.wandb_run_name
     )
-    
+
     print("🎉 Training completed successfully!")
 
 

@@ -20,16 +20,16 @@ Usage:
         shuffle_chunks=True,
         shuffle_within_chunk=True
     )
-    
+
     # Multi-domain training with cross-modal batching
     batch_sampler = DynamicChunkAwareBatchSampler(
         dataset,
         max_atoms_per_batch=40000,
         enable_cross_modal_batches=True
     )
-    
+
     loader = DataLoader(dataset, batch_sampler=batch_sampler)
-    
+
     for epoch in range(num_epochs):
         batch_sampler.set_epoch(epoch)
         for batch in loader:
@@ -48,7 +48,7 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
     """
     Batch sampler that creates batches based on total atoms while maintaining
     chunk-aware sequential reading.
-    
+
     Features:
     1. Dynamic batching (variable samples per batch based on atom count)
     2. Atom-based batching (respects max_atoms_per_batch limit)
@@ -56,7 +56,7 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
     4. Cache-optimized batch ordering (minimizes chunk switching)
     5. Proportional sampling (automatic from dataset sizes)
     """
-    
+
     def __init__(
         self,
         dataset,
@@ -65,11 +65,12 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
         shuffle_within_chunk: bool = True,
         subset_indices: List[int] = None,
         seed: int = 42,
-        enable_cross_modal_batches: bool = False
+        enable_cross_modal_batches: bool = False,
+        cycle_short_domains: bool = True
     ):
         """
         Initialize DynamicChunkAwareBatchSampler
-        
+
         Args:
             dataset: LazyUniversalDataset instance (or Subset wrapping one)
             max_atoms_per_batch: Maximum number of atoms per batch
@@ -78,6 +79,7 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
             subset_indices: Optional list of indices (for train/val/test splits)
             seed: Random seed for reproducibility
             enable_cross_modal_batches: If True, mix different dataset types in same batch
+            cycle_short_domains: Reuse shorter domain samples in cross-modal mode
         """
         # Handle Subset from random_split
         from torch.utils.data import Subset
@@ -93,32 +95,33 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
             self.dataset = dataset
             if not isinstance(self.dataset, LazyUniversalDataset):
                 raise ValueError(f"Expected LazyUniversalDataset, got {type(self.dataset)}")
-        
+
         self.max_atoms_per_batch = max_atoms_per_batch
         self.shuffle_chunks = shuffle_chunks
         self.shuffle_within_chunk = shuffle_within_chunk
         self.enable_cross_modal_batches = enable_cross_modal_batches
+        self.cycle_short_domains = cycle_short_domains
         self.epoch = 0
         self.seed = seed
-        
+
         # Validate dataset attributes
         if not hasattr(self.dataset, 'chunk_pt_files'):
             raise ValueError("Dataset must be LazyUniversalDataset with chunk_pt_files")
         if not hasattr(self.dataset, 'file_ranges'):
             raise ValueError("Dataset must have file_ranges attribute")
-        
+
         # Cache for atom counts
         self._atom_count_cache = {}
-        
+
         # Initialize base BatchSampler
         dummy_sampler = Sampler(range(len(self)))
         super().__init__(dummy_sampler, batch_size=1, drop_last=False)
-    
+
     def _get_atom_count(self, idx: int) -> int:
         """Get atom count for a sample (uses metadata if available, otherwise accesses dataset)"""
         if idx in self._atom_count_cache:
             return self._atom_count_cache[idx]
-        
+
         # Try metadata first (fast, no disk access)
         if hasattr(self.dataset, 'get_sample_metadata') and hasattr(self.dataset, 'metadata_loaded') and self.dataset.metadata_loaded:
             try:
@@ -130,31 +133,105 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                     return atom_count
             except:
                 pass
-        
+
         # Fallback: access dataset (slower)
         try:
             sample = self.original_dataset[idx]
             atom_count = sample.num_nodes if hasattr(sample, 'num_nodes') else sample.x.size(0) if hasattr(sample, 'x') else 500
         except:
             atom_count = 500  # Conservative estimate
-        
+
         self._atom_count_cache[idx] = atom_count
         return atom_count
-    
+
     def _get_chunk_for_sample(self, global_idx: int) -> int:
         """Get which chunk a sample belongs to"""
         for chunk_idx, (start_idx, end_idx, _) in enumerate(self.dataset.file_ranges):
             if start_idx <= global_idx < end_idx:
                 return chunk_idx
         return -1
-    
+
+    @staticmethod
+    def _smooth_weighted_type_order(type_weights: dict) -> List[str]:
+        """Create a deterministic smooth weighted order for one interleave round."""
+        ordered_types = sorted(type_weights.keys())
+        current_weights = {dtype: 0 for dtype in ordered_types}
+        total_weight = sum(type_weights.values())
+        type_order = []
+
+        for _ in range(total_weight):
+            for dtype in ordered_types:
+                current_weights[dtype] += type_weights[dtype]
+
+            selected_type = max(ordered_types, key=lambda dtype: current_weights[dtype])
+            current_weights[selected_type] -= total_weight
+            type_order.append(selected_type)
+
+        return type_order
+
+    def _create_single_pass_mixed_stream(self, indices_by_type: dict) -> List[int]:
+        """Interleave all samples once without cycling any domain."""
+        total_samples = sum(len(indices) for indices in indices_by_type.values())
+        type_proportions = {
+            dtype: len(indices) / total_samples
+            for dtype, indices in indices_by_type.items()
+        }
+        type_positions = {dtype: 0 for dtype in indices_by_type}
+        type_credits = type_proportions.copy()
+        mixed_indices = []
+
+        while any(type_positions[dtype] < len(indices_by_type[dtype]) for dtype in indices_by_type):
+            available_types = [
+                dtype for dtype in indices_by_type
+                if type_positions[dtype] < len(indices_by_type[dtype])
+            ]
+            selected_type = max(available_types, key=lambda dtype: type_credits[dtype])
+            mixed_indices.append(indices_by_type[selected_type][type_positions[selected_type]])
+            type_positions[selected_type] += 1
+
+            type_credits[selected_type] -= 1.0
+            for dtype in indices_by_type:
+                type_credits[dtype] += type_proportions[dtype]
+
+        return mixed_indices
+
+    def _create_cycled_mixed_stream(self, indices_by_type: dict) -> List[int]:
+        """Interleave domains and wrap shorter streams when they run out."""
+        total_samples = sum(len(indices) for indices in indices_by_type.values())
+        type_proportions = {
+            dtype: len(indices) / total_samples
+            for dtype, indices in indices_by_type.items()
+        }
+
+        interleave_window = 10
+        samples_per_round = {
+            dtype: max(1, int(type_proportions[dtype] * interleave_window))
+            for dtype in indices_by_type
+        }
+        rounds = max(
+            (len(indices) + samples_per_round[dtype] - 1) // samples_per_round[dtype]
+            for dtype, indices in indices_by_type.items()
+        )
+        type_order = self._smooth_weighted_type_order(samples_per_round)
+        type_positions = {dt: 0 for dt in indices_by_type}
+
+        mixed_indices = []
+        for _ in range(rounds):
+            for dtype in type_order:
+                indices = indices_by_type[dtype]
+                idx_pos = type_positions[dtype] % len(indices)
+                mixed_indices.append(indices[idx_pos])
+                type_positions[dtype] += 1
+
+        return mixed_indices
+
     def _get_chunk_indices(self) -> List[int]:
         """
         Get all sample indices organized by chunk.
         For cross-modal mode, collects all indices and lets proportional sampling handle mixing.
         """
         num_chunks = len(self.dataset.chunk_pt_files)
-        
+
         # Setup subset mapping if needed
         if self.subset_indices is not None:
             subset_set = set(self.subset_indices)
@@ -162,21 +239,21 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
         else:
             subset_set = None
             global_to_subset_pos = None
-        
+
         # CROSS-MODAL MODE: Mix dataset types
         if self.enable_cross_modal_batches:
             # Group chunks by dataset type
             chunks_by_type = {}
             for chunk_idx in range(num_chunks):
                 _, _, pt_file = self.dataset.file_ranges[chunk_idx]
-                
+
                 # Get dataset type from metadata or filename
                 dataset_type = 'unknown'
                 if hasattr(self.dataset, 'chunk_metadata') and chunk_idx < len(self.dataset.chunk_metadata):
                     metadata = self.dataset.chunk_metadata[chunk_idx]
                     if isinstance(metadata, dict) and 'dataset_type' in metadata:
                         dataset_type = metadata['dataset_type']
-                
+
                 # Fallback: infer from filename
                 if dataset_type == 'unknown':
                     filename = pt_file.lower()
@@ -186,13 +263,13 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                         dataset_type = 'qm9'
                     elif 'metabolite' in filename:
                         dataset_type = 'metabolite'
-                
+
                 chunks_by_type.setdefault(dataset_type, []).append(chunk_idx)
-            
+
             # Simplified: Collect all indices from all chunks (no windows needed)
             # Proportional sampling in __iter__() will handle mixing efficiently
             all_indices = []
-            
+
             # Process chunks in order (shuffled if requested)
             all_chunk_indices = []
             for dataset_type in chunks_by_type:
@@ -204,32 +281,32 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                     shuffled = indices_tensor[torch.randperm(len(indices_tensor), generator=g)]
                     chunk_list = shuffled.tolist()
                 all_chunk_indices.extend(chunk_list)
-            
+
             # Shuffle chunk order across types for better mixing
             if self.shuffle_chunks:
                 g = torch.Generator()
                 g.manual_seed(self.seed + self.epoch + 1000)
                 all_chunk_indices = torch.tensor(all_chunk_indices)[torch.randperm(len(all_chunk_indices), generator=g)].tolist()
-            
+
             # Collect all samples from all chunks
             for chunk_idx in all_chunk_indices:
                 start_idx, end_idx, _ = self.dataset.file_ranges[chunk_idx]
                 chunk_indices = list(range(start_idx, end_idx))
-                
+
                 if subset_set is not None:
                     chunk_indices = [idx for idx in chunk_indices if idx in subset_set]
-                
+
                 if self.shuffle_within_chunk and chunk_indices:
                     random.seed(self.seed + self.epoch * 10000 + chunk_idx)
                     random.shuffle(chunk_indices)
-                
+
                 if global_to_subset_pos is not None:
                     chunk_indices = [global_to_subset_pos[idx] for idx in chunk_indices if idx in global_to_subset_pos]
-                
+
                 all_indices.extend(chunk_indices)
-            
+
             return all_indices
-        
+
         # STANDARD MODE: Sequential chunk processing
         else:
             if self.shuffle_chunks:
@@ -238,106 +315,73 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                 chunk_order = torch.randperm(num_chunks, generator=g).tolist()
             else:
                 chunk_order = list(range(num_chunks))
-            
+
             indices = []
             for chunk_idx in chunk_order:
                 start_idx, end_idx, _ = self.dataset.file_ranges[chunk_idx]
                 chunk_indices = list(range(start_idx, end_idx))
-                
+
                 if subset_set is not None:
                     chunk_indices = [idx for idx in chunk_indices if idx in subset_set]
-                
+
                 if self.shuffle_within_chunk and chunk_indices:
                     random.seed(self.seed + self.epoch * 10000 + chunk_idx)
                     random.shuffle(chunk_indices)
-                
+
                 if global_to_subset_pos is not None:
                     chunk_indices = [global_to_subset_pos[idx] for idx in chunk_indices]
-                
+
                 indices.extend(chunk_indices)
-            
+
             return indices
-    
+
     def __iter__(self) -> Iterator[List[int]]:
         """
         Generate batches of sample indices for one epoch.
-        
+
         For cross-modal mode: Uses proportional sampling and cache-optimized batch ordering.
         For standard mode: Simple sequential batching.
         """
         all_indices = self._get_chunk_indices()
-        
+
         # STEP 1: Pre-compute all batches
         if self.enable_cross_modal_batches:
-            # Proportional sampling with credit system
-            indices_by_type = {}
+            # Weighted interleaving with cycling for shorter domains. This keeps
+            # protein/RNA in late batches instead of dropping them once consumed.
+            indices_by_type = defaultdict(list)
             for idx in all_indices:
                 global_idx = self.subset_indices[idx] if self.subset_indices is not None else idx
                 chunk_idx = self._get_chunk_for_sample(global_idx)
-                
+
                 dataset_type = 'unknown'
                 if chunk_idx >= 0 and hasattr(self.dataset, 'chunk_metadata') and chunk_idx < len(self.dataset.chunk_metadata):
                     metadata = self.dataset.chunk_metadata[chunk_idx]
                     if isinstance(metadata, dict) and 'dataset_type' in metadata:
                         dataset_type = metadata['dataset_type']
-                
-                indices_by_type.setdefault(dataset_type, []).append(idx)
-            
-            # Calculate proportions
+
+                indices_by_type[dataset_type].append(idx)
+
+            indices_by_type = {
+                dtype: indices
+                for dtype, indices in indices_by_type.items()
+                if indices
+            }
             total_samples = sum(len(indices_by_type[dt]) for dt in indices_by_type)
-            type_proportions = {dt: len(indices_by_type[dt]) / total_samples for dt in indices_by_type}
-            
-            # Create batches with proportional sampling (credit system)
-            all_batches = []
-            type_positions = {dt: 0 for dt in indices_by_type}
-            type_credits = type_proportions.copy()
-            dataset_types = list(indices_by_type.keys())
-            
-            while any(type_positions[dt] < len(indices_by_type[dt]) for dt in dataset_types):
-                current_batch = []
-                current_atoms = 0
-                
-                while True:
-                    available_types = [dt for dt in dataset_types if type_positions[dt] < len(indices_by_type[dt])]
-                    if not available_types:
-                        break
-                    
-                    # Pick type with highest credit
-                    selected_type = max(available_types, key=lambda dt: type_credits[dt])
-                    idx = indices_by_type[selected_type][type_positions[selected_type]]
-                    atom_count = self._get_atom_count(idx)
-                    
-                    if current_atoms + atom_count <= self.max_atoms_per_batch:
-                        current_batch.append(idx)
-                        current_atoms += atom_count
-                        type_positions[selected_type] += 1
-                        
-                        # Update credits
-                        type_credits[selected_type] -= 1.0
-                        for dt in dataset_types:
-                            if dt != selected_type:
-                                type_credits[dt] += type_proportions[dt]
-                    else:
-                        if current_batch:
-                            break
-                        else:
-                            # Single sample exceeds limit - add anyway
-                            current_batch.append(idx)
-                            type_positions[selected_type] += 1
-                            break
-                
-                if current_batch:
-                    all_batches.append(current_batch)
-        
-        else:
-            # Standard sequential batching
+            if total_samples == 0:
+                return
+
+            if self.cycle_short_domains and len(indices_by_type) > 1:
+                mixed_indices = self._create_cycled_mixed_stream(indices_by_type)
+            else:
+                mixed_indices = self._create_single_pass_mixed_stream(indices_by_type)
+
             all_batches = []
             current_batch = []
             current_atoms = 0
-            
-            for idx in all_indices:
+
+            for idx in mixed_indices:
                 atom_count = self._get_atom_count(idx)
-                
+
                 if current_atoms + atom_count > self.max_atoms_per_batch and current_batch:
                     all_batches.append(current_batch)
                     current_batch = [idx]
@@ -345,10 +389,30 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                 else:
                     current_batch.append(idx)
                     current_atoms += atom_count
-            
+
             if current_batch:
                 all_batches.append(current_batch)
-        
+
+        else:
+            # Standard sequential batching
+            all_batches = []
+            current_batch = []
+            current_atoms = 0
+
+            for idx in all_indices:
+                atom_count = self._get_atom_count(idx)
+
+                if current_atoms + atom_count > self.max_atoms_per_batch and current_batch:
+                    all_batches.append(current_batch)
+                    current_batch = [idx]
+                    current_atoms = atom_count
+                else:
+                    current_batch.append(idx)
+                    current_atoms += atom_count
+
+            if current_batch:
+                all_batches.append(current_batch)
+
         # STEP 2: Optimize batch order for cache efficiency (cross-modal only)
         if self.enable_cross_modal_batches and len(all_batches) > 1:
             # Group batches by chunk requirements
@@ -357,32 +421,30 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                 global_indices = [self.subset_indices[idx] for idx in batch] if self.subset_indices is not None else batch
                 chunks_needed = frozenset(self._get_chunk_for_sample(global_idx) for global_idx in global_indices if self._get_chunk_for_sample(global_idx) >= 0)
                 batch_chunk_sets.append(chunks_needed)
-            
+
             # Group batches by chunk sets
             chunk_set_to_batches = defaultdict(list)
             for batch_idx, chunk_set in enumerate(batch_chunk_sets):
                 chunk_set_to_batches[chunk_set].append(batch_idx)
-            
+
             # Reorder: process all batches with same chunks together
             optimized_order = []
             for chunk_set in sorted(chunk_set_to_batches.keys(), key=lambda x: min(x) if x else 0):
                 optimized_order.extend(chunk_set_to_batches[chunk_set])
-            
+
             all_batches = [all_batches[i] for i in optimized_order]
-        
+
         # STEP 3: Yield batches
         for batch in all_batches:
             yield batch
-    
+
     def __len__(self) -> int:
         """Estimate number of batches"""
         total_samples = len(self.subset_indices) if self.subset_indices is not None else len(self.dataset)
         avg_atoms_per_sample = 500
         return max(1, (total_samples * avg_atoms_per_sample) // self.max_atoms_per_batch)
-    
+
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""
         self.epoch = epoch
         self._atom_count_cache.clear()
-
-
