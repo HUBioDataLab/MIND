@@ -118,6 +118,7 @@ class ProteinPerAtomMetricsCallback(Callback):
 
         # Snapshot of the last validation metrics (used for on_train_end print).
         self._last_snapshot: Optional[Dict] = None
+        self._processing_error_logged = False
 
         if enabled:
             print("✅ ProteinPerAtomMetricsCallback enabled")
@@ -147,12 +148,10 @@ class ProteinPerAtomMetricsCallback(Callback):
             self._process_batch_metrics(
                 batch, pl_module, self.val_metrics,
                 self._val_aa_stats, self._val_aa_block_stats,
+                outputs=outputs,
             )
-        except Exception:
-            # Silent — don't break training if metric computation hits a
-            # transient issue. Replace with a one-shot logger warning if
-            # you need to diagnose.
-            pass
+        except Exception as exc:
+            self._log_processing_error('validation', batch_idx, exc)
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch,
                           batch_idx, dataloader_idx=0):
@@ -164,31 +163,30 @@ class ProteinPerAtomMetricsCallback(Callback):
             self._process_batch_metrics(
                 batch, pl_module, self.test_metrics,
                 self._test_aa_stats, self._test_aa_block_stats,
+                outputs=outputs,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log_processing_error('test', batch_idx, exc)
 
     # ------------------------------------------------------------------ #
     # Core metric computation                                             #
     # ------------------------------------------------------------------ #
 
     def _process_batch_metrics(self, batch, pl_module, metrics_calculator,
-                                aa_stats, aa_block_stats):
+                                aa_stats, aa_block_stats, outputs=None):
         # Guard: MLM task must be active and pos_code must exist on the batch.
         if "mlm" not in pl_module.config.pretraining_tasks:
             return
         if not hasattr(batch, 'pos_code') or batch.pos_code is None:
-            return
+            raise ValueError("batch.pos_code is missing")
 
-        # 1. Forward pass under autocast so bf16 training doesn't dtype-mismatch.
-        use_bf16 = getattr(pl_module.config, 'use_bfloat16', False)
-        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
-        with torch.no_grad(), torch.autocast(
-            device_type=device_type, dtype=torch.bfloat16, enabled=use_bf16
-        ):
-            _, node_emb = pl_module.forward(batch)
-            mlm_logits = pl_module.pretraining_tasks.mlm_head(node_emb)
-            preds_atomic_num = mlm_logits.argmax(dim=1).cpu().numpy()
+        # 1. Reuse predictions from validation_step/test_step. The fallback
+        # preserves compatibility with direct callback tests and older models.
+        preds_atomic_num = self._get_atomic_predictions(
+            batch=batch,
+            pl_module=pl_module,
+            outputs=outputs,
+        )
 
         # 2. Flatten pos_code — PyG stores batch.pos_code as list-of-lists when
         #    multiple molecules are collated.
@@ -201,8 +199,10 @@ class ProteinPerAtomMetricsCallback(Callback):
             flattened_pos_codes = raw_pos_codes
 
         if len(flattened_pos_codes) != len(preds_atomic_num):
-            # Defensive: size mismatch means something upstream is off — skip.
-            return
+            raise ValueError(
+                f"pos_code/prediction length mismatch "
+                f"({len(flattened_pos_codes)} != {len(preds_atomic_num)})"
+            )
 
         # 3. Build y_true (protein atom class indices) and element arrays.
         y_true_indices = np.array(
@@ -226,12 +226,14 @@ class ProteinPerAtomMetricsCallback(Callback):
         #    (PDB + RNA) the non-protein atoms would otherwise leak into the
         #    per-atom classification table. RNA pos_codes ('P', "C5'", ...)
         #    belong to neither the protein vocabulary nor its Unknown row.
-        mlm_mask_np: Optional[np.ndarray] = None
-        if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
-            mlm_mask_np = batch.mlm_mask.cpu().numpy().astype(bool)
-            if len(mlm_mask_np) != len(y_true_indices):
-                # Size mismatch → fall back to no masking
-                mlm_mask_np = None
+        if not hasattr(batch, 'mlm_mask') or batch.mlm_mask is None:
+            raise ValueError("batch.mlm_mask is missing")
+        mlm_mask_np: np.ndarray = batch.mlm_mask.cpu().numpy().astype(bool)
+        if len(mlm_mask_np) != len(y_true_indices):
+            raise ValueError(
+                f"mlm_mask/target length mismatch "
+                f"({len(mlm_mask_np)} != {len(y_true_indices)})"
+            )
 
         # Build per-atom protein mask (True for atoms whose graph dtype is
         # protein/pdb). When no dtype info is available, treat everything as
@@ -254,13 +256,9 @@ class ProteinPerAtomMetricsCallback(Callback):
                 )
                 is_protein_per_atom = is_protein_graph
 
-        if mlm_mask_np is not None:
-            effective_mask = mlm_mask_np & is_protein_per_atom
-            y_true_masked = y_true_indices[effective_mask]
-            y_pred_masked = y_pred_indices[effective_mask]
-        else:
-            y_true_masked = y_true_indices[is_protein_per_atom]
-            y_pred_masked = y_pred_indices[is_protein_per_atom]
+        effective_mask = mlm_mask_np & is_protein_per_atom
+        y_true_masked = y_true_indices[effective_mask]
+        y_pred_masked = y_pred_indices[effective_mask]
 
         if len(y_true_masked) > 0:
             metrics_calculator.update(y_pred_masked, y_true_masked)
@@ -597,6 +595,39 @@ class ProteinPerAtomMetricsCallback(Callback):
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _get_atomic_predictions(batch, pl_module, outputs=None) -> np.ndarray:
+        if isinstance(outputs, dict):
+            cached = outputs.get('mlm_preds_atomic_num')
+            if cached is not None:
+                if isinstance(cached, torch.Tensor):
+                    return cached.detach().cpu().numpy()
+                return np.asarray(cached)
+
+        use_bf16 = getattr(pl_module.config, 'use_bfloat16', False)
+        device_type = batch.z.device.type if hasattr(batch, 'z') else next(
+            pl_module.parameters()
+        ).device.type
+        with torch.no_grad(), torch.autocast(
+            device_type=device_type,
+            dtype=torch.bfloat16,
+            enabled=use_bf16,
+        ):
+            _, node_emb = pl_module.forward(batch)
+            mlm_logits = pl_module.pretraining_tasks.mlm_head(node_emb)
+            return mlm_logits.argmax(dim=1).detach().cpu().numpy()
+
+    def _log_processing_error(self, stage: str, batch_idx: int, exc: Exception) -> None:
+        if self._processing_error_logged:
+            return
+        self._processing_error_logged = True
+        detail = str(exc).splitlines()[0] if str(exc) else "no detail"
+        print(
+            f"⚠️ Protein metric callback error "
+            f"({stage} batch {batch_idx}): {type(exc).__name__}: {detail}. "
+            f"Further callback errors will be suppressed."
+        )
 
     @staticmethod
     def _fresh_aa_stats() -> Dict[str, Dict[str, int]]:

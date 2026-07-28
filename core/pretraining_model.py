@@ -710,7 +710,18 @@ class PretrainingESAModel(pl.LightningModule):
                 for task_name, loss_value in dtype_losses.items():
                     self.log(f"val_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
 
-        return total_loss
+        outputs = {'loss': total_loss}
+        if "mlm" in self.config.pretraining_tasks:
+            # Domain metric callbacks consume these predictions immediately.
+            # Reusing this forward avoids running the ESA backbone again in
+            # each callback.
+            outputs['mlm_preds_atomic_num'] = (
+                self.pretraining_tasks.mlm_head(node_embeddings)
+                .argmax(dim=1)
+                .detach()
+                .cpu()
+            )
+        return outputs
 
     def test_step(self, batch, batch_idx):
         self._ensure_mlm_attributes(batch, batch_idx=batch_idx, is_validation=True)
@@ -732,7 +743,15 @@ class PretrainingESAModel(pl.LightningModule):
                 for task_name, loss_value in dtype_losses.items():
                     self.log(f"test_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
 
-        return total_loss
+        outputs = {'loss': total_loss}
+        if "mlm" in self.config.pretraining_tasks:
+            outputs['mlm_preds_atomic_num'] = (
+                self.pretraining_tasks.mlm_head(node_embeddings)
+                .argmax(dim=1)
+                .detach()
+                .cpu()
+            )
+        return outputs
 
     def on_before_optimizer_step(self, optimizer):
         total_norm = 0.0

@@ -118,6 +118,7 @@ class PerAtomMetricsCallback(Callback):
         self._val_nt_block_stats = self._fresh_nt_block_stats()
         self._test_nt_block_stats = self._fresh_nt_block_stats()
         self._last_val_metrics_snapshot: Optional[Dict] = None
+        self._processing_error_logged = False
         
         if enabled:
             print(f"✅ PerAtomMetricsCallback enabled")
@@ -144,10 +145,10 @@ class PerAtomMetricsCallback(Callback):
                 self.val_metrics,
                 self._val_nt_stats,
                 self._val_nt_block_stats,
+                outputs=outputs,
             )
-        except Exception as e:
-            # Silently skip if we can't compute metrics
-            pass
+        except Exception as exc:
+            self._log_processing_error('validation', batch_idx, exc)
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         """Process test batch."""
@@ -164,27 +165,26 @@ class PerAtomMetricsCallback(Callback):
                 self.test_metrics,
                 self._test_nt_stats,
                 self._test_nt_block_stats,
+                outputs=outputs,
             )
-        except Exception as e:
-            pass
+        except Exception as exc:
+            self._log_processing_error('test', batch_idx, exc)
     
     def _process_batch_metrics(self, batch, pl_module, metrics_calculator,
-                               nt_stats, nt_block_stats):
+                               nt_stats, nt_block_stats, outputs=None):
         if "mlm" not in pl_module.config.pretraining_tasks:
             return
 
         if not hasattr(batch, 'pos_code') or batch.pos_code is None:
-            return
+            raise ValueError("batch.pos_code is missing")
 
-        # 1. Model Tahminlerini Al (Tensör olduğu için zaten düzdür)
-        # Lightning'in autocast context'i callback dışında kaldığı için burada manuel kuruyoruz.
-        # bf16 training'de dtype mismatch'i önler; fp32 run'larda enabled=False → no-op (davranış değişmez).
-        use_bf16 = getattr(pl_module.config, 'use_bfloat16', False)
-        device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
-        with torch.no_grad(), torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=use_bf16):
-            _, node_emb = pl_module.forward(batch)
-            mlm_logits = pl_module.pretraining_tasks.mlm_head(node_emb)
-            preds_atomic_num = mlm_logits.argmax(dim=1).cpu().numpy()
+        # 1. Reuse predictions from validation_step/test_step instead of
+        # running the full ESA backbone again for this callback.
+        preds_atomic_num = self._get_atomic_predictions(
+            batch=batch,
+            pl_module=pl_module,
+            outputs=outputs,
+        )
 
         # 2. KRİTİK DÜZELTME: pos_code listesini düzleştir
         raw_pos_codes = batch.pos_code
@@ -196,7 +196,10 @@ class PerAtomMetricsCallback(Callback):
             flattened_pos_codes = raw_pos_codes
 
         if len(flattened_pos_codes) != len(preds_atomic_num):
-            return
+            raise ValueError(
+                f"pos_code/prediction length mismatch "
+                f"({len(flattened_pos_codes)} != {len(preds_atomic_num)})"
+            )
 
         # 3. Hizalama (Alignment)
         try:
@@ -230,11 +233,14 @@ class PerAtomMetricsCallback(Callback):
                     print(f"⚠️ Boyut Uyuşmazlığı: True({len(y_true_indices)}) vs Pred({len(y_pred_indices)})")
                 return
 
-            mlm_mask_np: Optional[np.ndarray] = None
-            if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
-                mlm_mask_np = batch.mlm_mask.cpu().numpy().astype(bool)
-                if len(mlm_mask_np) != len(y_true_indices):
-                    mlm_mask_np = None
+            if not hasattr(batch, 'mlm_mask') or batch.mlm_mask is None:
+                raise ValueError("batch.mlm_mask is missing")
+            mlm_mask_np: np.ndarray = batch.mlm_mask.cpu().numpy().astype(bool)
+            if len(mlm_mask_np) != len(y_true_indices):
+                raise ValueError(
+                    f"mlm_mask/target length mismatch "
+                    f"({len(mlm_mask_np)} != {len(y_true_indices)})"
+                )
 
             # Mixed batches can contain RNA + protein + UniMol. The batch-level
             # RNA gate only says "there is RNA somewhere"; this per-atom mask
@@ -255,13 +261,9 @@ class PerAtomMetricsCallback(Callback):
                         dtype=bool,
                     )
 
-            if mlm_mask_np is not None:
-                effective_mask = mlm_mask_np & is_rna_per_atom
-                y_true = y_true_indices[effective_mask]
-                y_pred = y_pred_indices[effective_mask]
-            else:
-                y_true = y_true_indices[is_rna_per_atom]
-                y_pred = y_pred_indices[is_rna_per_atom]
+            effective_mask = mlm_mask_np & is_rna_per_atom
+            y_true = y_true_indices[effective_mask]
+            y_pred = y_pred_indices[effective_mask]
 
             # 4. Hesaplayıcıyı Güncelle
             if len(y_true) > 0:
@@ -285,8 +287,41 @@ class PerAtomMetricsCallback(Callback):
                     nt_block_stats=nt_block_stats,
                 )
                 
-        except Exception as e:
-            print(f"⚠️ PerAtomMetrics alignment error: {e}")
+        except Exception as exc:
+            raise RuntimeError(f"RNA metric alignment failed: {exc}") from exc
+
+    @staticmethod
+    def _get_atomic_predictions(batch, pl_module, outputs=None) -> np.ndarray:
+        if isinstance(outputs, dict):
+            cached = outputs.get('mlm_preds_atomic_num')
+            if cached is not None:
+                if isinstance(cached, torch.Tensor):
+                    return cached.detach().cpu().numpy()
+                return np.asarray(cached)
+
+        use_bf16 = getattr(pl_module.config, 'use_bfloat16', False)
+        device_type = batch.z.device.type if hasattr(batch, 'z') else next(
+            pl_module.parameters()
+        ).device.type
+        with torch.no_grad(), torch.autocast(
+            device_type=device_type,
+            dtype=torch.bfloat16,
+            enabled=use_bf16,
+        ):
+            _, node_emb = pl_module.forward(batch)
+            mlm_logits = pl_module.pretraining_tasks.mlm_head(node_emb)
+            return mlm_logits.argmax(dim=1).detach().cpu().numpy()
+
+    def _log_processing_error(self, stage: str, batch_idx: int, exc: Exception) -> None:
+        if self._processing_error_logged:
+            return
+        self._processing_error_logged = True
+        detail = str(exc).splitlines()[0] if str(exc) else "no detail"
+        print(
+            f"⚠️ RNA metric callback error "
+            f"({stage} batch {batch_idx}): {type(exc).__name__}: {detail}. "
+            f"Further callback errors will be suppressed."
+        )
 
     def _accumulate_nt_stats(self, batch, flattened_pos_codes, mlm_mask_np,
                              is_correct_element, nt_stats):
