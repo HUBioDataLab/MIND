@@ -6,6 +6,11 @@ from typing import Optional, List, Dict, Any
 import random
 import math
 
+from data_loading.masking_utils import (
+    is_coconut_dataset_type,
+    select_mask_indices,
+)
+
 
 class AddRandomNoise(BaseTransform):
     """Add random noise to 3D coordinates for coordinate denoising task.
@@ -21,6 +26,9 @@ class AddRandomNoise(BaseTransform):
         sample_sigma: bool = False,
         sigma_min: float = None,
         sigma_max: float = None,
+        coconut_mask_ratio: float = 0.15,
+        coconut_masking_method: str = "random_atom",
+        coconut_num_random_walks: int = 1,
     ):
         self.noise_std = float(noise_std)
         self.coordinate_dim = int(coordinate_dim)
@@ -28,6 +36,9 @@ class AddRandomNoise(BaseTransform):
         self.sample_sigma = bool(sample_sigma)
         self.sigma_min = float(sigma_min) if sigma_min is not None else None
         self.sigma_max = float(sigma_max) if sigma_max is not None else None
+        self.coconut_mask_ratio = coconut_mask_ratio
+        self.coconut_masking_method = coconut_masking_method
+        self.coconut_num_random_walks = coconut_num_random_walks
     
     def _sample_sigma(self) -> float:
         if self.sample_sigma and self.sigma_min is not None and self.sigma_max is not None:
@@ -55,15 +66,31 @@ class AddRandomNoise(BaseTransform):
             noise = torch.randn_like(data.pos) * current_noise_std
             data.pos = data.pos + noise # This is now the noisy position
             
-            # Store a coordinate mask; allow partial masking for denoising objective
+            # Store a coordinate mask; reuse MLM mask when already set (shared coconut masking)
             num_nodes = data.pos.size(0)
-            if self.mask_ratio >= 1.0:
+            if hasattr(data, 'mlm_mask') and data.mlm_mask is not None:
+                data.coord_mask = data.mlm_mask.clone()
+            elif self.mask_ratio >= 1.0:
                 data.coord_mask = torch.ones(num_nodes, dtype=torch.bool)
             else:
-                num_mask = max(1, int(num_nodes * self.mask_ratio))
-                idx = torch.randperm(num_nodes)[:num_mask]
+                ratio = (
+                    self.coconut_mask_ratio
+                    if is_coconut_dataset_type(getattr(data, 'dataset_type', None))
+                    else self.mask_ratio
+                )
+                bond_edge_index = getattr(data, 'bond_edge_index', None)
+                mask_indices = select_mask_indices(
+                    num_nodes,
+                    ratio,
+                    method='random_atom',
+                    bond_edge_index=bond_edge_index,
+                    dataset_type=getattr(data, 'dataset_type', None),
+                    coconut_method=self.coconut_masking_method,
+                    num_walks=self.coconut_num_random_walks,
+                    device=data.pos.device,
+                )
                 mask = torch.zeros(num_nodes, dtype=torch.bool)
-                mask[idx] = True
+                mask[mask_indices] = True
                 data.coord_mask = mask
             
             # Attach the actual noise level used to the data object for the loss function
@@ -80,11 +107,44 @@ class MaskAtomTypes(BaseTransform):
 
     Prefer masking `data.z` (atomic numbers, as in QM9). If `z` is absent, fall back to `x`.
     This transform also stores `original_types` and `masked_types` for use by the MLM loss.
+
+    For COCONUT/metabolite graphs, supports random_walk masking on bond_edge_index when
+    coconut_masking_method is random_walk.
     """
     
-    def __init__(self, mask_ratio: float = 0.15, mask_token: int = 0):
+    def __init__(
+        self,
+        mask_ratio: float = 0.15,
+        mask_token: int = 0,
+        coconut_mask_ratio: float = 0.15,
+        coconut_masking_method: str = "random_atom",
+        coconut_num_random_walks: int = 1,
+    ):
         self.mask_ratio = mask_ratio
         self.mask_token = mask_token
+        self.coconut_mask_ratio = coconut_mask_ratio
+        self.coconut_masking_method = coconut_masking_method
+        self.coconut_num_random_walks = coconut_num_random_walks
+
+    def _resolve_mask_ratio(self, data: Data) -> float:
+        if is_coconut_dataset_type(getattr(data, 'dataset_type', None)):
+            return self.coconut_mask_ratio
+        return self.mask_ratio
+
+    def _select_mask_indices(self, data: Data, num_nodes: int) -> torch.Tensor:
+        dataset_type = getattr(data, 'dataset_type', None)
+        ratio = self._resolve_mask_ratio(data)
+        bond_edge_index = getattr(data, 'bond_edge_index', None)
+        return select_mask_indices(
+            num_nodes,
+            ratio,
+            method="random_atom",
+            bond_edge_index=bond_edge_index,
+            dataset_type=dataset_type,
+            coconut_method=self.coconut_masking_method,
+            num_walks=self.coconut_num_random_walks,
+            device=bond_edge_index.device if bond_edge_index is not None else torch.device("cpu"),
+        )
     
     def __call__(self, data: Data) -> Data:
         # Prefer atomic numbers `z` when available (QM9)
@@ -94,8 +154,7 @@ class MaskAtomTypes(BaseTransform):
             data.original_types = z.clone()
             num_nodes = z.size(0)
             if num_nodes > 0:
-                num_mask = max(1, int(num_nodes * self.mask_ratio))
-                mask_indices = torch.randperm(num_nodes)[:num_mask]
+                mask_indices = self._select_mask_indices(data, num_nodes)
                 mlm_mask = torch.zeros(num_nodes, dtype=torch.bool)
                 mlm_mask[mask_indices] = True
                 masked = z.clone()
@@ -113,8 +172,7 @@ class MaskAtomTypes(BaseTransform):
             data.original_types = x0.clone()
             num_nodes = x0.size(0)
             if num_nodes > 0:
-                num_mask = max(1, int(num_nodes * self.mask_ratio))
-                mask_indices = torch.randperm(num_nodes)[:num_mask]
+                mask_indices = self._select_mask_indices(data, num_nodes)
                 mlm_mask = torch.zeros(num_nodes, dtype=torch.bool)
                 mlm_mask[mask_indices] = True
                 masked = x0.clone()

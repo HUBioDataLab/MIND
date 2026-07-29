@@ -18,9 +18,9 @@
 # Genel ve Çıktı Ayarları
 # -------------------------
 seed: 42
-out_path: "outputs/multidomain_pretrain"
+out_path: "outputs/random_walk_coconut_500_chunks"
 wandb_project_name: "MIND-Project-Pretraining"
-wandb_run_name: "multidomain-run-1"
+wandb_run_name: "random_walk_coconut_500_chunks"
 
 # -------------------------
 # Multi-Domain Configuration
@@ -35,19 +35,19 @@ multi_domain:
   datasets:
     # chunk_range: [start, end] inclusive; null = use all chunks. atom_ratio: not yet used.
     pdb:
-      enabled: true
+      enabled: false
       chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks
-      atom_ratio: 60  
-      chunk_range: [0, 9]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
+      atom_ratio: 10  
+      chunk_range: [0, 0]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
     
     qm9:
-      enabled: true  # QM9 with legacy edges (cutoff 5.0Å, 16 neighbors)
+      enabled: false  # QM9 with legacy edges (cutoff 5.0Å, 16 neighbors)
       chunk_dir: "/home/arin/data/qm9_chunks"  # Will match qm9_chunks_chunk_0 through qm9_chunks_chunk_4
       atom_ratio: 5  
       chunk_range: null
-    
+Z
     metabolite:
-      enabled: false  # Path fixed to 8TB build (497 chunks, proper layout). Earlier `smiles`-asymmetry build is gone; current chunks carry only an unused `bond_edge_index` key that PyG collate drops safely. Enable for the multi-domain mega train.
+      enabled: true  # Path fixed to 8TB build (497 chunks, proper layout). Earlier `smiles`-asymmetry build is gone; current chunks carry only an unused `bond_edge_index` key that PyG collate drops safely.
       chunk_dir: "/media/ubuntu/8TB/ege/processed"
       atom_ratio: 10  # 10% of atoms from metabolites
       chunk_range: null
@@ -57,12 +57,12 @@ multi_domain:
       chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
       atom_ratio: 25
       chunk_range: null
-    
+
     rna:
       enabled: true
       chunk_dir: "/home/yusuf/data/rna/processed_graphs"
-      atom_ratio: 5   # 5% of atoms from RNA
-    
+      atom_ratio: 5  # 5% of atoms from RNA
+
     dna:
       enabled: false  # Future expansion
       chunk_dir: "../data/dna/processed_chunks"
@@ -70,7 +70,7 @@ multi_domain:
   
   # Rotational Sampling Parameters
   target_atoms_per_rotation: 50000  #! Not used anymore. Target total atoms per rotation (adjust based on GPU RAM) 
-  max_cache_chunks: 10              # Maximum chunks in LRU cache (adjust based on system RAM)
+  max_cache_chunks: 20              # Maximum chunks in LRU cache (adjust based on system RAM)
   fallback_to_single_domain: true   # If metadata missing, fall back to ChunkAwareSampler
 
 # -------------------------
@@ -84,27 +84,27 @@ dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom un
 # -------------------------
 # Data Loading Settings
 # -------------------------
-num_workers: 0  # Required for dynamic batching with lazy datasets (avoids hanging)
+num_workers: 2  # Required for dynamic batching with lazy datasets (avoids hanging)
 max_samples: null  # null = use all available samples
 use_universal_cache: true
 
 # -------------------------
 # Eğitim Parametreleri
 # -------------------------
-max_epochs: 30
-batch_size: 32  # Used for validation/test (training uses dynamic batching)
+max_epochs: 100
+batch_size: 128  # Used for validation/test (training uses dynamic batching)
 use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
 use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
-max_atoms_per_batch: 15000  # Raised from 8000 now that RNA metadata/memory are stable; fits comfortably on 49 GB GPU with multi-domain batching
+max_atoms_per_batch: 15000  # Raised to 15000 for 49GB GPU (main). Note from Ege: RNA molecules add variance, keep a safety margin for multi-domain batching.
 log_batch_statistics: true  # Print batch composition statistics during training
-batch_stats_log_frequency: 25  # Log every N batches
+batch_stats_log_frequency: 100  # Log every N batches
 
 # Per-Type Loss Tracking (for multi-domain analysis)
 compute_per_type_losses: true   # ✅ Track losses per dataset type (protein, qm9, etc.)
-log_per_type_frequency: 25      # Log per-type losses every N batches (reduce overhead)  
+log_per_type_frequency: 20      # Log per-type losses every N batches (reduce overhead)  
 
 lr: 0.0005
-early_stopping_patience: 15
+early_stopping_patience: 25
 gradient_clip_val: 0.5
 optimiser_weight_decay: 1.0e-10
 monitor_loss_name: "val_total_loss"
@@ -114,8 +114,8 @@ devices: 1  # Use single GPU (will be GPU 6 via CUDA_VISIBLE_DEVICES) #! Not use
 precision: bfloat16  # Required for flash_varlen
 num_sanity_val_steps: 0
 # Validation and logging: run validation and log to wandb more often than once per epoch
-val_check_interval: 0.25  # Fraction of epoch (0.25 = 4x per epoch). Use int for "every N steps"
-log_every_n_steps: 1       # Log train metrics to wandb every N steps
+val_check_interval: 0.20  # Fraction of epoch (0.25 = 4x per epoch). Use int for "every N steps"
+log_every_n_steps: 20       # Log train metrics to wandb every N steps
 fast_dev_run: false #! Not used
 
 # -------------------------
@@ -210,16 +210,21 @@ task_weights:
   long_range_distance: 1.5
   short_range_distance: 1.0
   mlm: 0.3
-mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task
+mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task (non-metabolite domains)
+# COCONUT/metabolite: random_walk uses bond_edge_index (re-process chunks after adapter update)
+coconut_masking_method: random_walk  # random_atom | random_walk
+coconut_mask_ratio: 0.15
+coconut_num_random_walks: 1
+log_coconut_masking_stats: true    # wandb section: masking/* (coconut/metabolite only)
+log_coconut_masking_frequency: 50  # log masking metrics every N batches
 
 # Protein-only block MLM: when true, MLM mask for pdb/protein graphs covers
 # whole residues (all 14 atoms of selected residues), not random atoms. Other
 # molecule types remain atom-level. Validation uses a deterministic seed so
-# val_mlm_loss is stable across cycles. Default false → behaviour identical
+# val_mlm_loss is stable across cycles. Default false -> behaviour identical
 # to atom-level MLM for all graphs.
 protein_block_mlm: true
 protein_block_mlm_ratio: 0.15  # Fraction of residues to mask per protein graph
-
 temperature: 0.2 #! Not used
 
 # -------------------------

@@ -81,6 +81,12 @@ class PretrainingConfig:
     mlm_weight: float = 1.0
     mlm_mask_ratio: float = 0.15
 
+    # COCONUT / metabolite masking (random_atom vs random_walk on bond_edge_index)
+    coconut_masking_method: str = "random_atom"  # random_atom | random_walk
+    coconut_mask_ratio: float = 0.15
+    coconut_num_random_walks: int = 1
+    log_coconut_masking_stats: bool = True  # wandb masking/* metrics for coconut/metabolite
+    log_coconut_masking_frequency: int = 50  # log every N training batches (0 = every step)
     # Protein-only block MLM: when enabled, MLM masking for protein/pdb graphs
     # is residue-level (all 14 atoms of selected residues masked) instead of
     # atom-level random. Other molecule types (metabolite, QM9, RNA, ...) keep

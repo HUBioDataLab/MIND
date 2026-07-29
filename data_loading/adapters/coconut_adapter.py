@@ -212,7 +212,7 @@ class COCONUTAdapter(BaseAdapter):
         
         return samples
 
-    def create_blocks(self, raw_item: Dict[str, Any]) -> List[UniversalBlock]:
+    def create_blocks(self, raw_item: Dict[str, Any]) -> Tuple[List[UniversalBlock], List[Tuple[int, int]]]:
         """
         Convert COCONUT raw data to universal blocks using GET tokenization.
         
@@ -220,7 +220,9 @@ class COCONUTAdapter(BaseAdapter):
             raw_item: Dictionary with 'mol' (RDKit Mol), 'id', and 'properties'
         
         Returns:
-            List of UniversalBlock objects, empty list if processing fails
+            Tuple of (blocks, bond_edges) where bond_edges are undirected pairs
+            (min_idx, max_idx) in flat atom order (get_all_atoms traversal).
+            Returns ([], []) if processing fails.
         """
         self.stats.total_molecules += 1
         
@@ -236,14 +238,14 @@ class COCONUTAdapter(BaseAdapter):
             logger.debug(f"Skipping molecule {mol_id}: {e}")
             self.stats.skipped_no_conformer += 1
             self.stats.failed_molecules += 1
-            return []
+            return [], []
         
         # Check if we have any atoms after hydrogen filtering
         if len(atoms) == 0:
             logger.debug(f"Skipping molecule {mol_id}: No atoms after hydrogen filtering")
             self.stats.skipped_empty_after_h_filter += 1
             self.stats.failed_molecules += 1
-            return []
+            return [], []
         
         # Use GET's tokenization with coordinates and bonds
         try:
@@ -259,10 +261,11 @@ class COCONUTAdapter(BaseAdapter):
             logger.debug(f"Tokenization failed for {mol_id}: {e}")
             self.stats.skipped_tokenization_error += 1
             self.stats.failed_molecules += 1
-            return []
+            return [], []
 
-        # Create blocks from fragments
+        # Create blocks from fragments; track pre-tokenization atom indices in flat order
         blocks = []
+        pre_token_indices_flat: List[int] = []
         for frag_idx, (fragment, atom_group) in enumerate(zip(fragments, atom_indices)):
             fragment_atoms = []
             
@@ -284,6 +287,7 @@ class COCONUTAdapter(BaseAdapter):
                     entity_idx=0  # Single entity for COCONUT natural products
                 )
                 fragment_atoms.append(atom)
+                pre_token_indices_flat.append(atom_idx)
 
             # Create block with fragment as symbol (only if it has atoms)
             if fragment_atoms:
@@ -298,12 +302,27 @@ class COCONUTAdapter(BaseAdapter):
             for atom in block.atoms:
                 atom.block_idx = block_idx
 
+        bond_edges: List[Tuple[int, int]] = []
+        if blocks and bonds and pre_token_indices_flat:
+            flat_map = {pre_idx: flat_i for flat_i, pre_idx in enumerate(pre_token_indices_flat)}
+            seen_bonds = set()
+            for src, dst, _ in bonds:
+                if src not in flat_map or dst not in flat_map:
+                    continue
+                i, j = flat_map[src], flat_map[dst]
+                if i == j:
+                    continue
+                edge = (min(i, j), max(i, j))
+                if edge not in seen_bonds:
+                    seen_bonds.add(edge)
+                    bond_edges.append(edge)
+
         if blocks:
             self.stats.successful_molecules += 1
         else:
             self.stats.failed_molecules += 1
             
-        return blocks
+        return blocks, bond_edges
 
     def _extract_molecule_info_from_rdkit(
         self, 
@@ -393,13 +412,15 @@ class COCONUTAdapter(BaseAdapter):
         Returns:
             UniversalMolecule object
         """
-        blocks = self.create_blocks(raw_item)
+        blocks, bond_edges = self.create_blocks(raw_item)
         
         # Use the ID from the sample
         mol_id = raw_item.get('id', 'unknown')
         
-        # Extract properties
-        properties = raw_item.get('properties', {})
+        # Extract properties and attach bond connectivity for random-walk masking
+        properties = dict(raw_item.get('properties', {}))
+        if bond_edges:
+            properties['bond_edges'] = bond_edges
         
         return UniversalMolecule(
             id=mol_id,

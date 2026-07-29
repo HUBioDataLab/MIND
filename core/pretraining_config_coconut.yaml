@@ -80,6 +80,10 @@ task_weights:
   coordinate_denoising: 1.2  # Higher weight for complex natural product conformations
 
 mlm_mask_ratio: 0  # Required parameter (not used since MLM task is removed)
+# Metabolite masking when MLM/coordinate_denoising enabled (re-process chunks for bond_edge_index)
+coconut_masking_method: random_walk  # random_atom | random_walk
+coconut_mask_ratio: 0.15
+coconut_num_random_walks: 1
 temperature: 0.1
 
 lr: 0.0005  # Match working model exactly

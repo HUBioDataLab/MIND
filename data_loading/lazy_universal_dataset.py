@@ -237,6 +237,7 @@ class LazyUniversalDataset(Dataset):
                 # Extract sample
                 data, slices = self._cache[pt_file]
                 sample = self._extract_sample(data, slices, local_idx)
+                sample = self._normalize_sample_for_collate(sample)
                 
                 # Add dataset_type for batch statistics
                 if self.metadata_loaded and chunk_idx < len(self.chunk_metadata):
@@ -275,6 +276,18 @@ class LazyUniversalDataset(Dataset):
         data, slices = torch.load(pt_file, map_location='cpu', weights_only=False)
         self._cache[pt_file] = (data, slices)
     
+    @staticmethod
+    def _normalize_sample_for_collate(sample: Data) -> Data:
+        """
+        Ensure optional graph fields exist so PyG can collate mixed-domain batches.
+
+        Metabolite/COCONUT chunks include bond_edge_index; protein chunks typically do not.
+        Without this, Batch.from_data_list raises KeyError when both appear in one batch.
+        """
+        if not hasattr(sample, "bond_edge_index") or sample.bond_edge_index is None:
+            sample.bond_edge_index = torch.empty((2, 0), dtype=torch.long)
+        return sample
+
     def _extract_sample(self, data: Data, slices: dict, idx: int) -> Data:
         """
         Extract a single sample from collated data.

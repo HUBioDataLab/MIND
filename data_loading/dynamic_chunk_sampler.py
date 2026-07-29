@@ -39,7 +39,7 @@ Usage:
 import torch
 import random
 from torch.utils.data import BatchSampler, Sampler
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 from collections import defaultdict
 from data_loading.lazy_universal_dataset import LazyUniversalDataset
 
@@ -103,6 +103,9 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
         self.cycle_short_domains = cycle_short_domains
         self.epoch = 0
         self.seed = seed
+
+        self._cached_batches: Optional[List[List[int]]] = None
+        self._cached_batches_epoch: Optional[int] = None
 
         # Validate dataset attributes
         if not hasattr(self.dataset, 'chunk_pt_files'):
@@ -334,14 +337,9 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                 indices.extend(chunk_indices)
 
             return indices
-
-    def __iter__(self) -> Iterator[List[int]]:
-        """
-        Generate batches of sample indices for one epoch.
-
-        For cross-modal mode: Uses proportional sampling and cache-optimized batch ordering.
-        For standard mode: Simple sequential batching.
-        """
+          
+def _build_batches(self) -> List[List[int]]:
+        """Pre-compute all batches for the current epoch."""
         all_indices = self._get_chunk_indices()
 
         # STEP 1: Pre-compute all batches
@@ -368,7 +366,7 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
             }
             total_samples = sum(len(indices_by_type[dt]) for dt in indices_by_type)
             if total_samples == 0:
-                return
+                return []
 
             if self.cycle_short_domains and len(indices_by_type) > 1:
                 mixed_indices = self._create_cycled_mixed_stream(indices_by_type)
@@ -433,18 +431,52 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                 optimized_order.extend(chunk_set_to_batches[chunk_set])
 
             all_batches = [all_batches[i] for i in optimized_order]
-
-        # STEP 3: Yield batches
-        for batch in all_batches:
+        
+        return all_batches
+    
+    def _get_batches(self, log_progress: bool = False) -> List[List[int]]:
+        if (
+            self._cached_batches is not None
+            and self._cached_batches_epoch == self.epoch
+        ):
+            return self._cached_batches
+        
+        batches = self._build_batches()
+        self._cached_batches = batches
+        self._cached_batches_epoch = self.epoch
+        
+        if log_progress:
+            mode = "cross-modal" if self.enable_cross_modal_batches else "standard"
+            print(
+                f"✅ Ready! {len(batches)} batches created "
+                f"(epoch {self.epoch}, {mode} mode)."
+            )
+        
+        return batches
+    
+    def _invalidate_batch_cache(self) -> None:
+        self._cached_batches = None
+        self._cached_batches_epoch = None
+    
+    def __iter__(self) -> Iterator[List[int]]:
+        """
+        Generate batches of sample indices for one epoch.
+        
+        For cross-modal mode: Uses proportional sampling and cache-optimized batch ordering.
+        For standard mode: Simple sequential batching.
+        """
+        for batch in self._get_batches(log_progress=True):
             yield batch
 
     def __len__(self) -> int:
-        """Estimate number of batches"""
-        total_samples = len(self.subset_indices) if self.subset_indices is not None else len(self.dataset)
-        avg_atoms_per_sample = 500
-        return max(1, (total_samples * avg_atoms_per_sample) // self.max_atoms_per_batch)
-
+        """Exact batch count for the current epoch (matches __iter__ output)."""
+        return max(1, len(self._get_batches(log_progress=False)))
+    
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""
-        self.epoch = epoch
-        self._atom_count_cache.clear()
+        if self.epoch != epoch:
+            self.epoch = epoch
+            self._invalidate_batch_cache()
+            self._atom_count_cache.clear()
+        else:
+            self.epoch = epoch
