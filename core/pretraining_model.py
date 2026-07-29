@@ -268,7 +268,7 @@ class PretrainingESAModel(pl.LightningModule):
     # Pre-encoder masking helpers (called before forward() in each step)
     # ------------------------------------------------------------------
 
-    def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = False):
+def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = False):
         """Ratio and bond edges config for a single graph in a batch."""
         if is_coconut_dataset_type(dataset_type):
             ratio = getattr(self.config, 'coconut_mask_ratio', 0.15)
@@ -313,9 +313,25 @@ class PretrainingESAModel(pl.LightningModule):
         )
         return indices[local_indices]
 
-    def _ensure_mlm_attributes(self, batch):
+    def _ensure_mlm_attributes(self, batch, batch_idx: int = 0, is_validation: bool = False):
         """Add MLM masking on-the-fly if not already present.
-        Applies to all molecule types including proteins."""
+
+        Default: atom-level random masking for all graph types — applied
+        identically to proteins, metabolites, QM9, RNA, etc.
+
+        When `config.protein_block_mlm=True`: protein/pdb graphs switch to
+        residue-level (block) masking — all 14 atoms of a randomly chosen
+        residue are masked together. Non-protein graphs in the same batch
+        keep atom-level masking (so metabolite/QM9/RNA are never affected
+        by this flag).
+
+        Args:
+            batch_idx: Batch index — used only for deterministic val/test
+                seeding when block-MLM is enabled.
+            is_validation: True for validation/test steps; activates the
+                deterministic seed path so val_mlm_loss is stable across
+                cycles.
+        """
         if "mlm" not in self.config.pretraining_tasks:
             return
         if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
@@ -323,23 +339,74 @@ class PretrainingESAModel(pl.LightningModule):
         if not hasattr(batch, 'z') or batch.z is None:
             return
 
+        use_block_for_protein = getattr(self.config, 'protein_block_mlm', False)
+        atom_mask_ratio = getattr(self.config, 'mlm_mask_ratio', 0.15)
+        block_mask_ratio = getattr(self.config, 'protein_block_mlm_ratio', 0.15)
+        
         mask_token = 0
         z = batch.z.long()
         batch.original_types = z.clone()
         num_nodes = z.size(0)
-        mlm_mask = torch.zeros(num_nodes, dtype=torch.bool, device=z.device)
+        device = z.device
+        mlm_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
         masked_types = z.clone()
+
+        # Per-graph dtype map. PyG collates dataset_type as a list-of-strings
+        # over graphs in the batch; len == batch.num_graphs.
+        dtype_list = self._graph_dtype_list(batch)
+        protein_keys = {'pdb', 'protein'}
+
+        # Deterministic generator for val/test so the mask is stable across
+        # validation cycles. Training stays stochastic.
+        gen = None
+        if is_validation:
+            seed = int(batch_idx) * 100003 + int(getattr(self, 'current_epoch', 0))
+            gen = torch.Generator(device='cpu')
+            gen.manual_seed(seed)
+
+        def _randperm(n: int) -> torch.Tensor:
+            if gen is not None:
+                return torch.randperm(n, generator=gen).to(device)
+            return torch.randperm(n, device=device)
 
         if hasattr(batch, 'batch') and batch.batch is not None:
             graph_idx = batch.batch
             for g in graph_idx.unique().tolist():
                 node_mask = (graph_idx == g)
                 indices = torch.where(node_mask)[0]
-                if indices.size(0) > 0:
+                n = indices.size(0)
+                if n == 0:
+                    continue
+
+                g_dtype = dtype_list[g] if (dtype_list is not None and g < len(dtype_list)) else None
+                is_protein = (g_dtype is not None and str(g_dtype).lower() in protein_keys)
+                has_block_idx = (
+                    hasattr(batch, 'block_idx')
+                    and batch.block_idx is not None
+                    and batch.block_idx.numel() == num_nodes
+                )
+
+                if use_block_for_protein and is_protein and has_block_idx:
+                    # Block-mask: pick a fraction of residues, mask all their atoms.
+                    residue_ids = batch.block_idx[indices]
+                    unique_res = torch.unique(residue_ids)
+                    num_res = unique_res.size(0)
+                    if num_res == 0:
+                        continue
+                    k = max(1, int(num_res * block_mask_ratio))
+                    perm = _randperm(num_res)
+                    picked = unique_res[perm[:k]]
+                    in_picked = torch.isin(residue_ids, picked)
+                    selected = indices[in_picked]
+                    mlm_mask[selected] = True
+                    masked_types[selected] = mask_token
+                else:
+                    # Ege's COCONUT/Metabolite & legacy atom-level logic fallback
                     selected = self._select_graph_mask_indices(batch, int(g), indices, for_coord=False)
                     mlm_mask[selected] = True
                     masked_types[selected] = mask_token
         else:
+            # No batch index → treat whole tensor as single graph
             dtype = get_graph_dataset_type(getattr(batch, 'dataset_type', None), 0)
             ratio, coconut_method, num_walks = self._graph_masking_params(dtype, for_coord=False)
             bond_edge_index = getattr(batch, 'bond_edge_index', None)
@@ -358,7 +425,19 @@ class PretrainingESAModel(pl.LightningModule):
 
         batch.mlm_mask = mlm_mask
         batch.masked_types = masked_types
-        batch.z = masked_types  # encoder sees masked input
+        batch.z = masked_types
+
+    @staticmethod
+    def _graph_dtype_list(batch):
+        """Return per-graph dtype list (len = batch.num_graphs) or None."""
+        if not hasattr(batch, 'dataset_type') or batch.dataset_type is None:
+            return None
+        dt = batch.dataset_type
+        if isinstance(dt, (list, tuple)):
+            return list(dt)
+        # Single string → broadcast to num_graphs entries.
+        n = getattr(batch, 'num_graphs', 1) or 1
+        return [dt] * n
 
     def _log_coconut_masking_metrics(self, batch, batch_idx: int) -> None:
         """Log coconut-only masking diagnostics to wandb under the ``masking/`` namespace."""
@@ -538,7 +617,14 @@ class PretrainingESAModel(pl.LightningModule):
                     dtype_losses['long_range_distance'] = long_range_loss
                     dtype_total += self.config.task_weights['long_range_distance'] * long_range_loss
 
-            if "mlm" in self.config.pretraining_tasks and dtype.lower() not in ('protein', 'pdb'):
+            # Per-type MLM tracking is enabled for ALL dataset types — including
+            # protein/pdb. The previous protein skip was a leftover from older
+            # protein-loss experiments. When `protein_block_mlm` is active and
+            # the dtype is a protein, the loss is logged under the `block_mlm`
+            # task key so W&B shows e.g. `val_pdb_block_mlm_loss` distinctly
+            # from atom-level runs; RNA/metabolite/QM9 keep the plain `mlm`
+            # key since they always use atom-level masking.
+            if "mlm" in self.config.pretraining_tasks:
                 if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
                     masked_mlm = batch.mlm_mask[node_mask]
                     if masked_mlm.sum() > 0:
@@ -555,7 +641,10 @@ class PretrainingESAModel(pl.LightningModule):
                         masked_node_emb = node_embeddings[node_mask]
                         try:
                             mlm_loss = self.pretraining_tasks.mlm_loss(masked_node_emb, masked_batch)
-                            dtype_losses['mlm'] = mlm_loss
+                            is_protein_dtype = dtype.lower() in ('protein', 'pdb')
+                            block_active = getattr(self.config, 'protein_block_mlm', False)
+                            key = 'block_mlm' if (is_protein_dtype and block_active) else 'mlm'
+                            dtype_losses[key] = mlm_loss
                             dtype_total += self.config.task_weights['mlm'] * mlm_loss
                         except (AssertionError, AttributeError):
                             pass
@@ -583,7 +672,7 @@ class PretrainingESAModel(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def training_step(self, batch, batch_idx):
-        self._ensure_mlm_attributes(batch)
+        self._ensure_mlm_attributes(batch, batch_idx=batch_idx, is_validation=False)
         self._ensure_coord_denoising_attributes(batch)
         self._log_coconut_masking_metrics(batch, batch_idx)
 
@@ -665,7 +754,7 @@ class PretrainingESAModel(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        self._ensure_mlm_attributes(batch)
+        self._ensure_mlm_attributes(batch, batch_idx=batch_idx, is_validation=True)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
         losses, total_loss = self._compute_pretraining_losses(
@@ -684,10 +773,21 @@ class PretrainingESAModel(pl.LightningModule):
                 for task_name, loss_value in dtype_losses.items():
                     self.log(f"val_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
 
-        return total_loss
+        outputs = {'loss': total_loss}
+        if "mlm" in self.config.pretraining_tasks:
+            # Domain metric callbacks consume these predictions immediately.
+            # Reusing this forward avoids running the ESA backbone again in
+            # each callback.
+            outputs['mlm_preds_atomic_num'] = (
+                self.pretraining_tasks.mlm_head(node_embeddings)
+                .argmax(dim=1)
+                .detach()
+                .cpu()
+            )
+        return outputs
 
     def test_step(self, batch, batch_idx):
-        self._ensure_mlm_attributes(batch)
+        self._ensure_mlm_attributes(batch, batch_idx=batch_idx, is_validation=True)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
         losses, total_loss = self._compute_pretraining_losses(
@@ -706,7 +806,15 @@ class PretrainingESAModel(pl.LightningModule):
                 for task_name, loss_value in dtype_losses.items():
                     self.log(f"test_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
 
-        return total_loss
+        outputs = {'loss': total_loss}
+        if "mlm" in self.config.pretraining_tasks:
+            outputs['mlm_preds_atomic_num'] = (
+                self.pretraining_tasks.mlm_head(node_embeddings)
+                .argmax(dim=1)
+                .detach()
+                .cpu()
+            )
+        return outputs
 
     def on_before_optimizer_step(self, optimizer):
         total_norm = 0.0

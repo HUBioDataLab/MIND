@@ -19,6 +19,12 @@ from typing import List, Optional, Tuple
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from data_loading.adapters.base_adapter import BaseAdapter
+from data_loading.atom_position_vocab import (
+    RNA_BACKBONE_ATOMS,
+    RNA_BASE_ATOM_PRIORITY,
+    RNA_TERMINAL_ATOMS,
+    normalize_rna_position_code,
+)
 from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 
 # BioPython for reading CIF files
@@ -26,23 +32,17 @@ from Bio.PDB import MMCIFParser
 
 # Constants for 23-atom uniform representation
 # RNA backbone atoms (standard nucleotide structure)
-BACKBONE_ATOMS = ['P', 'OP1', 'OP2', 'O5\'', 'C5\'', 'C4\'', 'O4\'', 'C3\'', 'O3\'', 'C2\'', 'O2\'', 'C1\'']
+BACKBONE_ATOMS = list(RNA_BACKBONE_ATOMS)
 MAX_SIDECHAIN_ATOMS = 11  # 23 total - 12 backbone = 11 sidechain
 TOTAL_ATOMS_PER_RESIDUE = 23  # Fixed target for all nucleotides
 
-# Canonical ordering for sidechain atoms (priority-based)
-# This ensures consistent ordering across different RNA structures
-# Prioritizes base atoms (N, C) over hydrogens
-SIDECHAIN_ATOM_PRIORITY = [
-    # Purine bases (A, G) - N9, C8, N7, C6, N1, C2, N3, C4, C5
-    'N9', 'C8', 'N7', 'C6', 'N1', 'C2', 'N3', 'C4', 'C5',
-    # Pyrimidine bases (C, U) - N1, C2, N3, C4, C5, C6
-    'N1', 'C2', 'N3', 'C4', 'C5', 'C6',
-    # Amino/carbonyl groups
-    'N4', 'O4', 'N6', 'O6', 'N2', 'O2',
-    # Additional backbone-adjacent atoms
-    'N5', 'N8', 'C7'
-]
+# Public alias retained for existing imports. Standard and modified nucleotide
+# positions are defined once in the shared vocabulary module.
+SIDECHAIN_ATOM_PRIORITY = list(RNA_BASE_ATOM_PRIORITY)
+SIDECHAIN_ATOM_PRIORITY_INDEX = {
+    atom_name: index for index, atom_name in enumerate(SIDECHAIN_ATOM_PRIORITY)
+}
+TERMINAL_ATOMS = set(RNA_TERMINAL_ATOMS)
 
 # Virtual atom type (single generic type for all virtual atoms)
 # This prevents sequence leakage: model cannot infer nucleotide type from virtual atom type
@@ -136,11 +136,9 @@ class RNAAdapter(BaseAdapter):
         """
         def get_priority(atom: UniversalAtom) -> int:
             """Get priority index for atom (lower = higher priority)"""
-            try:
-                return SIDECHAIN_ATOM_PRIORITY.index(atom.pos_code)
-            except ValueError:
-                # Atom not in priority list, put at end
-                return len(SIDECHAIN_ATOM_PRIORITY)
+            return SIDECHAIN_ATOM_PRIORITY_INDEX.get(
+                atom.pos_code, len(SIDECHAIN_ATOM_PRIORITY)
+            )
         
         return sorted(atoms, key=get_priority)
 
@@ -195,6 +193,8 @@ class RNAAdapter(BaseAdapter):
         for atom in atoms:
             if atom.pos_code in BACKBONE_ATOMS:
                 backbone_atoms.append(atom)
+            elif atom.pos_code in TERMINAL_ATOMS:
+                continue
             else:
                 sidechain_atoms.append(atom)
         
@@ -403,7 +403,7 @@ class RNAAdapter(BaseAdapter):
                         uni_atom = UniversalAtom(
                             element=element,
                             position=tuple(atom.get_coord().tolist()),
-                            pos_code=atom.get_name().strip(),
+                            pos_code=normalize_rna_position_code(atom.get_name()),
                             block_idx=len(blocks),
                             atom_idx_in_block=len(block_atoms),
                             entity_idx=entity_idx

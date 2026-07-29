@@ -87,6 +87,13 @@ class PretrainingConfig:
     coconut_num_random_walks: int = 1
     log_coconut_masking_stats: bool = True  # wandb masking/* metrics for coconut/metabolite
     log_coconut_masking_frequency: int = 50  # log every N training batches (0 = every step)
+    # Protein-only block MLM: when enabled, MLM masking for protein/pdb graphs
+    # is residue-level (all 14 atoms of selected residues masked) instead of
+    # atom-level random. Other molecule types (metabolite, QM9, RNA, ...) keep
+    # the atom-level behavior. Validation/test use a deterministic seed so the
+    # block mask is stable across val cycles.
+    protein_block_mlm: bool = False
+    protein_block_mlm_ratio: float = 0.15
 
     # Coordinate denoising (predict added noise from node embeddings; SE(3)-invariant loss)
     coordinate_denoising_noise_std: float = 0.1

@@ -71,9 +71,19 @@ def create_blocks(self, raw_item: Path) -> List[UniversalBlock]:
     
     blocks: List[UniversalBlock] = []
     
+    # Per-chain entity indices (prevents false cross-chain sequence edges)
+    chain_to_entity: dict = {}
+    next_entity_idx: int = 0
+    
     # Model -> Chain -> Residue hierarchy
     for model in structure:
         for chain in model:
+            chain_id = chain.get_id()
+            if chain_id not in chain_to_entity:
+                chain_to_entity[chain_id] = next_entity_idx
+                next_entity_idx += 1
+            chain_entity = chain_to_entity[chain_id]
+            
             for residue in chain:
                 # Each amino acid becomes one block
                 ...
@@ -99,7 +109,7 @@ for atom in residue:  # ALA residue atoms
         pos_code=atom.get_name(),  # 'N', 'CA', 'C', 'O', 'CB'
         block_idx=len(blocks),     # 0 (ALA is first block)
         atom_idx_in_block=len(block_atoms),  # 0, 1, 2, 3, 4
-        entity_idx=0               # Protein = entity 0  (This specifies the data type (RNA, metabolite, small molecules, protein).)
+        entity_idx=chain_entity    # Per-chain entity index (Chain A=0, Chain B=1, ...)
     )
     block_atoms.append(uni_atom)
 ```
@@ -164,10 +174,11 @@ universal_molecule = UniversalMolecule(
 ```
 
 **IMPORTANT NOTE - entity_idx:**
-- `entity_idx=0`: All atoms belong to the protein (single entity)
-- For protein-ligand complex: protein atoms would have `entity_idx=0`, ligand atoms `entity_idx=1`
+- Each polypeptide chain gets a unique `entity_idx` (Chain A=0, Chain B=1, etc.)
+- This prevents false sequence edges (Tier 1) across chain boundaries in multi-chain proteins
+- Heteroatoms (ligands, ions) get a separate `entity_idx` distinct from all protein chains
 - In batch, different proteins are distinguished by `batch` tensor, NOT by `entity_idx`
-- `entity_idx` is for distinguishing multiple chemical entities WITHIN a single complex
+- `entity_idx` is for distinguishing multiple entities WITHIN a single complex (chains, ligands)
 
 ---
 
@@ -227,7 +238,8 @@ block_indices = torch.tensor([atom.block_idx for atom in atoms], dtype=torch.lon
 entity_indices = torch.tensor([atom.entity_idx for atom in atoms], dtype=torch.long)
 # Shape: [9]
 # entity_indices = torch.tensor([0, 0, 0, 0, 0, 0, 0, 0, 0])
-#                               All protein (entity 0)
+#                               All same chain (entity 0)
+# For multi-chain: Chain A atoms=0, Chain B atoms=1, etc.
 
 pos_codes = [atom.pos_code for atom in atoms]
 # pos_codes = ['N', 'CA', 'C', 'O', 'CB', 'N', 'CA', 'C', 'O']

@@ -128,6 +128,55 @@ def process_single_pkl_to_pyg(args_tuple) -> str:
 
     return f"✅ Created {dataset_type.upper()} dataset: {len(dataset)} samples -> {dataset.processed_paths[0]}"
 
+# --- Parallel per-molecule conversion (used by process()) ---------------------
+# Global per-worker converter, initialized once per process to avoid repeatedly
+# rebuilding the config-only helper instance.
+_WORKER_CONVERTER = None
+
+
+def _init_conversion_worker(config: dict) -> None:
+    """ProcessPool initializer: build a lightweight, config-only converter.
+
+    We bypass InMemoryDataset.__init__ (which would load/process data) via
+    object.__new__ and just set the attributes the conversion methods read.
+    The conversion logic is identical across all OptimizedUniversal* subclasses,
+    so the base class is sufficient.
+    """
+    global _WORKER_CONVERTER
+    # Each worker process is single-threaded for torch ops; parallelism comes
+    # from the process pool. Without this, torch_cluster's radius_graph and BLAS
+    # spawn one thread pool per worker, massively oversubscribing the CPU
+    # (context-switch thrash) and running SLOWER than the serial baseline.
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    obj = object.__new__(OptimizedUniversalDataset)
+    for key, val in config.items():
+        setattr(obj, key, val)
+    # pre_filter / pre_transform are not picklable in general; conversion path
+    # in the chunk pipeline does not use them.
+    obj.pre_filter = None
+    obj.pre_transform = None
+    _WORKER_CONVERTER = obj
+
+
+def _convert_one_molecule(mol):
+    """ProcessPool worker: convert a single molecule, returning (data, reason).
+
+    Returns (Data, None) on success, (None, reason_str) on skip/failure so the
+    parent can keep the original skip-accounting and first-fail diagnostics.
+    """
+    conv = _WORKER_CONVERTER
+    try:
+        pyg_data = conv._create_pyg_data_object(mol)
+        if pyg_data is not None:
+            return pyg_data, None
+        return None, conv._diagnose_skip(mol)
+    except Exception as e:  # noqa: BLE001 - mirror original broad catch
+        return None, f"Exception: {e}"
+
+
 class OptimizedUniversalDataset(InMemoryDataset):
     """
     Universal Dataset using InMemoryDataset for tensor caching.
@@ -241,24 +290,67 @@ class OptimizedUniversalDataset(InMemoryDataset):
         if self.max_samples is not None:
             molecule_iterator = islice(molecule_iterator, self.max_samples)
 
-        # 3. Convert all molecules to PyG Data objects
+        # 3. Convert all molecules to PyG Data objects (parallelized).
+        #    Order is preserved (executor.map / ordered collection), so the
+        #    collated dataset is deterministic w.r.t. the input molecule order.
+        molecules = list(molecule_iterator)
+
         data_list: List[Data] = []
         skipped_count = 0
         first_fail_reason: Optional[str] = None
-        for mol in tqdm(molecule_iterator, desc="Converting molecules"):
-            try:
-                pyg_data = self._create_pyg_data_object(mol)
+
+        cpu = os.cpu_count() or 2
+        num_workers = max(1, min(16, cpu - 2))
+        # Don't spin up more workers than molecules.
+        num_workers = max(1, min(num_workers, len(molecules)))
+
+        worker_config = {
+            "universal_cache_path": self.universal_cache_path,
+            "max_samples": self.max_samples,
+            "molecule_max_atoms": self.molecule_max_atoms,
+            "cutoff_distance": self.cutoff_distance,
+            "max_neighbors": self.max_neighbors,
+            "use_hybrid_edges": self.use_hybrid_edges,
+            "sequence_neighbors_k": self.sequence_neighbors_k,
+            "max_spatial_neighbors": self.max_spatial_neighbors,
+            "num_random_edges": self.num_random_edges,
+            "random_edge_min_distance": self.random_edge_min_distance,
+        }
+
+        if num_workers == 1:
+            # Fall back to in-process conversion (e.g. tiny inputs).
+            _init_conversion_worker(worker_config)
+            results = (
+                _convert_one_molecule(mol)
+                for mol in tqdm(molecules, desc="Converting molecules")
+            )
+            for pyg_data, reason in results:
                 if pyg_data is not None:
                     data_list.append(pyg_data)
                 else:
                     if first_fail_reason is None:
-                        first_fail_reason = self._diagnose_skip(mol)
+                        first_fail_reason = reason
                     skipped_count += 1
-            except Exception as e:
-                if first_fail_reason is None:
-                    first_fail_reason = f"Exception: {e}"
-                warnings.warn(f"Skipping molecule {getattr(mol, 'id', '?')}: {e}", UserWarning)
-                skipped_count += 1
+        else:
+            print(f"🚀 Converting with {num_workers} parallel workers...")
+            # chunksize amortizes IPC; map preserves input order.
+            chunksize = max(1, len(molecules) // (num_workers * 8))
+            with ProcessPoolExecutor(
+                max_workers=num_workers,
+                initializer=_init_conversion_worker,
+                initargs=(worker_config,),
+            ) as executor:
+                for pyg_data, reason in tqdm(
+                    executor.map(_convert_one_molecule, molecules, chunksize=chunksize),
+                    total=len(molecules),
+                    desc="Converting molecules",
+                ):
+                    if pyg_data is not None:
+                        data_list.append(pyg_data)
+                    else:
+                        if first_fail_reason is None:
+                            first_fail_reason = reason
+                        skipped_count += 1
 
         if not data_list:
             msg = (
@@ -339,35 +431,56 @@ class OptimizedUniversalDataset(InMemoryDataset):
         # Find CA atoms only
         ca_mask = torch.tensor([code == 'CA' for code in pos_codes], dtype=torch.bool)
         ca_indices = torch.where(ca_mask)[0]
-        
-        if len(ca_indices) < 2:
+
+        n_ca = len(ca_indices)
+        if n_ca < 2:
             return torch.empty((2, 0), dtype=torch.long)
-        
+
         ca_block_indices = block_indices[ca_indices]
         ca_entity_indices = entity_indices[ca_indices]
-        
-        edges = []
-        for i, ca_idx in enumerate(ca_indices):
-            current_block = ca_block_indices[i]
-            current_entity = ca_entity_indices[i]
-            
-            # Connect to next k neighbors in sequence
-            for offset in range(1, k + 1):
-                if i + offset < len(ca_indices):
-                    neighbor_block = ca_block_indices[i + offset]
-                    neighbor_entity = ca_entity_indices[i + offset]
-                    
-                    # Only connect within same entity and sequential blocks
-                    if (neighbor_entity == current_entity and 
-                        neighbor_block == current_block + offset):
-                        neighbor_idx = ca_indices[i + offset]
-                        edges.append([ca_idx.item(), neighbor_idx.item()])
-                        edges.append([neighbor_idx.item(), ca_idx.item()])  # Bidirectional
-        
-        if not edges:
+
+        # Vectorized equivalent of the original nested loop. The original appends
+        # edges ordered by (i, offset, direction): for each source CA i, for each
+        # offset 1..k, a forward edge [i, i+offset] then a backward edge
+        # [i+offset, i]. We reproduce that exact ordering so edge_index (and the
+        # positionally-computed edge_attr) are bit-identical to the loop version.
+        #
+        # Build the (i, offset) pairs in row-major order over i then offset.
+        i_idx = torch.arange(n_ca).unsqueeze(1).expand(n_ca, k)          # [N, k]
+        offsets = torch.arange(1, k + 1).unsqueeze(0).expand(n_ca, k)    # [N, k]
+        j_idx = i_idx + offsets                                          # neighbor positions
+
+        flat_i = i_idx.reshape(-1)
+        flat_j = j_idx.reshape(-1)
+        flat_off = offsets.reshape(-1)
+
+        # Bounds: i + offset < n_ca
+        in_bounds = flat_j < n_ca
+        if not bool(in_bounds.any()):
             return torch.empty((2, 0), dtype=torch.long)
-        
-        return torch.tensor(edges, dtype=torch.long).t()
+
+        flat_i = flat_i[in_bounds]
+        flat_j = flat_j[in_bounds]
+        flat_off = flat_off[in_bounds]
+
+        # Same-entity and sequential-block constraints
+        same_entity = ca_entity_indices[flat_j] == ca_entity_indices[flat_i]
+        seq_block = ca_block_indices[flat_j] == (ca_block_indices[flat_i] + flat_off)
+        valid = same_entity & seq_block
+
+        flat_i = flat_i[valid]
+        flat_j = flat_j[valid]
+        if flat_i.numel() == 0:
+            return torch.empty((2, 0), dtype=torch.long)
+
+        src = ca_indices[flat_i]
+        dst = ca_indices[flat_j]
+
+        # Interleave forward [src,dst] then backward [dst,src] to match the
+        # original append order exactly.
+        row = torch.stack([src, dst], dim=1).reshape(-1)
+        col = torch.stack([dst, src], dim=1).reshape(-1)
+        return torch.stack([row, col], dim=0).to(torch.long)
     
     def _build_random_edges(
         self,
@@ -395,48 +508,68 @@ class OptimizedUniversalDataset(InMemoryDataset):
         # Find CA atoms
         ca_mask = torch.tensor([code == 'CA' for code in pos_codes], dtype=torch.bool)
         ca_indices = torch.where(ca_mask)[0]
-        
-        if len(ca_indices) < 2 or num_random == 0:
+
+        n_ca = len(ca_indices)
+        if n_ca < 2 or num_random == 0:
             return torch.empty((2, 0), dtype=torch.long)
-        
+
         ca_positions = positions[ca_indices]
-        ca_block_indices = block_indices[ca_indices]
-        
-        edges = []
-        for i, ca_idx in enumerate(ca_indices):
-            current_pos = ca_positions[i:i+1]
-            current_block = ca_block_indices[i]
-            
-            # Calculate distances to all other CA atoms
-            distances = torch.norm(ca_positions - current_pos, dim=1)
-            
-            # Filter: exclude self and close neighbors (below min_distance)
-            valid_mask = (distances >= min_distance) & (torch.arange(len(ca_indices)) != i)
-            valid_indices = torch.where(valid_mask)[0]
-            
-            if len(valid_indices) == 0:
+
+        # Vectorized version of the original per-CA inverse-distance^3 sampling.
+        #
+        # EQUIVALENT-NOT-IDENTICAL: the original drew one torch.multinomial per CA
+        # from global RNG state, so the exact sampled neighbors are not
+        # reproducible. Here we (a) compute the full pairwise distance matrix once
+        # with torch.cdist instead of recomputing per CA, (b) build the same
+        # inverse-distance^3 weights with the same min_distance / self-exclusion
+        # mask, and (c) draw all per-CA samples in a single batched
+        # torch.multinomial seeded by a fixed generator for reproducibility.
+        # The min_distance constraint and the per-CA edge count match the
+        # original exactly; only which specific long-range partners get sampled
+        # can differ.
+        dist = torch.cdist(ca_positions, ca_positions)  # [N, N]
+
+        eye = torch.eye(n_ca, dtype=torch.bool)
+        valid_mask = (dist >= min_distance) & (~eye)        # [N, N]
+        valid_counts = valid_mask.sum(dim=1)                # [N]
+
+        # Inverse distance^3 weights, zeroed where invalid.
+        weights = 1.0 / (dist ** 3 + 1e-6)
+        weights = weights * valid_mask.to(weights.dtype)
+        # Normalize per-row (rows with no valid entries stay all-zero and are
+        # skipped below). Matches original per-CA normalization.
+        row_sums = weights.sum(dim=1, keepdim=True)
+        safe_sums = torch.where(row_sums > 0, row_sums, torch.ones_like(row_sums))
+        weights = weights / safe_sums
+
+        # Per-CA number of samples = min(num_random, valid_count), as in original.
+        n_samples = torch.clamp(valid_counts, max=num_random)
+
+        gen = torch.Generator()
+        gen.manual_seed(0)
+
+        src_list = []
+        dst_list = []
+        for i in range(n_ca):
+            k_i = int(n_samples[i].item())
+            if k_i == 0:
                 continue
-            
-            valid_distances = distances[valid_indices]
-            
-            # Inverse distance³ weighting (prevents division by zero with min_distance filter)
-            weights = 1.0 / (valid_distances ** 3 + 1e-6)
-            weights = weights / weights.sum()  # Normalize
-            
-            # Sample random neighbors
-            num_to_sample = min(num_random, len(valid_indices))
-            sampled_idx = torch.multinomial(weights, num_to_sample, replacement=False)
-            sampled_neighbors = valid_indices[sampled_idx]
-            
-            for neighbor_local_idx in sampled_neighbors:
-                neighbor_global_idx = ca_indices[neighbor_local_idx]
-                edges.append([ca_idx.item(), neighbor_global_idx.item()])
-                edges.append([neighbor_global_idx.item(), ca_idx.item()])  # Bidirectional
-        
-        if not edges:
+            sampled_local = torch.multinomial(
+                weights[i], k_i, replacement=False, generator=gen
+            )
+            neighbors = ca_indices[sampled_local]
+            ca_i = ca_indices[i]
+            # Interleave forward then backward to match original append order.
+            si = ca_i.repeat(k_i)
+            src_list.append(torch.stack([si, neighbors], dim=1).reshape(-1))
+            dst_list.append(torch.stack([neighbors, si], dim=1).reshape(-1))
+
+        if not src_list:
             return torch.empty((2, 0), dtype=torch.long)
-        
-        return torch.tensor(edges, dtype=torch.long).t()
+
+        row = torch.cat(src_list)
+        col = torch.cat(dst_list)
+        return torch.stack([row, col], dim=0).to(torch.long)
     
     def _filter_duplicate_edges(
         self, 
@@ -457,22 +590,21 @@ class OptimizedUniversalDataset(InMemoryDataset):
             return edge_index_main
         if edge_index_to_remove.size(1) == 0:
             return edge_index_main
-        
-        # Convert to set of tuples for fast lookup
-        edges_to_remove_set = set(
-            zip(edge_index_to_remove[0].tolist(), edge_index_to_remove[1].tolist())
-        )
-        
-        # Filter main edges
-        filtered_edges = [
-            [src, dst] for src, dst in zip(edge_index_main[0].tolist(), edge_index_main[1].tolist())
-            if (src, dst) not in edges_to_remove_set
-        ]
-        
-        if not filtered_edges:
+
+        # Vectorized membership test using unique integer keys src*N + dst.
+        # N must exceed the largest node index so (src, dst) pairs map 1:1.
+        # Order of the kept edges in edge_index_main is preserved exactly,
+        # matching the original list-comprehension filter.
+        main = edge_index_main.to(torch.long)
+        rem = edge_index_to_remove.to(torch.long)
+        max_node = int(torch.max(torch.stack([main.max(), rem.max()]))) + 1
+        n = max_node
+        main_keys = main[0] * n + main[1]
+        rem_keys = rem[0] * n + rem[1]
+        keep_mask = ~torch.isin(main_keys, rem_keys)
+        if not bool(keep_mask.any()):
             return torch.empty((2, 0), dtype=torch.long)
-        
-        return torch.tensor(filtered_edges, dtype=torch.long).t()
+        return main[:, keep_mask]
     
     def _build_hybrid_edges(
         self,

@@ -140,6 +140,7 @@ def map_lba_position_codes_to_get(pos_code: str) -> str:
         'CZ': 'P',     # Zeta carbon -> P
         'CZ2': 'P',    # Zeta carbon 2 -> P
         'CZ3': 'P',    # Zeta carbon 3 -> P
+        'CH2': 'P',    # Eta carbon (TRP terminal ring position) -> P
         
         # Protein side chain atoms - Nitrogen
         'NZ': 'P',     # Nitrogen side chain -> P
@@ -160,6 +161,10 @@ def map_lba_position_codes_to_get(pos_code: str) -> str:
         'OD1': 'D',    # Oxygen delta 1 -> D
         'OD2': 'D',    # Oxygen delta 2 -> D
         'OH': 'D',     # Oxygen eta -> D
+
+        # Protein side chain atoms - Sulfur
+        'SG': 'Z',     # Sulfur gamma -> gamma-position code
+        'SD': 'H',     # Sulfur delta -> delta-position code
         
        
         # Default fallback

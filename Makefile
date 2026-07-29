@@ -26,19 +26,31 @@ LOG ?=
 ifeq ($(CONFIG),m)
   CONFIG_FILE := core/pretraining_config_multidomain.yaml
   CONFIG_TAG := multidomain
+  CONFIG_IS_FAST := 0
 else ifeq ($(CONFIG),f)
   CONFIG_FILE := core/pretraining_config_fast.yaml
   CONFIG_TAG := fast
+  CONFIG_IS_FAST := 1
 else
   CONFIG_FILE := core/$(CONFIG).yaml
   CONFIG_TAG := $(CONFIG)
+  CONFIG_IS_FAST := 0
 endif
 
-# Default log name if not provided
+# Log directory: logs/<MonthYear>/  e.g. logs/June2026/
+LOG_MONTH_DIR := logs/$(shell date +%B%Y)
+
+# Log filename: <name><datetime>.log or <name>fast<datetime>.log
+_LOG_DATETIME := $(shell date +%Y%m%d_%H%M%S)
 ifeq ($(LOG),)
-  LOG_FILE := train_$(CONFIG_TAG).log
+  _LOG_BASE := $(CONFIG_TAG)
 else
-  LOG_FILE := $(LOG).log
+  _LOG_BASE := $(LOG)
+endif
+ifeq ($(CONFIG_IS_FAST),1)
+  LOG_FILE := $(LOG_MONTH_DIR)/$(_LOG_BASE)fast_$(_LOG_DATETIME).log
+else
+  LOG_FILE := $(LOG_MONTH_DIR)/$(_LOG_BASE)_$(_LOG_DATETIME).log
 endif
 
 MIN_VRAM_MB ?= 15000
@@ -84,6 +96,7 @@ train:
 	@echo "  Config: $(CONFIG_FILE)"
 	@echo "  Log:    $(LOG_FILE)"
 	@echo "====================="
+	@mkdir -p $(LOG_MONTH_DIR)
 	$(CONDA_RUN) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -m core.train_pretrain \
 		--config-yaml-path $(CONFIG_FILE) \
 		> $(LOG_FILE) 2>&1 &
@@ -143,7 +156,7 @@ else
 endif
 
 logs:
-	@ls -lt *.log 2>/dev/null | head -5 || echo "No log files found."
+	@find logs/ -name "*.log" -printf "%T@ %p\n" 2>/dev/null | sort -rn | head -10 | awk '{print $$2}' || echo "No log files found."
 
 help:
 	@echo "MIND Commands:"
