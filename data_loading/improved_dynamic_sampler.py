@@ -44,7 +44,9 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         shuffle_within_chunk: bool = True,
         seed: int = 42,
         enable_cross_modal_batches: bool = False,
-        cycle_short_domains: bool = True
+        cycle_short_domains: bool = True,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
     ):
         """
         Initialize ImprovedDynamicBatchSampler
@@ -57,6 +59,8 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             seed: Random seed for reproducibility
             enable_cross_modal_batches: Mix different dataset types in batches
             cycle_short_domains: Reuse shorter domain samples in cross-modal mode
+            num_replicas: Number of processes participating in distributed training
+            rank: Rank of the current process within num_replicas
 
         Raises:
             ValueError: If metadata is not loaded
@@ -90,6 +94,21 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         self.cycle_short_domains = cycle_short_domains
         self.epoch = 0
         self.seed = seed
+
+        # Multi-GPU / Distributed support
+        if num_replicas is None:
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                num_replicas = torch.distributed.get_world_size()
+            else:
+                num_replicas = 1
+        if rank is None:
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                rank = torch.distributed.get_rank()
+            else:
+                rank = 0
+
+        self.num_replicas = num_replicas
+        self.rank = rank
 
         self._cached_batches: Optional[List[List[int]]] = None
         self._cached_batches_epoch: Optional[int] = None
@@ -376,7 +395,8 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             batches.append(current_batch)
 
         return batches
-def _build_batches(self) -> List[List[int]]:
+
+    def _build_batches(self) -> List[List[int]]:
         """Build the batch list for the current epoch (metadata-based atom packing)."""
         samples_by_chunk = self._organize_samples_by_chunk()
         if self.enable_cross_modal_batches:
@@ -413,14 +433,19 @@ def _build_batches(self) -> List[List[int]]:
         self._cached_batches_epoch = None
     
     def __iter__(self) -> Iterator[List[int]]:
-        """Generate batches for one epoch"""
-        batches = self._get_batches(log_progress=True)
+        """Generate batches for one epoch (rank-aware for multi-GPU)"""
+        batches = self._get_batches(log_progress=(self.rank == 0))
+        if self.num_replicas > 1:
+            batches = batches[self.rank::self.num_replicas]
         for batch in batches:
             yield batch
 
     def __len__(self) -> int:
-        """Exact batch count for the current epoch (matches __iter__ output)."""
-        return max(1, len(self._get_batches(log_progress=False)))
+        """Exact batch count for the current epoch and rank (matches __iter__ output)."""
+        batches = self._get_batches(log_progress=False)
+        if self.num_replicas > 1:
+            batches = batches[self.rank::self.num_replicas]
+        return max(1, len(batches))
     
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""

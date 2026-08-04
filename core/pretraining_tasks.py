@@ -170,6 +170,9 @@ class PretrainingTasks(nn.Module):
         mask = data.mlm_mask
         original_types = data.original_types
 
+        if mask is None or mask.sum() == 0:
+            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+
         logits = self.mlm_head(node_embeddings)
         loss = F.cross_entropy(logits[mask], original_types[mask], reduction='mean')
         return loss

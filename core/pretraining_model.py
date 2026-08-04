@@ -268,7 +268,7 @@ class PretrainingESAModel(pl.LightningModule):
     # Pre-encoder masking helpers (called before forward() in each step)
     # ------------------------------------------------------------------
 
-def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = False):
+    def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = False):
         """Ratio and bond edges config for a single graph in a batch."""
         if is_coconut_dataset_type(dataset_type):
             ratio = getattr(self.config, 'coconut_mask_ratio', 0.15)
@@ -426,6 +426,7 @@ def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = F
         batch.mlm_mask = mlm_mask
         batch.masked_types = masked_types
         batch.z = masked_types
+        batch.x = masked_types
 
     @staticmethod
     def _graph_dtype_list(batch):
@@ -762,8 +763,8 @@ def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = F
         )
 
         for task_name, loss_value in losses.items():
-            self.log(f"val_{task_name}_loss", loss_value, on_epoch=True, logger=True)
-        self.log("val_total_loss", total_loss, on_epoch=True, logger=True)
+            self.log(f"val_{task_name}_loss", loss_value, on_epoch=True, logger=True, sync_dist=True)
+        self.log("val_total_loss", total_loss, on_epoch=True, logger=True, sync_dist=True)
 
         if self.config.compute_per_type_losses:
             type_losses = self._compute_per_type_losses(
@@ -771,7 +772,7 @@ def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = F
             )
             for dtype, dtype_losses in type_losses.items():
                 for task_name, loss_value in dtype_losses.items():
-                    self.log(f"val_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
+                    self.log(f"val_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True, sync_dist=True)
 
         outputs = {'loss': total_loss}
         if "mlm" in self.config.pretraining_tasks:
@@ -795,8 +796,8 @@ def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = F
         )
 
         for task_name, loss_value in losses.items():
-            self.log(f"test_{task_name}_loss", loss_value, on_epoch=True, logger=True)
-        self.log("test_total_loss", total_loss, on_epoch=True, logger=True)
+            self.log(f"test_{task_name}_loss", loss_value, on_epoch=True, logger=True, sync_dist=True)
+        self.log("test_total_loss", total_loss, on_epoch=True, logger=True, sync_dist=True)
 
         if self.config.compute_per_type_losses:
             type_losses = self._compute_per_type_losses(

@@ -62,7 +62,9 @@ class ChunkAwareSampler(Sampler):
         dataset,
         shuffle_chunks: bool = True,
         shuffle_within_chunk: bool = True,
-        subset_indices: list = None
+        subset_indices: list = None,
+        num_replicas: int = None,
+        rank: int = None
     ):
         """
         Initialize ChunkAwareSampler
@@ -72,6 +74,8 @@ class ChunkAwareSampler(Sampler):
             shuffle_chunks: Whether to shuffle chunk order each epoch
             shuffle_within_chunk: Whether to shuffle samples within each chunk
             subset_indices: Optional list of indices to sample from (for train/val/test splits)
+            num_replicas: Number of processes participating in distributed training
+            rank: Rank of the current process within num_replicas
         """
         # Handle Subset from random_split
         from torch.utils.data import Subset
@@ -85,6 +89,20 @@ class ChunkAwareSampler(Sampler):
         self.shuffle_chunks = shuffle_chunks
         self.shuffle_within_chunk = shuffle_within_chunk
         self.epoch = 0
+
+        if num_replicas is None:
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                num_replicas = torch.distributed.get_world_size()
+            else:
+                num_replicas = 1
+        if rank is None:
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                rank = torch.distributed.get_rank()
+            else:
+                rank = 0
+
+        self.num_replicas = num_replicas
+        self.rank = rank
         
         # Validate dataset has required attributes
         if not hasattr(self.dataset, 'chunk_pt_files'):
@@ -146,13 +164,17 @@ class ChunkAwareSampler(Sampler):
             # Add to total indices
             indices.extend(chunk_indices)
         
+        if self.num_replicas > 1:
+            indices = indices[self.rank::self.num_replicas]
+
         return iter(indices)
     
     def __len__(self) -> int:
-        """Return total number of samples"""
-        if self.subset_indices is not None:
-            return len(self.subset_indices)
-        return len(self.dataset)
+        """Return total number of samples for current rank"""
+        total = len(self.subset_indices) if self.subset_indices is not None else len(self.dataset)
+        if self.num_replicas > 1:
+            total = len(range(self.rank, total, self.num_replicas))
+        return total
     
     def set_epoch(self, epoch: int):
         """
