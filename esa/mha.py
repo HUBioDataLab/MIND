@@ -70,6 +70,8 @@ class MAB(nn.Module):
 
 
         if adj_mask is not None:
+            if adj_mask.device != Q.device:
+                adj_mask = adj_mask.to(Q.device)
             adj_mask = adj_mask.expand(-1, self.num_heads, -1, -1)
 
         if self.xformers_or_torch_attn == "xformers":

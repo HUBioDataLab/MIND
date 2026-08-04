@@ -66,7 +66,9 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
         subset_indices: List[int] = None,
         seed: int = 42,
         enable_cross_modal_batches: bool = False,
-        cycle_short_domains: bool = True
+        cycle_short_domains: bool = True,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
     ):
         """
         Initialize DynamicChunkAwareBatchSampler
@@ -80,6 +82,8 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
             seed: Random seed for reproducibility
             enable_cross_modal_batches: If True, mix different dataset types in same batch
             cycle_short_domains: Reuse shorter domain samples in cross-modal mode
+            num_replicas: Number of processes participating in distributed training
+            rank: Rank of the current process within num_replicas
         """
         # Handle Subset from random_split
         from torch.utils.data import Subset
@@ -103,6 +107,20 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
         self.cycle_short_domains = cycle_short_domains
         self.epoch = 0
         self.seed = seed
+
+        if num_replicas is None:
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                num_replicas = torch.distributed.get_world_size()
+            else:
+                num_replicas = 1
+        if rank is None:
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                rank = torch.distributed.get_rank()
+            else:
+                rank = 0
+
+        self.num_replicas = num_replicas
+        self.rank = rank
 
         self._cached_batches: Optional[List[List[int]]] = None
         self._cached_batches_epoch: Optional[int] = None
@@ -337,8 +355,8 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                 indices.extend(chunk_indices)
 
             return indices
-          
-def _build_batches(self) -> List[List[int]]:
+
+    def _build_batches(self) -> List[List[int]]:
         """Pre-compute all batches for the current epoch."""
         all_indices = self._get_chunk_indices()
 
@@ -460,17 +478,20 @@ def _build_batches(self) -> List[List[int]]:
     
     def __iter__(self) -> Iterator[List[int]]:
         """
-        Generate batches of sample indices for one epoch.
-        
-        For cross-modal mode: Uses proportional sampling and cache-optimized batch ordering.
-        For standard mode: Simple sequential batching.
+        Generate batches of sample indices for one epoch (rank-aware for multi-GPU).
         """
-        for batch in self._get_batches(log_progress=True):
+        batches = self._get_batches(log_progress=(self.rank == 0))
+        if self.num_replicas > 1:
+            batches = batches[self.rank::self.num_replicas]
+        for batch in batches:
             yield batch
 
     def __len__(self) -> int:
-        """Exact batch count for the current epoch (matches __iter__ output)."""
-        return max(1, len(self._get_batches(log_progress=False)))
+        """Exact batch count for the current epoch and rank (matches __iter__ output)."""
+        batches = self._get_batches(log_progress=False)
+        if self.num_replicas > 1:
+            batches = batches[self.rank::self.num_replicas]
+        return max(1, len(batches))
     
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""

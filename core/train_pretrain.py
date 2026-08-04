@@ -793,7 +793,17 @@ def train_universal_pretraining(
     val_check_interval = getattr(config, 'val_check_interval', 0.25)
     log_every_n_steps = getattr(config, 'log_every_n_steps', 1)
 
-    # Create trainer with ESA optimizations
+    devices = getattr(config, 'devices', 1)
+    strategy = getattr(config, 'strategy', 'auto')
+
+    # DDP Strategy setup
+    if strategy == "ddp" or (isinstance(devices, int) and devices > 1) or (isinstance(devices, (list, tuple)) and len(devices) > 1):
+        from pytorch_lightning.strategies import DDPStrategy
+        strategy = DDPStrategy(find_unused_parameters=True)
+
+    print(f"⚙️ Multi-GPU Strategy: {strategy} | Devices: {devices}")
+
+    # Create trainer with ESA optimizations and Multi-GPU support
     trainer = pl.Trainer(
         max_epochs=config.max_epochs,
         callbacks=callbacks,
@@ -801,7 +811,9 @@ def train_universal_pretraining(
         gradient_clip_val=config.gradient_clip_val,
         precision="bf16-mixed" if config.use_bfloat16 else "32",
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
+        devices=devices,
+        strategy=strategy,
+        use_distributed_sampler=False,
         num_sanity_val_steps=getattr(config, 'num_sanity_val_steps', 0),
         log_every_n_steps=log_every_n_steps,
         val_check_interval=val_check_interval,
@@ -907,6 +919,8 @@ def main():
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum number of samples to use")
     parser.add_argument("--max-epochs", type=int, default=None, help="Maximum number of epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
+    parser.add_argument("--devices", type=str, default=None, help="Number of GPUs or device IDs (e.g. 2, '0,1,2', or 'auto')")
+    parser.add_argument("--strategy", type=str, default=None, help="Multi-GPU strategy (e.g. 'ddp', 'ddp_spawn', 'auto')")
     parser.add_argument("--output-dir", type=str, default="./outputs/universal_pretrain", help="Output directory")
 
     args = parser.parse_args()
@@ -928,6 +942,18 @@ def main():
 
     if args.batch_size is not None:
         config_dict['batch_size'] = args.batch_size
+
+    if args.devices is not None:
+        # Convert numeric string to int if possible (e.g. "4" -> 4)
+        if args.devices.isdigit():
+            config_dict['devices'] = int(args.devices)
+        elif ',' in args.devices:
+            config_dict['devices'] = [int(x.strip()) for x in args.devices.split(',')]
+        else:
+            config_dict['devices'] = args.devices
+
+    if args.strategy is not None:
+        config_dict['strategy'] = args.strategy
 
     # Create config object
     config = create_pretraining_config(**config_dict)
