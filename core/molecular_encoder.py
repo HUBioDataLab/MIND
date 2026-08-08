@@ -100,11 +100,14 @@ class UniversalMolecularEncoder(nn.Module):
 
         device = atomic_numbers.device
 
-        atom_emb = self.atom_embedding(atomic_numbers)
+        if not hasattr(self, '_period_lut') or self._period_lut.device != device:
+            period_lut = torch.zeros(128, dtype=torch.long, device=device)
+            for atomic_num, period in period_map.items():
+                period_lut[atomic_num] = period
+            self.register_buffer('_period_lut', period_lut, persistent=False)
 
-        periods = torch.zeros_like(atomic_numbers)
-        for atomic_num, period in period_map.items():
-            periods[atomic_numbers == atomic_num] = period
+        atom_emb = self.atom_embedding(atomic_numbers)
+        periods = self._period_lut[atomic_numbers]
         period_emb = self.period_embedding(periods)
 
         combined_features = torch.cat([
@@ -139,17 +142,21 @@ class UniversalMolecularEncoder(nn.Module):
             coordination_sparse.scatter_add_(0, unique_src, torch.ones_like(unique_src, dtype=torch.float))
             coordination_sparse.scatter_add_(0, unique_dst, torch.ones_like(unique_dst, dtype=torch.float))
 
-            coordination_dense = torch.zeros(batch_size, max_nodes, device=device)
-            node_idx = 0
-            for graph_idx in range(batch_size):
-                nodes_in_graph = (batch_idx == graph_idx).sum().item()
-                if nodes_in_graph > 0:
-                    end_idx = node_idx + nodes_in_graph
-                    actual_nodes = min(nodes_in_graph, max_nodes)
-                    coordination_dense[graph_idx, :actual_nodes] = coordination_sparse[node_idx:node_idx + actual_nodes]
-                node_idx += nodes_in_graph
+            if getattr(self.config, 'use_vectorized_geometric_features', True):
+                coordination_dense, _ = to_dense_batch(coordination_sparse, batch_idx, fill_value=0, max_num_nodes=max_nodes)
+                return coordination_dense
+            else:
+                coordination_dense = torch.zeros(batch_size, max_nodes, device=device)
+                node_idx = 0
+                for graph_idx in range(batch_size):
+                    nodes_in_graph = (batch_idx == graph_idx).sum().item()
+                    if nodes_in_graph > 0:
+                        end_idx = node_idx + nodes_in_graph
+                        actual_nodes = min(nodes_in_graph, max_nodes)
+                        coordination_dense[graph_idx, :actual_nodes] = coordination_sparse[node_idx:node_idx + actual_nodes]
+                    node_idx += nodes_in_graph
 
-            return coordination_dense
+                return coordination_dense
         else:
             src, dst = edge_index[0], edge_index[1]
             unique_edge_mask = src < dst
@@ -192,32 +199,49 @@ class UniversalMolecularEncoder(nn.Module):
 
         num_nodes = len(x)
 
-        close_coordination_sparse = scatter_add(
-            close_mask.float(), edge_src, dim=0, dim_size=num_nodes
-        )
-        distance_coordination_sparse = scatter_add(
-            medium_mask.float(), edge_src, dim=0, dim_size=num_nodes
-        )
+        if getattr(self.config, 'use_triton_gather_scatter', False) and x.is_cuda:
+            from esa.triton_graph_gather_scatter import triton_fused_gather_scatter
+            feat_matrix = torch.stack([close_mask.float(), medium_mask.float()], dim=-1)
+            fused_sparse = triton_fused_gather_scatter(feat_matrix, edge_index, num_nodes=num_nodes)
+            close_coordination_sparse = fused_sparse[:, 0]
+            distance_coordination_sparse = fused_sparse[:, 1]
+        else:
+            close_coordination_sparse = scatter_add(
+                close_mask.float(), edge_src, dim=0, dim_size=num_nodes
+            )
+            distance_coordination_sparse = scatter_add(
+                medium_mask.float(), edge_src, dim=0, dim_size=num_nodes
+            )
 
         close_coordination, _ = to_dense_batch(close_coordination_sparse, batch, fill_value=0)
         distance_based_coordination, _ = to_dense_batch(distance_coordination_sparse, batch, fill_value=0)
 
-        min_distances_sparse = torch.full((num_nodes,), float('inf'), device=pos.device)
-        mean_distances_sparse = torch.zeros(num_nodes, device=pos.device)
-        count_per_node = torch.zeros(num_nodes, device=pos.device)
+        if getattr(self.config, 'use_vectorized_geometric_features', True):
+            # Fully Vectorized Zero-Nonzero Distance Features (0 calls to aten::nonzero)
+            masked_close_dists = torch.where(close_mask, edge_distances, torch.full_like(edge_distances, float('inf')))
+            min_distances_sparse, _ = scatter_min(masked_close_dists, edge_src, dim=0, dim_size=num_nodes)
+            min_distances_sparse[torch.isinf(min_distances_sparse)] = 0.0
 
-        close_indices = torch.where(close_mask)[0]
-        if len(close_indices) > 0:
-            close_src = edge_src[close_indices]
-            close_dists = edge_distances[close_indices]
-
-            min_distances_sparse, _ = scatter_min(close_dists, close_src, dim=0, dim_size=num_nodes)
-
-            sum_per_node = scatter_add(close_dists, close_src, dim=0, dim_size=num_nodes)
-            count_per_node = scatter_add(torch.ones_like(close_dists), close_src, dim=0, dim_size=num_nodes)
+            sum_per_node = scatter_add(torch.where(close_mask, edge_distances, 0.0), edge_src, dim=0, dim_size=num_nodes)
+            count_per_node = scatter_add(close_mask.float(), edge_src, dim=0, dim_size=num_nodes)
             mean_distances_sparse = sum_per_node / (count_per_node + 1e-8)
+        else:
+            min_distances_sparse = torch.full((num_nodes,), float('inf'), device=pos.device)
+            mean_distances_sparse = torch.zeros(num_nodes, device=pos.device)
+            count_per_node = torch.zeros(num_nodes, device=pos.device)
 
-        min_distances_sparse[torch.isinf(min_distances_sparse)] = 0.0
+            close_indices = torch.where(close_mask)[0]
+            if len(close_indices) > 0:
+                close_src = edge_src[close_indices]
+                close_dists = edge_distances[close_indices]
+
+                min_distances_sparse, _ = scatter_min(close_dists, close_src, dim=0, dim_size=num_nodes)
+
+                sum_per_node = scatter_add(close_dists, close_src, dim=0, dim_size=num_nodes)
+                count_per_node = scatter_add(torch.ones_like(close_dists), close_src, dim=0, dim_size=num_nodes)
+                mean_distances_sparse = sum_per_node / (count_per_node + 1e-8)
+
+            min_distances_sparse[torch.isinf(min_distances_sparse)] = 0.0
 
         min_distances, _ = to_dense_batch(min_distances_sparse, batch, fill_value=0)
         mean_distances, _ = to_dense_batch(mean_distances_sparse, batch, fill_value=0)

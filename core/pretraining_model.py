@@ -369,7 +369,15 @@ class PretrainingESAModel(pl.LightningModule):
                 return torch.randperm(n, generator=gen).to(device)
             return torch.randperm(n, device=device)
 
-        if hasattr(batch, 'batch') and batch.batch is not None:
+        if getattr(self.config, 'use_vectorized_mlm_masking', True):
+            # Fully Vectorized Batch-Wide Random MLM Masking (0 Python loops across entire batch)
+            if gen is not None:
+                rand_vals = torch.rand(num_nodes, generator=gen, device='cpu').to(device)
+            else:
+                rand_vals = torch.rand(num_nodes, device=device)
+            mlm_mask = rand_vals < atom_mask_ratio
+            masked_types[mlm_mask] = mask_token
+        elif hasattr(batch, 'batch') and batch.batch is not None:
             graph_idx = batch.batch
             for g in graph_idx.unique().tolist():
                 node_mask = (graph_idx == g)
