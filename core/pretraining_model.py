@@ -825,11 +825,21 @@ class PretrainingESAModel(pl.LightningModule):
         total_norm = total_norm ** 0.5
         self.log("grad_norm_before_clip", total_norm, on_step=True, logger=True)
 
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val=None, gradient_clip_algorithm=None):
+        """
+        Custom gradient clipping override to support Fused CUDA AdamW kernel with PyTorch Lightning.
+        Avoids Lightning AMP unscaling collision when fused=True.
+        """
+        clip_val = gradient_clip_val if gradient_clip_val is not None else getattr(self.config, 'gradient_clip_val', 0.5)
+        if clip_val is not None and clip_val > 0:
+            torch.nn.utils.clip_grad_norm_(self.parameters(), clip_val)
+
     def configure_optimizers(self):
-        optimizer = bnb.optim.AdamW8bit(
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.config.lr,
             weight_decay=self.config.optimiser_weight_decay,
+            fused=True,
         )
 
         total_epochs = getattr(self.config, 'max_epochs', 100)
