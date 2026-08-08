@@ -135,31 +135,28 @@ class PretrainingTasks(nn.Module):
         pair_embeddings = torch.cat([emb_i, emb_j], dim=-1)
 
         distance_logits = self.long_range_distance_head(pair_embeddings)
-
         pos_i = pos[i_indices]
         pos_j = pos[j_indices]
         true_distances = torch.norm(pos_i - pos_j, dim=1)
-
         distance_bins = self._distances_to_bins(true_distances)
-
         loss = F.cross_entropy(distance_logits, distance_bins, reduction='mean')
         return loss
 
     def short_range_distance_loss(self, node_embeddings, edge_index, distances, mask):
         """Short-range distance loss over graph edges (all within cutoff_distance ≤ 5Å)."""
-        source_emb = node_embeddings[edge_index[0]]
-        target_emb = node_embeddings[edge_index[1]]
+        valid_mask = torch.isfinite(distances) & mask
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+
+        # Filter edge indices FIRST to avoid gathering embeddings for invalid/padded edges
+        filtered_edge = edge_index[:, valid_mask]
+        source_emb = node_embeddings[filtered_edge[0]]
+        target_emb = node_embeddings[filtered_edge[1]]
         edge_emb = torch.cat([source_emb, target_emb], dim=-1)
 
         logits = self.distance_head(edge_emb)
-
-        distance_bins = self._short_range_distances_to_bins(distances)
-
-        valid_mask = torch.isfinite(distances) & mask
-        if valid_mask.sum() == 0:
-            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
-
-        loss = F.cross_entropy(logits[valid_mask], distance_bins[valid_mask], reduction='mean')
+        distance_bins = self._short_range_distances_to_bins(distances[valid_mask])
+        loss = F.cross_entropy(logits, distance_bins, reduction='mean')
         return loss
 
     def mlm_loss(self, node_embeddings, data):
@@ -170,7 +167,7 @@ class PretrainingTasks(nn.Module):
         mask = data.mlm_mask
         original_types = data.original_types
 
-        if mask is None or mask.sum() == 0:
+        if mask is None or not mask.any():
             return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
 
         logits = self.mlm_head(node_embeddings)

@@ -308,8 +308,11 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             )
 
         elif dataset_name.upper() == 'QM9':
-            max_samples = getattr(config, 'max_samples', 50000)
-            print(f"📊 Loading {max_samples:,} samples from universal cache...")
+            max_samples = getattr(config, 'max_samples', None)
+            if max_samples:
+                print(f"📊 Loading {max_samples:,} samples from universal cache...")
+            else:
+                print(f"📊 Loading ALL samples from universal cache...")
 
             full_dataset = OptimizedUniversalQM9Dataset(
                 root=dataset_dir,
@@ -781,13 +784,20 @@ def train_universal_pretraining(
     callbacks.append(protein_metrics_callback)
     print("✅ Protein per-atom + per-AA (binary & block) metrics callback enabled")
 
-    # Create wandb logger
-    wandb_logger = WandbLogger(
-        project=wandb_project,
-        name=wandb_run_name,
-        save_dir=output_dir,
-        config=vars(config),
-    )
+    # Create logger (CSVLogger or WandbLogger based on config)
+    use_wandb = getattr(config, 'use_wandb', False)
+    if use_wandb:
+        logger = WandbLogger(
+            project=wandb_project,
+            name=wandb_run_name,
+            save_dir=output_dir,
+            config=vars(config),
+        )
+        print("📊 Logging to Weights & Biases (WandB)")
+    else:
+        from pytorch_lightning.loggers import CSVLogger
+        logger = CSVLogger(save_dir=output_dir, name="logs")
+        print(f"📊 Local CSV Logging enabled in {output_dir}/logs")
 
     # Validation and logging frequency (from config)
     val_check_interval = getattr(config, 'val_check_interval', 0.25)
@@ -807,7 +817,7 @@ def train_universal_pretraining(
     trainer = pl.Trainer(
         max_epochs=config.max_epochs,
         callbacks=callbacks,
-        logger=wandb_logger,
+        logger=logger,
         gradient_clip_val=config.gradient_clip_val,
         precision="bf16-mixed" if config.use_bfloat16 else "32",
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -967,8 +977,8 @@ def main():
         dataset_name=config.dataset,
         dataset_dir=config.dataset_download_dir,
         output_dir=args.output_dir,
-        wandb_project=config.wandb_project_name,
-        wandb_run_name=config.wandb_run_name
+        wandb_project=getattr(config, 'wandb_project_name', 'esa-universal-pretraining'),
+        wandb_run_name=getattr(config, 'wandb_run_name', 'universal-pretraining')
     )
 
     print("🎉 Training completed successfully!")

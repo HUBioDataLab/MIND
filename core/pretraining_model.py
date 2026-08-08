@@ -48,11 +48,14 @@ class PretrainingESAModel(pl.LightningModule):
         # Universal molecular encoder
         self.encoder = UniversalMolecularEncoder(config)
 
+        use_triton_attn = getattr(config, 'use_triton_flash_attention', True)
+        attn_choice = "triton" if use_triton_attn else getattr(config, 'xformers_or_torch_attn', "triton")
+
         # ESA backbone (with layer-wise equivariant integration if enabled)
         st_args = dict(
             num_outputs=32,
             dim_output=config.graph_dim,
-            xformers_or_torch_attn=config.xformers_or_torch_attn,
+            xformers_or_torch_attn=attn_choice,
             dim_hidden=config.hidden_dims,
             num_heads=config.num_heads,
             sab_dropout=config.sab_dropout,
@@ -72,6 +75,7 @@ class PretrainingESAModel(pl.LightningModule):
             pma_residual_dropout=config.pma_residual_dropout,
             use_mlp_ln=config.use_mlp_ln,
             mlp_dropout=config.mlp_dropout,
+            use_triton_varlen_flash_attention=getattr(config, 'use_triton_varlen_flash_attention', True),
             use_equivariant=config.use_equivariant_features,
             equivariant_lmax=config.equivariant_lmax,
             equivariant_num_features=config.equivariant_num_features,
@@ -139,12 +143,12 @@ class PretrainingESAModel(pl.LightningModule):
         assert pos is not None, "Coordinates (pos) are required for pretraining tasks"
 
         # Center positions for translation invariance (per-graph)
-        pos_centered = pos.clone()
-        for graph_id in torch.unique(batch_mapping):
-            mask = batch_mapping == graph_id
-            if mask.sum() > 0:
-                com = pos[mask].mean(dim=0, keepdim=True)
-                pos_centered[mask] = pos[mask] - com
+        if hasattr(batch, 'ptr') and batch.ptr is not None:
+            com = torch.segment_reduce(pos, 'mean', offsets=batch.ptr)
+        else:
+            from torch_scatter import scatter_mean
+            com = scatter_mean(pos, batch_mapping, dim=0)
+        pos_centered = pos - com[batch_mapping]
         pos = pos_centered
         batch.pos = pos_centered
 
@@ -246,19 +250,35 @@ class PretrainingESAModel(pl.LightningModule):
                 counts = torch.bincount(batch_mapping)
                 num_max_items = nearest_multiple_of_8(int(counts.max().item()) + 1)
 
-            h, dense_batch_index = to_dense_batch(
-                h, batch_mapping, fill_value=0, max_num_nodes=num_max_items
-            )
+            if hasattr(batch, 'ptr') and batch.ptr is not None:
+                ptr = batch.ptr
+                node_idx_in_graph = torch.arange(h.size(0), device=h.device) - ptr[batch_mapping]
+                h, _ = to_dense_batch(h, batch_mapping, fill_value=0, max_num_nodes=num_max_items)
 
-            esa_output = self.esa_backbone(
-                h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
-            )
-            graph_emb, node_emb_before_pma = esa_output
+                esa_output = self.esa_backbone(
+                    h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
+                )
+                graph_emb, node_emb_before_pma = esa_output
 
-            if node_emb_before_pma.dim() == 3:
-                h_node_level = node_emb_before_pma[dense_batch_index]
+                if node_emb_before_pma.dim() == 3:
+                    flat_idx = batch_mapping * num_max_items + node_idx_in_graph
+                    h_node_level = node_emb_before_pma.view(-1, node_emb_before_pma.size(-1))[flat_idx]
+                else:
+                    h_node_level = node_emb_before_pma
             else:
-                h_node_level = node_emb_before_pma
+                h, dense_batch_index = to_dense_batch(
+                    h, batch_mapping, fill_value=0, max_num_nodes=num_max_items
+                )
+
+                esa_output = self.esa_backbone(
+                    h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
+                )
+                graph_emb, node_emb_before_pma = esa_output
+
+                if node_emb_before_pma.dim() == 3:
+                    h_node_level = node_emb_before_pma[dense_batch_index]
+                else:
+                    h_node_level = node_emb_before_pma
 
             h = graph_emb
 
