@@ -24,28 +24,13 @@ class MAB(nn.Module):
         self.fc_v = nn.Linear(dim_K, dim_V, bias=True)
         self.fc_o = nn.Linear(dim_V, dim_V, bias=True)
 
-        # NOTE: xavier_uniform_ might work better for a few datasets
         xavier_normal_(self.fc_q.weight)
         xavier_normal_(self.fc_k.weight)
         xavier_normal_(self.fc_v.weight)
         xavier_normal_(self.fc_o.weight)
 
-        # NOTE: this constant bias might work better for a few datasets
-        # constant_(self.fc_q.bias, 0.01)
-        # constant_(self.fc_k.bias, 0.01)
-        # constant_(self.fc_v.bias, 0.01)
-        # constant_(self.fc_o.bias, 0.01)
 
-        # NOTE: this additional LN for queries/keys might be useful for some
-        # datasets (currently it looks like DOCKSTRING)
-        # It is similar to this paper https://arxiv.org/pdf/2302.05442
-        # and https://github.com/lucidrains/x-transformers?tab=readme-ov-file#qk-rmsnorm
-
-        # self.ln_q = nn.LayerNorm(dim_Q, eps=1e-8)
-        # self.ln_k = nn.LayerNorm(dim_K, eps=1e-8)
-
-
-    def forward(self, Q, K, adj_mask=None):
+    def forward(self, Q, K, adj_mask=None, seq_lens=None):
         batch_size = Q.size(0)
         E_total = self.dim_V
         assert E_total % self.num_heads == 0, "Embedding dim is not divisible by nheads"
@@ -54,10 +39,6 @@ class MAB(nn.Module):
         Q = self.fc_q(Q)
         V = self.fc_v(K)
         K = self.fc_k(K)
-
-        # Additional normalisation for queries/keys. See above
-        # Q = self.ln_q(Q).to(torch.bfloat16)
-        # K = self.ln_k(K).to(torch.bfloat16)
 
         Q = Q.view(batch_size, -1, self.num_heads, head_dim)
         K = K.view(batch_size, -1, self.num_heads, head_dim)
@@ -68,7 +49,6 @@ class MAB(nn.Module):
             K = K.transpose(1, 2)
             V = V.transpose(1, 2)
 
-
         if adj_mask is not None:
             if adj_mask.device != Q.device:
                 adj_mask = adj_mask.to(Q.device)
@@ -78,13 +58,20 @@ class MAB(nn.Module):
             out = memory_efficient_attention(Q, K, V, attn_bias=adj_mask, p=self.dropout_p if self.training else 0)
             out = out.reshape(batch_size, -1, self.num_heads * head_dim)
             
+        elif self.xformers_or_torch_attn == "triton":
+            from esa.triton_flash_mha import triton_flash_attn_func
+            Q_t = Q.transpose(1, 2)
+            K_t = K.transpose(1, 2)
+            V_t = V.transpose(1, 2)
+            out = triton_flash_attn_func(Q_t, K_t, V_t, mask=adj_mask, seq_lens=seq_lens)
+            out = out.transpose(1, 2).reshape(batch_size, -1, self.num_heads * head_dim)
+
         elif self.xformers_or_torch_attn in ["torch"]:
             with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
                 out = F.scaled_dot_product_attention(
                     Q, K, V, attn_mask=adj_mask, dropout_p=self.dropout_p if self.training else 0, is_causal=False
                 )
             out = out.transpose(1, 2).reshape(batch_size, -1, self.num_heads * head_dim)
-
 
         out = out + F.mish(self.fc_o(out))
 
@@ -96,8 +83,8 @@ class SAB(nn.Module):
         super(SAB, self).__init__()
         self.mab = MAB(dim_in, dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
 
-    def forward(self, X, adj_mask=None):
-        return self.mab(X, X, adj_mask=adj_mask)
+    def forward(self, X, adj_mask=None, seq_lens=None):
+        return self.mab(X, X, adj_mask=adj_mask, seq_lens=seq_lens)
 
 
 class PMA(nn.Module):
