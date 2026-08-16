@@ -70,7 +70,7 @@ multi_domain:
   atom_sampling:
     enabled: true
     epoch_atom_budget: 4800000
-    epoch_num_batches: 450  # Stable Lightning epoch length; natural batches are only split.
+    epoch_num_batches: auto  # Derive epoch length from atom budget, graph sizes, and max_atoms_per_batch.
     cycle_to_quota: true  # Repeat only after unique samples exhaust and only to close a quota.
     domain_weights:
       protein: 30

@@ -47,7 +47,7 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         cycle_short_domains: bool = True,
         epoch_atom_budget: int | None = None,
         domain_atom_weights: dict[str, float] | None = None,
-        epoch_num_batches: int | None = None,
+        epoch_num_batches: int | str | None = None,
     ):
         """
         Initialize ImprovedDynamicBatchSampler
@@ -64,8 +64,9 @@ class ImprovedDynamicBatchSampler(BatchSampler):
                 cross-modal sampling is driven by per-domain atom quotas.
             domain_atom_weights: Positive per-domain weights used to divide the
                 epoch atom budget. Keys must match metadata dataset types.
-            epoch_num_batches: Fixed train batch-plan length. Natural greedy
-                batches are split, never merged or padded with repeated graphs.
+            epoch_num_batches: Fixed train batch-plan length, or ``"auto"`` /
+                ``None`` to use the natural greedy batch count. Fixed plans are
+                reached by splitting, never merging or padding with repeats.
 
         Raises:
             ValueError: If metadata is not loaded
@@ -99,6 +100,17 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         self.cycle_short_domains = cycle_short_domains
         self.epoch_atom_budget = epoch_atom_budget
         self.domain_atom_weights = domain_atom_weights
+        if isinstance(epoch_num_batches, str):
+            normalized_epoch_batches = epoch_num_batches.strip().lower()
+            if normalized_epoch_batches == "auto":
+                epoch_num_batches = None
+            else:
+                try:
+                    epoch_num_batches = int(normalized_epoch_batches)
+                except ValueError as exc:
+                    raise ValueError(
+                        "epoch_num_batches must be a positive integer or 'auto'"
+                    ) from exc
         self.epoch_num_batches = epoch_num_batches
         self.epoch = 0
         self.seed = seed
@@ -120,9 +132,9 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             }
             if invalid_weights:
                 raise ValueError(f"Domain atom weights must be positive: {invalid_weights}")
-            if self.epoch_num_batches is None or self.epoch_num_batches <= 0:
+            if self.epoch_num_batches is not None and self.epoch_num_batches <= 0:
                 raise ValueError(
-                    "A positive epoch_num_batches is required with epoch_atom_budget"
+                    "epoch_num_batches must be positive or 'auto' with epoch_atom_budget"
                 )
 
         # Validate dataset
@@ -458,6 +470,11 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             f"   Atom quota: requested={self.plan_stats['requested_total_atoms']:,}, "
             f"actual={self.plan_stats['actual_total_atoms']:,}"
         )
+        print(
+            f"   Batch plan: natural={self.plan_stats['natural_batches']:,}, "
+            f"planned={self.plan_stats['planned_batches']:,}, "
+            f"mode={'auto' if self.epoch_num_batches is None else 'fixed'}"
+        )
         for dtype, stats in self.plan_stats["domains"].items():
             print(
                 f"   {dtype.upper():10s} target={stats['target_atoms']:,} "
@@ -597,7 +614,11 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             batches.append(current_batch)
 
         if self.epoch_atom_budget is not None:
-            batches = self._split_batches_to_fixed_count(batches)
+            if self.epoch_num_batches is None:
+                self.plan_stats["natural_batches"] = len(batches)
+                self.plan_stats["planned_batches"] = len(batches)
+            else:
+                batches = self._split_batches_to_fixed_count(batches)
 
         return batches
 

@@ -482,7 +482,7 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                     else None
                 ),
                 epoch_num_batches=(
-                    int(atom_sampling_config['epoch_num_batches'])
+                    atom_sampling_config.get('epoch_num_batches', 'auto')
                     if use_atom_quota_sampling
                     else None
                 ),
