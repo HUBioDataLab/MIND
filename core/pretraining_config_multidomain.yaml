@@ -41,7 +41,7 @@ multi_domain:
       chunk_range: [0, 9]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
     
     qm9:
-      enabled: true  # QM9 with legacy edges (cutoff 5.0Å, 16 neighbors)
+      enabled: false  # Replaced by unimol as the small-molecule domain.
       chunk_dir: "/home/arin/data/qm9_chunks"  # Will match qm9_chunks_chunk_0 through qm9_chunks_chunk_4
       atom_ratio: 5  
       chunk_range: null
@@ -53,15 +53,16 @@ multi_domain:
       chunk_range: null
 
     unimol:
-      enabled: false
+      enabled: true
       chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
       atom_ratio: 25
-      chunk_range: null
+      chunk_range: [0, 9]  # 10 chunks (balanced with pdb; bump for a larger run)
     
     rna:
       enabled: true
-      chunk_dir: "/home/yusuf/data/rna/processed_graphs"
+      chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k"
       atom_ratio: 5   # 5% of atoms from RNA
+      chunk_range: [0, 4]  # Filtered dev set: source chunks 0..4, each graph <=5,000 atoms.
     
     dna:
       enabled: false  # Future expansion

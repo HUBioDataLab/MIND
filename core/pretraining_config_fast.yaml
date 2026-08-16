@@ -35,7 +35,7 @@ multi_domain:
       chunk_range: [0, 0]
     rna:
       enabled: true
-      chunk_dir: "/home/yusuf/data/rna/processed_graphs"
+      chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k"
       atom_ratio: 5
       chunk_range: [0, 0]
     dna:
