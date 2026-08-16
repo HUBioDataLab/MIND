@@ -101,7 +101,12 @@ def create_chunk_metadata(chunk_pt_file: str, overwrite: bool = False) -> Dict[s
     
     try:
         # Load chunk (only metadata, not full data)
-        data, slices = torch.load(chunk_pt_file, map_location='cpu', weights_only=False)
+        data, slices = torch.load(
+            chunk_pt_file,
+            map_location='cpu',
+            weights_only=False,
+            mmap=True,
+        )
     except Exception as e:
         raise RuntimeError(f"Failed to load chunk {chunk_pt_file}: {e}")
     
@@ -286,4 +291,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

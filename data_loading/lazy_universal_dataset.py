@@ -24,6 +24,8 @@ Usage:
 import re
 import torch
 import json
+import hashlib
+import os
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from torch_geometric.data.separate import separate
@@ -155,15 +157,24 @@ class LazyUniversalDataset(Dataset):
 
     @staticmethod
     def _index_map_cache_path(chunk_pt_files: List[str]) -> Path:
-        """Derive an index-map cache path from the chunk layout."""
+        """Derive a selection-specific path outside the production data tree."""
         if not chunk_pt_files:
             raise ValueError("chunk_pt_files is empty")
 
-        first = Path(chunk_pt_files[0]).resolve()
+        resolved_files = [str(Path(path).resolve()) for path in chunk_pt_files]
+        first = Path(resolved_files[0])
         chunk_dir = first.parent.parent
-        parent_dir = chunk_dir.parent
         base_name = re.sub(r"_chunk_\d+$", "", chunk_dir.name)
-        return parent_dir / f"{base_name}{INDEX_MAP_SUFFIX}"
+        selection_key = hashlib.sha256(
+            json.dumps(resolved_files, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:16]
+        cache_dir = Path(
+            os.environ.get(
+                "MIND_INDEX_MAP_CACHE_DIR",
+                Path.home() / ".cache" / "mind" / "index_maps",
+            )
+        ).expanduser()
+        return cache_dir / f"{base_name}_{selection_key}{INDEX_MAP_SUFFIX}"
     
     def _build_index_map(self):
         """Build index map: (global_idx -> (file_idx, local_idx, pt_file)). Uses a cache when available."""
@@ -200,7 +211,12 @@ class LazyUniversalDataset(Dataset):
             
             # Load only slices to count samples (minimal RAM)
             try:
-                _, slices = torch.load(pt_file, map_location='cpu', weights_only=False)
+                _, slices = torch.load(
+                    pt_file,
+                    map_location='cpu',
+                    weights_only=False,
+                    mmap=True,
+                )
             except Exception as e:
                 raise RuntimeError(f"Failed to load {pt_file}: {e}")
             
@@ -223,6 +239,7 @@ class LazyUniversalDataset(Dataset):
             raise ValueError("No samples found in any chunk files!")
 
         try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
             with open(cache_path, "w") as f:
                 json.dump(
                     {

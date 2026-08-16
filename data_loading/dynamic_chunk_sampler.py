@@ -38,7 +38,7 @@ Usage:
 
 import torch
 import random
-from torch.utils.data import BatchSampler, Sampler
+from torch.utils.data import BatchSampler, SequentialSampler
 from typing import Iterator, List
 from collections import defaultdict
 from data_loading.lazy_universal_dataset import LazyUniversalDataset
@@ -103,6 +103,8 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
         self.cycle_short_domains = cycle_short_domains
         self.epoch = 0
         self.seed = seed
+        self._batch_plan = None
+        self._batch_plan_epoch = None
 
         # Validate dataset attributes
         if not hasattr(self.dataset, 'chunk_pt_files'):
@@ -114,7 +116,7 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
         self._atom_count_cache = {}
 
         # Initialize base BatchSampler
-        dummy_sampler = Sampler(range(len(self)))
+        dummy_sampler = SequentialSampler(())
         super().__init__(dummy_sampler, batch_size=1, drop_last=False)
 
     def _get_atom_count(self, idx: int) -> int:
@@ -297,8 +299,8 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                     chunk_indices = [idx for idx in chunk_indices if idx in subset_set]
 
                 if self.shuffle_within_chunk and chunk_indices:
-                    random.seed(self.seed + self.epoch * 10000 + chunk_idx)
-                    random.shuffle(chunk_indices)
+                    rng = random.Random(self.seed + self.epoch * 10000 + chunk_idx)
+                    rng.shuffle(chunk_indices)
 
                 if global_to_subset_pos is not None:
                     chunk_indices = [global_to_subset_pos[idx] for idx in chunk_indices if idx in global_to_subset_pos]
@@ -325,8 +327,8 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
                     chunk_indices = [idx for idx in chunk_indices if idx in subset_set]
 
                 if self.shuffle_within_chunk and chunk_indices:
-                    random.seed(self.seed + self.epoch * 10000 + chunk_idx)
-                    random.shuffle(chunk_indices)
+                    rng = random.Random(self.seed + self.epoch * 10000 + chunk_idx)
+                    rng.shuffle(chunk_indices)
 
                 if global_to_subset_pos is not None:
                     chunk_indices = [global_to_subset_pos[idx] for idx in chunk_indices]
@@ -335,9 +337,9 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
 
             return indices
 
-    def __iter__(self) -> Iterator[List[int]]:
+    def _build_batch_plan(self) -> List[List[int]]:
         """
-        Generate batches of sample indices for one epoch.
+        Build batches of sample indices for one epoch.
 
         For cross-modal mode: Uses proportional sampling and cache-optimized batch ordering.
         For standard mode: Simple sequential batching.
@@ -368,7 +370,7 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
             }
             total_samples = sum(len(indices_by_type[dt]) for dt in indices_by_type)
             if total_samples == 0:
-                return
+                return []
 
             if self.cycle_short_domains and len(indices_by_type) > 1:
                 mixed_indices = self._create_cycled_mixed_stream(indices_by_type)
@@ -434,17 +436,29 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
 
             all_batches = [all_batches[i] for i in optimized_order]
 
-        # STEP 3: Yield batches
-        for batch in all_batches:
+        return all_batches
+
+    def _get_batch_plan(self) -> List[List[int]]:
+        """Return the cached authoritative plan for the current epoch."""
+        if self._batch_plan_epoch != self.epoch or self._batch_plan is None:
+            self._batch_plan = self._build_batch_plan()
+            self._batch_plan_epoch = self.epoch
+        return self._batch_plan
+
+    def __iter__(self) -> Iterator[List[int]]:
+        """Yield the same authoritative plan reported by ``__len__``."""
+        for batch in self._get_batch_plan():
             yield batch
 
     def __len__(self) -> int:
-        """Estimate number of batches"""
-        total_samples = len(self.subset_indices) if self.subset_indices is not None else len(self.dataset)
-        avg_atoms_per_sample = 500
-        return max(1, (total_samples * avg_atoms_per_sample) // self.max_atoms_per_batch)
+        """Return the exact number of batches in the current epoch plan."""
+        return len(self._get_batch_plan())
 
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""
+        if epoch == self.epoch:
+            return
         self.epoch = epoch
+        self._batch_plan = None
+        self._batch_plan_epoch = None
         self._atom_count_cache.clear()

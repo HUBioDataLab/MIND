@@ -634,13 +634,6 @@ def create_data_loaders(dataset, config: PretrainingConfig):
         print(f"          --manifest-file <manifest.csv> \\")
         print(f"          --num-chunks 10")
 
-    # Store sampler reference for epoch updates (if using chunked dataset)
-    if is_lazy_dataset:
-        if train_batch_sampler is not None:
-            train_loader.batch_sampler_obj = train_batch_sampler  # For dynamic batching
-        elif train_sampler is not None:
-            train_loader.sampler_obj = train_sampler  # For regular chunk-aware sampling
-
     print(f"\n📋 Validation Data Loader Info:")
     print(f"   Validation batches: {len(val_loader)}")
     print(f"   Validation samples: {len(val_dataset)}")
@@ -648,6 +641,21 @@ def create_data_loaders(dataset, config: PretrainingConfig):
     print(f"   Test samples: {len(test_dataset)}")
 
     return train_loader, val_loader, test_loader
+
+
+def set_data_loader_epoch(data_loader, epoch: int):
+    """Propagate an epoch to the samplers actually attached to a DataLoader."""
+    updated = []
+    seen = set()
+    for attribute in ("batch_sampler", "sampler"):
+        sampler = getattr(data_loader, attribute, None)
+        if sampler is None or id(sampler) in seen:
+            continue
+        seen.add(id(sampler))
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+            updated.append(attribute)
+    return updated
 
 
 def train_universal_pretraining(
@@ -703,19 +711,9 @@ def train_universal_pretraining(
         def on_train_epoch_start(self, trainer, pl_module):
             epoch = trainer.current_epoch
             train_loader = trainer.train_dataloader
-
-            # Update epoch for regular sampler (ChunkAwareSampler)
-            if hasattr(train_loader, 'sampler_obj'):
-                train_loader.sampler_obj.set_epoch(epoch)
-                if epoch == 0:
-                    print(f"🔄 ChunkAwareSampler: Epoch {epoch} started")
-
-            # Update epoch for batch sampler (ImprovedDynamicBatchSampler / DynamicChunkAwareBatchSampler)
-            if hasattr(train_loader, 'batch_sampler_obj'):
-                if hasattr(train_loader.batch_sampler_obj, 'set_epoch'):
-                    train_loader.batch_sampler_obj.set_epoch(epoch)
-                    if epoch == 0:
-                        print(f"🔄 DynamicBatchSampler: Epoch {epoch} started")
+            updated = set_data_loader_epoch(train_loader, epoch)
+            if epoch == 0 and updated:
+                print(f"🔄 DataLoader sampler epoch set through: {', '.join(updated)}")
 
     # Create callbacks
     callbacks = [
@@ -875,6 +873,9 @@ def train_universal_pretraining(
                     num_workers=num_workers,
                     pin_memory=pin_memory
                 )
+                updated = set_data_loader_epoch(train_loader, epoch=0)
+                if "batch_sampler" not in updated:
+                    raise RuntimeError("Recreated DataLoader did not expose an epoch-aware batch sampler")
                 print(f"   ✅ Recreated DataLoader with DynamicChunkAwareBatchSampler")
 
             print(f"   ✅ Final check: batch_sampler = {type(train_loader.batch_sampler).__name__}, batch_size = {train_loader.batch_size}")

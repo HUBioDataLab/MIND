@@ -19,7 +19,7 @@ Key Improvements:
 
 import torch
 import random
-from torch.utils.data import BatchSampler, Sampler
+from torch.utils.data import BatchSampler, SequentialSampler
 from typing import Iterator, List
 from collections import defaultdict
 from data_loading.lazy_universal_dataset import LazyUniversalDataset
@@ -44,7 +44,10 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         shuffle_within_chunk: bool = True,
         seed: int = 42,
         enable_cross_modal_batches: bool = False,
-        cycle_short_domains: bool = True
+        cycle_short_domains: bool = True,
+        epoch_atom_budget: int | None = None,
+        domain_atom_weights: dict[str, float] | None = None,
+        epoch_num_batches: int | None = None,
     ):
         """
         Initialize ImprovedDynamicBatchSampler
@@ -57,6 +60,12 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             seed: Random seed for reproducibility
             enable_cross_modal_batches: Mix different dataset types in batches
             cycle_short_domains: Reuse shorter domain samples in cross-modal mode
+            epoch_atom_budget: Total train atoms requested per epoch. When set,
+                cross-modal sampling is driven by per-domain atom quotas.
+            domain_atom_weights: Positive per-domain weights used to divide the
+                epoch atom budget. Keys must match metadata dataset types.
+            epoch_num_batches: Fixed train batch-plan length. Natural greedy
+                batches are split, never merged or padded with repeated graphs.
 
         Raises:
             ValueError: If metadata is not loaded
@@ -88,8 +97,33 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         self.shuffle_within_chunk = shuffle_within_chunk
         self.enable_cross_modal_batches = enable_cross_modal_batches
         self.cycle_short_domains = cycle_short_domains
+        self.epoch_atom_budget = epoch_atom_budget
+        self.domain_atom_weights = domain_atom_weights
+        self.epoch_num_batches = epoch_num_batches
         self.epoch = 0
         self.seed = seed
+        self._batch_plan = None
+        self._batch_plan_epoch = None
+        self.plan_stats = None
+
+        if self.epoch_atom_budget is not None:
+            if not self.enable_cross_modal_batches:
+                raise ValueError("epoch_atom_budget requires cross-modal batching")
+            if self.epoch_atom_budget <= 0:
+                raise ValueError("epoch_atom_budget must be positive")
+            if not self.domain_atom_weights:
+                raise ValueError("domain_atom_weights are required with epoch_atom_budget")
+            invalid_weights = {
+                dtype: weight
+                for dtype, weight in self.domain_atom_weights.items()
+                if float(weight) <= 0
+            }
+            if invalid_weights:
+                raise ValueError(f"Domain atom weights must be positive: {invalid_weights}")
+            if self.epoch_num_batches is None or self.epoch_num_batches <= 0:
+                raise ValueError(
+                    "A positive epoch_num_batches is required with epoch_atom_budget"
+                )
 
         # Validate dataset
         if not hasattr(self.dataset, 'chunk_pt_files'):
@@ -98,7 +132,7 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             raise ValueError("Dataset must have file_ranges attribute")
 
         # Initialize base BatchSampler
-        dummy_sampler = Sampler(range(len(self)))
+        dummy_sampler = SequentialSampler(())
         super().__init__(dummy_sampler, batch_size=1, drop_last=False)
 
     def _get_atom_count_fast(self, global_idx: int) -> int:
@@ -178,8 +212,8 @@ class ImprovedDynamicBatchSampler(BatchSampler):
 
             # Shuffle within chunk if requested
             if self.shuffle_within_chunk:
-                random.seed(self.seed + self.epoch * 10000 + chunk_idx)
-                random.shuffle(chunk_indices)
+                rng = random.Random(self.seed + self.epoch * 10000 + chunk_idx)
+                rng.shuffle(chunk_indices)
 
             # Convert to subset positions if needed
             if global_to_subset_pos is not None:
@@ -309,6 +343,194 @@ class ImprovedDynamicBatchSampler(BatchSampler):
 
         return mixed_samples
 
+    def _resolve_atom_targets(self, dataset_types: set[str]) -> dict[str, int]:
+        """Divide the exact epoch budget across active domains by configured weight."""
+        missing = sorted(dataset_types - set(self.domain_atom_weights))
+        if missing:
+            raise ValueError(f"Missing atom weights for active domains: {missing}")
+
+        weights = {
+            dtype: float(self.domain_atom_weights[dtype])
+            for dtype in sorted(dataset_types)
+        }
+        total_weight = sum(weights.values())
+        raw_targets = {
+            dtype: self.epoch_atom_budget * weight / total_weight
+            for dtype, weight in weights.items()
+        }
+        targets = {dtype: int(raw_targets[dtype]) for dtype in weights}
+        remainder = self.epoch_atom_budget - sum(targets.values())
+        remainder_order = sorted(
+            weights,
+            key=lambda dtype: (raw_targets[dtype] - targets[dtype], dtype),
+            reverse=True,
+        )
+        for dtype in remainder_order[:remainder]:
+            targets[dtype] += 1
+        return targets
+
+    def _create_atom_quota_stream(self, samples_by_type: dict) -> List[int]:
+        """Select whole graphs until every configured per-domain atom quota is met."""
+        targets = self._resolve_atom_targets(set(samples_by_type))
+        selected_atoms = {dtype: 0 for dtype in samples_by_type}
+        selected_samples = {dtype: 0 for dtype in samples_by_type}
+        positions = {dtype: 0 for dtype in samples_by_type}
+        mixed_samples = []
+
+        while True:
+            eligible_types = [
+                dtype
+                for dtype in sorted(samples_by_type)
+                if selected_atoms[dtype] < targets[dtype]
+                and (
+                    self.cycle_short_domains
+                    or positions[dtype] < len(samples_by_type[dtype])
+                )
+            ]
+            if not eligible_types:
+                break
+
+            selected_type = max(
+                eligible_types,
+                key=lambda dtype: (
+                    (targets[dtype] - selected_atoms[dtype]) / targets[dtype]
+                ),
+            )
+            domain_samples = samples_by_type[selected_type]
+            sample_position = positions[selected_type]
+            subset_idx = domain_samples[sample_position % len(domain_samples)]
+            global_idx = (
+                self.subset_indices[subset_idx]
+                if self.subset_indices is not None
+                else subset_idx
+            )
+            atom_count = int(self._get_atom_count_fast(global_idx))
+            if atom_count <= 0:
+                raise ValueError(
+                    f"Invalid atom count for sample {global_idx}: {atom_count}"
+                )
+
+            mixed_samples.append(subset_idx)
+            positions[selected_type] += 1
+            selected_samples[selected_type] += 1
+            selected_atoms[selected_type] += atom_count
+
+        unmet = {
+            dtype: targets[dtype] - selected_atoms[dtype]
+            for dtype in targets
+            if selected_atoms[dtype] < targets[dtype]
+        }
+        if unmet:
+            raise ValueError(
+                "Atom quotas cannot be met without cycling; "
+                f"enable cycle_short_domains or lower the budget: {unmet}"
+            )
+
+        actual_total = sum(selected_atoms.values())
+        self.plan_stats = {
+            "epoch": self.epoch,
+            "requested_total_atoms": self.epoch_atom_budget,
+            "actual_total_atoms": actual_total,
+            "domains": {
+                dtype: {
+                    "weight": float(self.domain_atom_weights[dtype]),
+                    "target_atoms": targets[dtype],
+                    "actual_atoms": selected_atoms[dtype],
+                    "actual_atom_ratio": selected_atoms[dtype] / actual_total,
+                    "selected_samples": selected_samples[dtype],
+                    "unique_samples": min(
+                        selected_samples[dtype], len(samples_by_type[dtype])
+                    ),
+                    "repeated_samples": max(
+                        0, selected_samples[dtype] - len(samples_by_type[dtype])
+                    ),
+                    "available_samples": len(samples_by_type[dtype]),
+                }
+                for dtype in sorted(samples_by_type)
+            },
+        }
+        return mixed_samples
+
+    def _print_atom_quota_stats(self) -> None:
+        if not self.plan_stats:
+            return
+        print(
+            f"   Atom quota: requested={self.plan_stats['requested_total_atoms']:,}, "
+            f"actual={self.plan_stats['actual_total_atoms']:,}"
+        )
+        for dtype, stats in self.plan_stats["domains"].items():
+            print(
+                f"   {dtype.upper():10s} target={stats['target_atoms']:,} "
+                f"actual={stats['actual_atoms']:,} "
+                f"ratio={100.0 * stats['actual_atom_ratio']:.2f}% "
+                f"samples={stats['selected_samples']:,} "
+                f"unique={stats['unique_samples']:,} "
+                f"repeated={stats['repeated_samples']:,}"
+            )
+
+    def _atom_count_for_subset_index(self, subset_idx: int) -> int:
+        global_idx = (
+            self.subset_indices[subset_idx]
+            if self.subset_indices is not None
+            else subset_idx
+        )
+        return int(self._get_atom_count_fast(global_idx))
+
+    def _split_batches_to_fixed_count(
+        self, batches: List[List[int]]
+    ) -> List[List[int]]:
+        """Reach a stable epoch length by splitting batches without changing samples."""
+        natural_batch_count = len(batches)
+        if natural_batch_count > self.epoch_num_batches:
+            raise ValueError(
+                f"Natural atom-quota plan needs {natural_batch_count} batches, above "
+                f"configured epoch_num_batches={self.epoch_num_batches}; raise the "
+                "fixed count or lower the epoch atom budget"
+            )
+
+        batches = [list(batch) for batch in batches]
+        while len(batches) < self.epoch_num_batches:
+            splittable = [
+                (index, batch)
+                for index, batch in enumerate(batches)
+                if len(batch) > 1
+            ]
+            if not splittable:
+                raise ValueError(
+                    f"Cannot split {len(batches)} non-empty batches to requested "
+                    f"epoch_num_batches={self.epoch_num_batches}"
+                )
+
+            batch_index, batch = max(
+                splittable,
+                key=lambda item: (
+                    sum(self._atom_count_for_subset_index(idx) for idx in item[1]),
+                    len(item[1]),
+                    -item[0],
+                ),
+            )
+            atom_counts = [
+                self._atom_count_for_subset_index(idx) for idx in batch
+            ]
+            total_atoms = sum(atom_counts)
+            prefix_atoms = 0
+            best_cut = 1
+            best_difference = total_atoms
+            for cut, atom_count in enumerate(atom_counts[:-1], start=1):
+                prefix_atoms += atom_count
+                difference = abs(total_atoms - 2 * prefix_atoms)
+                if difference < best_difference:
+                    best_cut = cut
+                    best_difference = difference
+
+            batches[batch_index:batch_index + 1] = [
+                batch[:best_cut], batch[best_cut:]
+            ]
+
+        self.plan_stats["natural_batches"] = natural_batch_count
+        self.plan_stats["planned_batches"] = len(batches)
+        return batches
+
     def _create_batches_cross_modal(self, samples_by_chunk: dict) -> List[List[int]]:
         """
         Create batches in cross-modal mode (multi-domain).
@@ -343,7 +565,9 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         if total_samples == 0:
             return []
 
-        if self.cycle_short_domains and len(samples_by_type) > 1:
+        if self.epoch_atom_budget is not None:
+            mixed_samples = self._create_atom_quota_stream(samples_by_type)
+        elif self.cycle_short_domains and len(samples_by_type) > 1:
             mixed_samples = self._create_cycled_mixed_stream(samples_by_type)
         else:
             mixed_samples = self._create_single_pass_mixed_stream(samples_by_type)
@@ -372,11 +596,15 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         if current_batch:
             batches.append(current_batch)
 
+        if self.epoch_atom_budget is not None:
+            batches = self._split_batches_to_fixed_count(batches)
+
         return batches
 
-    def __iter__(self) -> Iterator[List[int]]:
-        """Generate batches for one epoch"""
-        import sys
+    def _get_batch_plan(self) -> List[List[int]]:
+        """Build one authoritative batch plan for the current epoch."""
+        if self._batch_plan_epoch == self.epoch and self._batch_plan is not None:
+            return self._batch_plan
 
         # Step 1: Organize samples by chunk
         print(f"\r⚡ Organizing samples by chunk...", end='', flush=True)
@@ -389,18 +617,28 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         else:
             batches = self._create_batches_standard(samples_by_chunk)
 
+        self._batch_plan = batches
+        self._batch_plan_epoch = self.epoch
         print(f"\r✅ Ready! {len(batches)} batches created.                    ")
+        self._print_atom_quota_stats()
+        return self._batch_plan
 
-        # Step 3: Yield batches
+    def __iter__(self) -> Iterator[List[int]]:
+        """Yield the same authoritative plan reported by ``__len__``."""
+        batches = self._get_batch_plan()
+
         for batch in batches:
             yield batch
 
     def __len__(self) -> int:
-        """Estimate number of batches"""
-        total_samples = len(self.subset_indices) if self.subset_indices is not None else len(self.dataset)
-        avg_atoms_per_sample = 500  # Conservative estimate
-        return max(1, (total_samples * avg_atoms_per_sample) // self.max_atoms_per_batch)
+        """Return the exact number of batches in the current epoch plan."""
+        return len(self._get_batch_plan())
 
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""
+        if epoch == self.epoch:
+            return
         self.epoch = epoch
+        self._batch_plan = None
+        self._batch_plan_epoch = None
+        self.plan_stats = None
