@@ -415,6 +415,10 @@ def create_data_loaders(dataset, config: PretrainingConfig):
     # Check multi-domain configuration
     multi_domain_config = getattr(config, 'multi_domain', None)
     is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
+    atom_sampling_config = (
+        multi_domain_config.get('atom_sampling', {}) if is_multi_domain else {}
+    )
+    use_atom_quota_sampling = bool(atom_sampling_config.get('enabled', False))
 
     # Check if using atom-based dynamic batching
     use_dynamic_batching = getattr(config, 'use_dynamic_batching', False)
@@ -427,11 +431,21 @@ def create_data_loaders(dataset, config: PretrainingConfig):
     if use_dynamic_batching and max_atoms_per_batch and is_lazy_dataset:
         # Check if using improved sampler (default: True)
         use_improved_sampler = getattr(config, 'use_improved_sampler', True)
+        if use_atom_quota_sampling and not use_improved_sampler:
+            raise ValueError(
+                "multi_domain.atom_sampling requires use_improved_sampler: true"
+            )
 
         if use_improved_sampler:
             print(f"⚡ Using ImprovedDynamicBatchSampler with max {max_atoms_per_batch:,} atoms/batch")
             print(f"   ✅ Metadata-only (no slow disk access)")
-            print(f"   ✅ Simplified proportional sampling")
+            if use_atom_quota_sampling:
+                print(
+                    f"   ✅ Atom-quota sampling: "
+                    f"{int(atom_sampling_config['epoch_atom_budget']):,} atoms/epoch"
+                )
+            else:
+                print(f"   ✅ Simplified proportional sampling")
             print(f"   ✅ Cache-optimized chunk ordering")
         else:
             print(f"⚡ Using DynamicChunkAwareBatchSampler with max {max_atoms_per_batch:,} atoms/batch")
@@ -452,7 +466,26 @@ def create_data_loaders(dataset, config: PretrainingConfig):
                 shuffle_within_chunk=True,
                 seed=config.seed,
                 enable_cross_modal_batches=is_multi_domain,
-                cycle_short_domains=is_multi_domain
+                cycle_short_domains=(
+                    bool(atom_sampling_config.get('cycle_to_quota', True))
+                    if use_atom_quota_sampling
+                    else is_multi_domain
+                ),
+                epoch_atom_budget=(
+                    int(atom_sampling_config['epoch_atom_budget'])
+                    if use_atom_quota_sampling
+                    else None
+                ),
+                domain_atom_weights=(
+                    atom_sampling_config.get('domain_weights')
+                    if use_atom_quota_sampling
+                    else None
+                ),
+                epoch_num_batches=(
+                    int(atom_sampling_config['epoch_num_batches'])
+                    if use_atom_quota_sampling
+                    else None
+                ),
             )
         else:
             train_batch_sampler = DynamicChunkAwareBatchSampler(

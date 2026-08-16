@@ -33,29 +33,24 @@ multi_domain:
     pdb:
       enabled: true
       chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks
-      atom_ratio: 70  
       chunk_range: [0, 9]  # Use all 10 chunks
     
     qm9:
       enabled: true  # QM9 with legacy edges (cutoff 5.0Å, 16 neighbors)
       chunk_dir: "/home/arin/data/qm9_chunks"  # Will match qm9_chunks_chunk_0 through qm9_chunks_chunk_4
-      atom_ratio: 30  
       chunk_range: null
     
     metabolite:
       enabled: false  # Not yet available
       chunk_dir: "../data/metabolites/processed_chunks"
-      atom_ratio: 10
     
     rna:
       enabled: false  # Future expansion
       chunk_dir: "../data/rna/processed_chunks"
-      atom_ratio: 5
     
     dna:
       enabled: false  # Future expansion
       chunk_dir: "../data/dna/processed_chunks"
-      atom_ratio: 0
   
   # Rotational Sampling Parameters
   target_atoms_per_rotation: 50000

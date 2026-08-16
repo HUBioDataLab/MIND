@@ -20,7 +20,7 @@
 seed: 42
 out_path: "outputs/multidomain_pretrain"
 wandb_project_name: "MIND-Project-Pretraining"
-wandb_run_name: "multidomain-run-1"
+wandb_run_name: "multidomain-100ep-pdb-unimol-rna"
 
 # -------------------------
 # Multi-Domain Configuration
@@ -31,46 +31,51 @@ multi_domain:
   # Dataset Configurations
   # - enabled: Whether to include this dataset type
   # - chunk_dir: Parent directory containing chunked .pt files
-  # - atom_ratio: Target percentage of atoms from this dataset type (will be normalized)
   datasets:
-    # chunk_range: [start, end] inclusive; null = use all chunks. atom_ratio: not yet used.
+    # chunk_range: [start, end] inclusive; null = use all chunks.
     pdb:
       enabled: true
       chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks
-      atom_ratio: 60  
       chunk_range: [0, 9]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
       max_graph_atoms: 12000
     
     qm9:
       enabled: false  # Replaced by unimol as the small-molecule domain.
       chunk_dir: "/home/arin/data/qm9_chunks"  # Will match qm9_chunks_chunk_0 through qm9_chunks_chunk_4
-      atom_ratio: 5  
       chunk_range: null
     
     metabolite:
       enabled: false  # Path fixed to 8TB build (497 chunks, proper layout). Earlier `smiles`-asymmetry build is gone; current chunks carry only an unused `bond_edge_index` key that PyG collate drops safely. Enable for the multi-domain mega train.
       chunk_dir: "/media/ubuntu/8TB/ege/processed"
-      atom_ratio: 10  # 10% of atoms from metabolites
       chunk_range: null
 
     unimol:
       enabled: true
       chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
-      atom_ratio: 25
       chunk_range: [0, 9]  # 10 chunks (balanced with pdb; bump for a larger run)
       max_graph_atoms: 12000
     
     rna:
       enabled: true
       chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k"
-      atom_ratio: 5   # 5% of atoms from RNA
       chunk_range: [0, 4]  # Filtered dev set: source chunks 0..4, each graph <=5,000 atoms.
       max_graph_atoms: 5000
     
     dna:
       enabled: false  # Future expansion
       chunk_dir: "../data/dna/processed_chunks"
-      atom_ratio: 0
+
+  # Train-only atom quotas. Whole graphs are selected until each domain reaches
+  # its epoch target; graphs and PT chunks are never split or regenerated.
+  atom_sampling:
+    enabled: true
+    epoch_atom_budget: 4800000
+    epoch_num_batches: 450  # Stable Lightning epoch length; natural batches are only split.
+    cycle_to_quota: true  # Repeat only after unique samples exhaust and only to close a quota.
+    domain_weights:
+      protein: 30
+      rna: 25
+      unimol: 45
   
   # Rotational Sampling Parameters
   target_atoms_per_rotation: 50000  #! Not used anymore. Target total atoms per rotation (adjust based on GPU RAM) 
@@ -95,11 +100,11 @@ use_universal_cache: true
 # -------------------------
 # Eğitim Parametreleri
 # -------------------------
-max_epochs: 30
+max_epochs: 2
 batch_size: 32  # Used for validation/test (training uses dynamic batching)
 use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
 use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
-max_atoms_per_batch: 15000  # Raised from 8000 now that RNA metadata/memory are stable; fits comfortably on 49 GB GPU with multi-domain batching
+max_atoms_per_batch: 12000  # Larger GPU run: improves throughput by allowing bigger atom-aware dynamic batches.
 log_batch_statistics: true  # Print batch composition statistics during training
 batch_stats_log_frequency: 25  # Log every N batches
 
@@ -274,7 +279,6 @@ pma_num_outputs: 32 #! Not used
 #       - Set multi_domain.enabled = true
 #       - Set multi_domain.datasets.qm9.enabled = true
 #       - Set multi_domain.datasets.metabolite.enabled = true
-#       - Adjust atom_ratio values if needed (will be auto-normalized)
 #
 #    c. Run training:
 #       python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain.yaml
@@ -282,7 +286,5 @@ pma_num_outputs: 32 #! Not used
 # 3. TUNING PARAMETERS:
 #    - target_atoms_per_rotation: Increase if you have more GPU RAM, decrease if OOM
 #    - max_cache_chunks: Increase if you have more system RAM
-#    - atom_ratio: Adjust to control dataset contribution (doesn't need to sum to 100)
 #
 # ===================================================================
-

@@ -73,7 +73,7 @@ The smooth weighted scheduler spreads those slots across the round instead of pl
 
 ## Are Ratios Fixed During The Epoch?
 
-The ratios are computed once when the sampler builds the epoch stream. They come from the number of samples available in the current train split, not directly from the YAML `atom_ratio` fields.
+The ratios are computed once when the sampler builds the epoch stream. They come from the number of samples available in the current train split. There is no YAML setting that controls these ratios.
 
 Example:
 

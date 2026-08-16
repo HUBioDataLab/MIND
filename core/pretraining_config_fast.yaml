@@ -16,35 +16,38 @@ multi_domain:
     pdb:
       enabled: true
       chunk_dir: "/home/yusuf/data/proteins/processed_14atom"
-      atom_ratio: 60
       chunk_range: [0, 0]
       max_graph_atoms: 12000
     qm9:
       enabled: false  # Replaced by unimol as the small-molecule domain.
       chunk_dir: "/home/arin/data/qm9_chunks"
-      atom_ratio: 5
       chunk_range: [0, 0]
     metabolite:
       enabled: false  # DEFERRED: 8TB build (497 chunks) carries `bond_edge_index` that PDB/RNA/UniMol lack → PyG collate KeyError in mixed batches. Re-enable after we either strip the key or give all domains an empty bond graph (only needed if a bond-masking task is added).
       chunk_dir: "/media/ubuntu/8TB/ege/processed"
-      atom_ratio: 10
       chunk_range: [0, 0]
     unimol:
       enabled: true
       chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
-      atom_ratio: 25
       chunk_range: [0, 0]
       max_graph_atoms: 12000
     rna:
       enabled: true
       chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k"
-      atom_ratio: 5
       chunk_range: [0, 0]
       max_graph_atoms: 5000
     dna:
       enabled: false
       chunk_dir: "../data/dna/processed_chunks"
-      atom_ratio: 0
+  atom_sampling:
+    enabled: true
+    epoch_atom_budget: 700000
+    epoch_num_batches: 140
+    cycle_to_quota: true
+    domain_weights:
+      protein: 30
+      rna: 25
+      unimol: 45
   max_cache_chunks: 4
   fallback_to_single_domain: true
 
@@ -60,7 +63,7 @@ max_epochs: 3
 batch_size: 32
 use_dynamic_batching: true
 use_improved_sampler: true
-max_atoms_per_batch: 12000
+max_atoms_per_batch: 6000  # Safe fast-validation budget for 32 GB GPUs.
 log_batch_statistics: true
 batch_stats_log_frequency: 10
 
