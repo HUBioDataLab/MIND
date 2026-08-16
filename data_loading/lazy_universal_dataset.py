@@ -108,7 +108,8 @@ class LazyUniversalDataset(Dataset):
         max_cache_chunks: int = 3,
         verbose: bool = True,
         load_metadata: bool = False,
-        metadata_search_paths: Optional[List[str]] = None
+        metadata_search_paths: Optional[List[str]] = None,
+        max_graph_atoms_by_domain: Optional[Dict[str, int]] = None,
     ):
         """
         Initialize LazyUniversalDataset
@@ -130,6 +131,7 @@ class LazyUniversalDataset(Dataset):
         self.verbose = verbose
         self.load_metadata = load_metadata
         self.metadata_search_paths = metadata_search_paths or []
+        self.max_graph_atoms_by_domain = max_graph_atoms_by_domain or {}
         
         # LRU cache for loaded chunks
         self._cache = OrderedDict()
@@ -145,6 +147,7 @@ class LazyUniversalDataset(Dataset):
         # Load metadata if requested
         if self.load_metadata:
             self._load_metadata()
+            self._validate_graph_size_limits()
         
         if self.verbose:
             print(f"✅ LazyUniversalDataset initialized:")
@@ -470,6 +473,30 @@ class LazyUniversalDataset(Dataset):
                     'bucket': sample_meta['bucket'],
                     'dataset_type': metadata['dataset_type']
                 })
+
+    def _validate_graph_size_limits(self):
+        """Reject configured oversized graphs before train/val/test splitting."""
+        if not self.max_graph_atoms_by_domain:
+            return
+        if not self.metadata_loaded:
+            raise ValueError("max_graph_atoms requires complete chunk metadata")
+
+        for chunk_idx, metadata in enumerate(self.chunk_metadata):
+            domain = str(metadata.get('dataset_type', 'unknown'))
+            limit = self.max_graph_atoms_by_domain.get(domain)
+            if limit is None:
+                continue
+            for sample in metadata['samples']:
+                node_count = int(sample['num_atoms'])
+                if node_count <= limit:
+                    continue
+                structure_id = sample.get('mol_id', '<metadata-unavailable>')
+                raise ValueError(
+                    "Oversized graph rejected before split assignment: "
+                    f"structure_id={structure_id}, domain={domain}, "
+                    f"node_count={node_count}, split=all, configured_limit={limit}, "
+                    f"chunk={self.chunk_pt_files[chunk_idx]}, local_idx={sample['idx']}"
+                )
     
     def get_sample_metadata(self, idx: int) -> Optional[Dict[str, Any]]:
         """

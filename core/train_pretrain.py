@@ -213,7 +213,13 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             max_cache_chunks=multi_domain_config.get('max_cache_chunks', 10),
             verbose=True,
             load_metadata=load_metadata,
-            metadata_search_paths=metadata_search_paths if metadata_search_paths else None
+            metadata_search_paths=metadata_search_paths if metadata_search_paths else None,
+            max_graph_atoms_by_domain={
+                dtype: int(dtype_config['max_graph_atoms'])
+                for dtype, dtype_config in multi_domain_config['datasets'].items()
+                if dtype_config.get('enabled', False)
+                and dtype_config.get('max_graph_atoms') is not None
+            },
         )
 
         print(f"\n✅ Multi-domain dataset loaded:")

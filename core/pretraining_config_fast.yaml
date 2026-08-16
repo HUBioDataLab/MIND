@@ -18,6 +18,7 @@ multi_domain:
       chunk_dir: "/home/yusuf/data/proteins/processed_14atom"
       atom_ratio: 60
       chunk_range: [0, 0]
+      max_graph_atoms: 12000
     qm9:
       enabled: false  # Replaced by unimol as the small-molecule domain.
       chunk_dir: "/home/arin/data/qm9_chunks"
@@ -33,11 +34,13 @@ multi_domain:
       chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
       atom_ratio: 25
       chunk_range: [0, 0]
+      max_graph_atoms: 12000
     rna:
       enabled: true
       chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k"
       atom_ratio: 5
       chunk_range: [0, 0]
+      max_graph_atoms: 5000
     dna:
       enabled: false
       chunk_dir: "../data/dna/processed_chunks"

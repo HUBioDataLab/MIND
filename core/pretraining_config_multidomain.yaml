@@ -39,6 +39,7 @@ multi_domain:
       chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks
       atom_ratio: 60  
       chunk_range: [0, 9]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
+      max_graph_atoms: 12000
     
     qm9:
       enabled: false  # Replaced by unimol as the small-molecule domain.
@@ -57,12 +58,14 @@ multi_domain:
       chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
       atom_ratio: 25
       chunk_range: [0, 9]  # 10 chunks (balanced with pdb; bump for a larger run)
+      max_graph_atoms: 12000
     
     rna:
       enabled: true
       chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k"
       atom_ratio: 5   # 5% of atoms from RNA
       chunk_range: [0, 4]  # Filtered dev set: source chunks 0..4, each graph <=5,000 atoms.
+      max_graph_atoms: 5000
     
     dna:
       enabled: false  # Future expansion
