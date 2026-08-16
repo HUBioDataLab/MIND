@@ -23,6 +23,7 @@ from data_loading.atom_position_vocab import (
     RNA_BACKBONE_ATOMS,
     RNA_BASE_ATOM_PRIORITY,
     RNA_TERMINAL_ATOMS,
+    has_exact_rna_backbone,
     normalize_rna_position_code,
 )
 from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
@@ -49,6 +50,22 @@ TERMINAL_ATOMS = set(RNA_TERMINAL_ATOMS)
 VIRTUAL_ATOM = 'V'  # All virtual atoms have the same generic type
 
 
+def normalize_rna_element(element: str, pos_code: str) -> str:
+    """Normalize RNA element symbols, including legacy bromine records.
+
+    Some source RNA CIF files label bromine atoms with atom name ``BR`` but
+    carry the truncated ``_atom_site.type_symbol`` value ``B``.  Treating that
+    value literally turns bromine into boron (or the rare class in a reduced
+    element vocabulary).  The atom name disambiguates this specific legacy
+    case; a genuine boron atom named ``B`` remains boron.
+    """
+    normalized_element = str(element or "C").strip().upper()
+    normalized_position = normalize_rna_position_code(pos_code).upper()
+    if normalized_element == 'B' and normalized_position == 'BR':
+        return 'BR'
+    return normalized_element
+
+
 class RNAAdapter(BaseAdapter):
     """
     Adapter to parse raw RNA CIF files into the UniversalMolecule format.
@@ -56,8 +73,10 @@ class RNAAdapter(BaseAdapter):
     Supports mmCIF format with optional filtering via manifest files.
     Processes standard RNA nucleotides (A, U, G, C) and common modified bases.
     
-    Supports 23-atom uniform representation to prevent sequence leakage during
-    masked language modeling training.
+    Supports a 23-slot representation for template-eligible nucleotides. A
+    nucleotide is eligible only when all 12 canonical backbone positions occur
+    exactly once; incomplete/duplicated backbone blocks must be quarantined as
+    MLM/template targets rather than receiving invented coordinates.
     """
 
     # Standard RNA nucleotides and common modified variants
@@ -88,8 +107,9 @@ class RNAAdapter(BaseAdapter):
         
         if self.use_23atom_uniform:
             print(f"✨ 23-atom uniform representation ENABLED")
-            print(f"   Each nucleotide will have exactly {TOTAL_ATOMS_PER_RESIDUE} atoms")
+            print(f"   Complete-backbone nucleotides have exactly {TOTAL_ATOMS_PER_RESIDUE} atoms")
             print(f"   ({len(BACKBONE_ATOMS)} backbone + {MAX_SIDECHAIN_ATOMS} sidechain)")
+            print(f"   Incomplete/duplicated backbone blocks require target quarantine")
             print(f"   Virtual atoms use generic type '{VIRTUAL_ATOM}' to prevent sequence leakage")
 
     def _get_base_center_position(self, atoms: List[UniversalAtom], res_name: str) -> Tuple[float, float, float]:
@@ -170,7 +190,11 @@ class RNAAdapter(BaseAdapter):
         block_idx: int
     ) -> List[UniversalAtom]:
         """
-        Standardize a residue to exactly 23 atoms (12 backbone + 11 sidechain).
+        Standardize the base side to 11 slots.
+
+        A block with an exact 12-position canonical backbone becomes 23 atoms.
+        Incomplete/duplicated backbone blocks deliberately remain non-23 and
+        must be excluded from MLM/template target selection.
         
         For nucleotides with < 11 sidechain atoms, virtual atoms are added at the
         base center position. This prevents the model from inferring nucleotide type
@@ -186,6 +210,12 @@ class RNAAdapter(BaseAdapter):
         Returns:
             List of exactly 23 atoms (12 backbone + 11 sidechain)
         """
+        # Repair legacy UniversalAtom caches too, not only newly parsed CIFs.
+        # This keeps temporary experiments built from an old .pkl chemically
+        # consistent without mutating that source cache on disk.
+        for atom in atoms:
+            atom.element = normalize_rna_element(atom.element, atom.pos_code)
+
         # Separate backbone and sidechain atoms
         backbone_atoms = []
         sidechain_atoms = []
@@ -234,6 +264,12 @@ class RNAAdapter(BaseAdapter):
         
         # Combine: 12 backbone + 11 sidechain = 23 atoms
         standardized_atoms = backbone_atoms + standardized_sidechain
+
+        if has_exact_rna_backbone(atom.pos_code for atom in atoms):
+            if len(standardized_atoms) != TOTAL_ATOMS_PER_RESIDUE:
+                raise AssertionError(
+                    "Exact RNA backbone did not produce the 23-slot contract"
+                )
         
         # Ensure all atoms have correct atom_idx_in_block
         for i, atom in enumerate(standardized_atoms):
@@ -389,7 +425,8 @@ class RNAAdapter(BaseAdapter):
                     
                     for atom in residue:
                         # Get element, default to carbon if missing
-                        element = (atom.element or "C").strip().upper()
+                        atom_name = normalize_rna_position_code(atom.get_name())
+                        element = normalize_rna_element(atom.element, atom_name)
                         
                         # Skip hydrogen atoms to reduce complexity
                         if element == 'H':
@@ -403,7 +440,7 @@ class RNAAdapter(BaseAdapter):
                         uni_atom = UniversalAtom(
                             element=element,
                             position=tuple(atom.get_coord().tolist()),
-                            pos_code=normalize_rna_position_code(atom.get_name()),
+                            pos_code=atom_name,
                             block_idx=len(blocks),
                             atom_idx_in_block=len(block_atoms),
                             entity_idx=entity_idx

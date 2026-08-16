@@ -32,7 +32,55 @@ from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
 from tqdm import tqdm
 
+from data_loading.atom_position_vocab import (
+    RARE_ATOMIC_NUMBER,
+    VIRTUAL_ATOMIC_NUMBER,
+    is_virtual_position_code,
+)
+
 INDEX_MAP_SUFFIX = "_index_map.json"
+
+
+def normalize_legacy_atom_ids(sample: Data) -> Data:
+    """Repair legacy V and Br ids from semantic position labels.
+
+    Existing production caches predate the explicit V=120 mapping. Their
+    semantic ``pos_code`` still distinguishes V1..Vn from real rare atoms, so
+    the migration can happen safely at load time without rewriting the .pt.
+    Older RNA caches also encoded atom-name BR as boron z=5; BR is one of the
+    11 common elements and is restored to bromine z=35 here.
+    """
+    if not hasattr(sample, 'z') or sample.z is None:
+        return sample
+    if not hasattr(sample, 'pos_code') or sample.pos_code is None:
+        return sample
+
+    pos_codes = sample.pos_code
+    if (len(pos_codes) == 1
+            and isinstance(pos_codes[0], (list, tuple))):
+        pos_codes = pos_codes[0]
+    if len(pos_codes) != sample.z.numel():
+        raise ValueError(
+            "Cannot disambiguate legacy virtual atoms: "
+            f"pos_code/z length mismatch ({len(pos_codes)} != {sample.z.numel()})"
+        )
+
+    virtual_mask = torch.tensor(
+        [is_virtual_position_code(code) for code in pos_codes],
+        dtype=torch.bool,
+        device=sample.z.device,
+    )
+    legacy_virtual_mask = virtual_mask & (sample.z == RARE_ATOMIC_NUMBER)
+    bromine_mask = torch.tensor(
+        [str(code).strip().upper() == 'BR' for code in pos_codes],
+        dtype=torch.bool,
+        device=sample.z.device,
+    ) & (sample.z != 35)
+    if legacy_virtual_mask.any() or bromine_mask.any():
+        sample.z = sample.z.clone()
+        sample.z[legacy_virtual_mask] = VIRTUAL_ATOMIC_NUMBER
+        sample.z[bromine_mask] = 35
+    return sample
 
 
 class LazyUniversalDataset(Dataset):
@@ -237,6 +285,7 @@ class LazyUniversalDataset(Dataset):
                 # Extract sample
                 data, slices = self._cache[pt_file]
                 sample = self._extract_sample(data, slices, local_idx)
+                sample = normalize_legacy_atom_ids(sample)
                 
                 # Add dataset_type for batch statistics
                 if self.metadata_loaded and chunk_idx < len(self.chunk_metadata):

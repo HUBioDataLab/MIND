@@ -72,11 +72,14 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
             seed=None  # None = different edges each epoch
         ))
 
-    # Add MLM transform if MLM is in pretraining tasks. When protein block-MLM
-    # is enabled we skip the per-sample atom-level transform and let
-    # `_ensure_mlm_attributes` build the mask at batch time (residue-level for
-    # protein graphs, atom-level for everything else).
-    if "mlm" in config.pretraining_tasks and not getattr(config, 'protein_block_mlm', False):
+    # Add the per-sample atom transform only when no domain needs batch-time
+    # block masking. Protein/RNA block modes must see the collated graph and
+    # block indices before making their single shared selection.
+    uses_batch_time_block_mlm = (
+        getattr(config, 'protein_block_mlm', False)
+        or getattr(config, 'rna_block_mlm', False)
+    )
+    if "mlm" in config.pretraining_tasks and not uses_batch_time_block_mlm:
         mask_ratio = getattr(config, 'mlm_mask_ratio', 0.15)
         transforms.append(MaskAtomTypes(
             mask_ratio=mask_ratio,
@@ -670,7 +673,11 @@ def train_universal_pretraining(
             print(f"✅ Protein Block-MLM ENABLED — residue-level mask "
                   f"(ratio={block_ratio}); other molecule types stay atom-level.")
         else:
-            print("ℹ️  Protein Block-MLM disabled — atom-level MLM for all graph types.")
+            print("ℹ️  Protein Block-MLM disabled — proteins stay atom-level.")
+        if getattr(config, 'rna_block_mlm', False):
+            block_ratio = getattr(config, 'rna_block_mlm_ratio', 0.15)
+            print(f"✅ RNA Block-MLM ENABLED — nucleotide-level mask "
+                  f"(ratio={block_ratio}); non-enabled domains stay atom-level.")
     print("=" * 60)
 
     # Set random seed

@@ -6,7 +6,16 @@ assertions prevent a copied or incomplete list from silently mapping real atoms
 to the virtual metric class.
 """
 
-from typing import Dict, Tuple
+from collections import Counter
+from typing import Dict, Iterable, Tuple
+
+
+# Sparse model ids. Common elements retain their physical atomic numbers;
+# uncommon real elements collapse to R=119, while adapter-generated virtual
+# padding is a separate prediction target at V=120. Input masking uses id 0,
+# so PretrainingConfig.atom_types=121 covers the full 0..120 range.
+RARE_ATOMIC_NUMBER = 119
+VIRTUAL_ATOMIC_NUMBER = 120
 
 
 PROTEIN_BACKBONE_ATOMS: Tuple[str, ...] = ('N', 'CA', 'C', 'O')
@@ -106,6 +115,59 @@ def is_virtual_position_code(pos_code: str) -> bool:
     """Return true only for adapter-generated V or V<number> padding labels."""
     code = str(pos_code or '')
     return code == 'V' or (code.startswith('V') and code[1:].isdigit())
+
+
+def rna_backbone_contract_violations(
+    pos_codes: Iterable[str],
+) -> Tuple[Tuple[str, ...], Dict[str, int]]:
+    """Return missing and duplicated canonical RNA backbone positions."""
+    counts = Counter(normalize_rna_position_code(code) for code in pos_codes)
+    missing = tuple(code for code in RNA_BACKBONE_ATOMS if counts[code] == 0)
+    duplicates = {
+        code: counts[code]
+        for code in RNA_BACKBONE_ATOMS
+        if counts[code] > 1
+    }
+    return missing, duplicates
+
+
+def has_exact_rna_backbone(pos_codes: Iterable[str]) -> bool:
+    """Return whether every canonical RNA backbone position occurs once."""
+    missing, duplicates = rna_backbone_contract_violations(pos_codes)
+    return not missing and not duplicates
+
+
+def is_p_only_rna_block(atoms: Iterable[object]) -> bool:
+    """Return whether a block has exactly one real atom and that atom is P.
+
+    Adapter-generated virtual padding is deliberately ignored. This detects
+    both historical one-atom ``[P]`` blocks and future standardized forms such
+    as ``[P, V1, ..., V11]`` without confusing a real atom whose element happens
+    to be vanadium with a virtual positional slot.
+    """
+    real_position_codes = []
+    for atom in atoms:
+        position_code = normalize_rna_position_code(
+            getattr(atom, 'pos_code', '')
+        )
+        is_virtual = bool(getattr(atom, 'is_virtual', False))
+        if is_virtual or is_virtual_position_code(position_code):
+            continue
+        real_position_codes.append(position_code)
+    return real_position_codes == ['P']
+
+
+def count_p_only_rna_blocks(molecule: object) -> int:
+    """Count coarse P-only nucleotide blocks in a UniversalMolecule-like object."""
+    return sum(
+        is_p_only_rna_block(getattr(block, 'atoms', ()))
+        for block in getattr(molecule, 'blocks', ())
+    )
+
+
+def rna_molecule_contains_p_only_block(molecule: object) -> bool:
+    """Return whether an RNA molecule mixes in any coarse P-only block."""
+    return count_p_only_rna_blocks(molecule) > 0
 
 
 def _union(values: Dict[str, Tuple[str, ...]]) -> set:

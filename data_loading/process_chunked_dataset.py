@@ -115,6 +115,13 @@ def apply_config_defaults(args: argparse.Namespace, config: Dict) -> None:
         args.random_edge_min_distance = config['random_edge_min_distance']
         print(f"  ✓ random_edge_min_distance from config: {args.random_edge_min_distance}")
 
+    if (
+        not args.exclude_rna_p_only_molecules
+        and config.get('exclude_rna_p_only_molecules', False)
+    ):
+        args.exclude_rna_p_only_molecules = True
+        print("  ✓ exclude_rna_p_only_molecules from config: True")
+
 
 def validate_arguments(args: argparse.Namespace) -> Tuple[bool, str]:
     """
@@ -138,6 +145,8 @@ def validate_arguments(args: argparse.Namespace) -> Tuple[bool, str]:
     
     if args.manifest_file is not None and not args.manifest_file.exists():
         return False, f"Manifest file not found: {args.manifest_file}"
+    if args.pyg_workers is not None and args.pyg_workers < 1:
+        return False, "--pyg-workers must be at least 1"
     
     return True, ""
 
@@ -216,6 +225,10 @@ def process_chunk(chunk_idx: int, args: argparse.Namespace) -> bool:
         pyg_cmd.extend(["--cutoff", str(args.cutoff)])
     if args.max_neighbors:
         pyg_cmd.extend(["--max-neighbors", str(args.max_neighbors)])
+    if args.pyg_workers is not None:
+        pyg_cmd.extend(["--num-workers", str(args.pyg_workers)])
+    if args.dataset == 'rna' and args.exclude_rna_p_only_molecules:
+        pyg_cmd.append("--exclude-rna-p-only-molecules")
     
     # Hybrid edge parameters (Salad-inspired) - only for PDB/protein datasets
     if args.dataset == 'pdb' and args.use_hybrid_edges:
@@ -345,6 +358,20 @@ def main() -> int:
         default=None,
         help="Maximum neighbors per node (default: 64, legacy mode)"
     )
+    parser.add_argument(
+        "--pyg-workers",
+        type=int,
+        default=None,
+        help="Worker cap for molecule-to-PyG conversion inside each chunk",
+    )
+    parser.add_argument(
+        "--exclude-rna-p-only-molecules",
+        action="store_true",
+        help=(
+            "For RNA, exclude a molecule when any nucleotide has one real P "
+            "atom and no other real atoms"
+        ),
+    )
     
     # Hybrid edge parameters (Salad-inspired)
     parser.add_argument(
@@ -447,6 +474,12 @@ def main() -> int:
     print(f"Cache dir:      {args.cache_dir}")
     print(f"Output base:    {args.output_base}")
     print(f"Cutoff:         {args.cutoff} Å")
+    print(f"PyG workers:    {args.pyg_workers or 'auto'}")
+    if args.dataset == 'rna':
+        print(
+            "Exclude P-only RNA molecules: "
+            f"{args.exclude_rna_p_only_molecules}"
+        )
     
     if args.use_hybrid_edges and args.dataset == 'pdb':
         print(f"\n🔬 Hybrid Edge Construction (Salad-inspired):")

@@ -30,6 +30,16 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 #from data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 
+
+def _sample_display_id(sample):
+    """Return a readable id for dict- and path-based adapter inputs."""
+    if isinstance(sample, dict):
+        return sample.get('id', 'unknown')
+    if hasattr(sample, 'stem'):
+        return sample.stem
+    return getattr(sample, 'id', 'unknown')
+
+
 def validate_universal_compatibility(adapter, data_path, adapter_name="Adapter", max_samples=1):
     """Validate that any adapter produces compatible universal representations"""
     
@@ -44,7 +54,7 @@ def validate_universal_compatibility(adapter, data_path, adapter_name="Adapter",
         
         # Test first sample
         sample = raw_data[0]
-        print(f"Sample: {sample.get('id', 'unknown')}")
+        print(f"Sample: {_sample_display_id(sample)}")
         
         # Convert to universal
         universal_mol = adapter.convert_to_universal(sample)

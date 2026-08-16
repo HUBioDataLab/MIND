@@ -140,6 +140,20 @@ mlm_mask_ratio: 0.15
 # Protein-only block MLM (see multidomain config for details).
 protein_block_mlm: true
 protein_block_mlm_ratio: 0.15
+rna_block_mlm: true
+rna_block_mlm_ratio: 0.15
+use_domain_local_slot_embedding: true
+virtual_atom_loss_weight: 0.2
+protein_block_mlm_exclude_legacy_oxt: true
+
+# Runtime canonical-slot templates remain opt-in. When enabled against a new
+# cache whose visible V coordinates/edges were precomputed, set the final flag
+# true so each batch rebuilds only the selected masked-residue edges.
+masked_slot_template:
+  enabled: true
+  protein: true
+  rna: true
+  visible_virtuals_prepositioned: true
 
 temperature: 0.2
 

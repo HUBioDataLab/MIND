@@ -10,7 +10,7 @@ Atom layout (matches data_loading/adapters/protein_adapter.py):
 - 4 backbone atoms: N, CA, C, O (always present)
 - Up to 10 sidechain slots: filled by real atoms from SIDECHAIN_ATOM_PRIORITY,
   then virtual atoms (V) for the remaining slots
-- Virtual atoms have element 'V' (atomic_num 119); their pos_code is "V1".."V10"
+- Virtual atoms have element 'V' (model id 120); their pos_code is "V1".."V10"
   but they collapse to a single 'V' class in the metric vocabulary.
 
 Parallels core/rna_atom_types.py; intentionally keeps the same API so that
@@ -20,9 +20,11 @@ PerAtomMetricsCalculator and the per-atom metric callback can be reused.
 from typing import Dict, List
 
 from data_loading.atom_position_vocab import (
+    RARE_ATOMIC_NUMBER,
     PROTEIN_BACKBONE_ATOMS as SHARED_PROTEIN_BACKBONE_ATOMS,
     PROTEIN_SIDECHAIN_ATOM_PRIORITY,
     PROTEIN_TERMINAL_ATOMS as SHARED_PROTEIN_TERMINAL_ATOMS,
+    VIRTUAL_ATOMIC_NUMBER,
     is_virtual_position_code,
 )
 
@@ -74,7 +76,8 @@ ATOMIC_NUM_TO_ELEMENT: Dict[int, str] = {
     17: 'Cl',
     35: 'Br',
     53: 'I',
-    119: 'V',
+    RARE_ATOMIC_NUMBER: PROTEIN_UNKNOWN_ATOM,
+    VIRTUAL_ATOMIC_NUMBER: PROTEIN_VIRTUAL_ATOM,
 }
 
 

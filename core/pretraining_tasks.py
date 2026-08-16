@@ -4,6 +4,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from core.pretraining_config import PretrainingConfig
+from data_loading.atom_position_vocab import VIRTUAL_ATOMIC_NUMBER
 
 
 class PretrainingTasks(nn.Module):
@@ -102,17 +103,41 @@ class PretrainingTasks(nn.Module):
         pos = data.pos
         num_atoms = pos.size(0)
 
-        max_pairs = min(1000, num_atoms * (num_atoms - 1) // 2)
+        template_node_mask = getattr(data, 'template_node_mask', None)
+        if template_node_mask is None:
+            eligible_indices = None
+            eligible_atoms = num_atoms
+        else:
+            if template_node_mask.numel() != num_atoms:
+                raise ValueError(
+                    "template_node_mask must contain one value per atom"
+                )
+            eligible_indices = torch.where(
+                ~template_node_mask.to(device=pos.device, dtype=torch.bool)
+            )[0]
+            eligible_atoms = int(eligible_indices.numel())
 
-        if num_atoms <= 50:
+        if eligible_atoms < 2:
+            return torch.tensor(
+                0.0, device=node_embeddings.device, requires_grad=True
+            )
+
+        max_pairs = min(1000, eligible_atoms * (eligible_atoms - 1) // 2)
+
+        if eligible_atoms <= 50:
             i_indices, j_indices = torch.triu_indices(
-                num_atoms, num_atoms, offset=1, device=node_embeddings.device
+                eligible_atoms,
+                eligible_atoms,
+                offset=1,
+                device=node_embeddings.device,
             )
         else:
             pairs = set()
             attempts = 0
             while len(pairs) < max_pairs and attempts < max_pairs * 3:
-                i, j = torch.randint(0, num_atoms, (2,), device=pos.device).tolist()
+                i, j = torch.randint(
+                    0, eligible_atoms, (2,), device=pos.device
+                ).tolist()
                 if i != j:
                     pair = (min(i, j), max(i, j))
                     pairs.add(pair)
@@ -126,6 +151,10 @@ class PretrainingTasks(nn.Module):
                 j_indices = torch.tensor(j_indices, device=node_embeddings.device)
             else:
                 return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+
+        if eligible_indices is not None:
+            i_indices = eligible_indices[i_indices]
+            j_indices = eligible_indices[j_indices]
 
         if len(i_indices) == 0:
             return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
@@ -171,8 +200,30 @@ class PretrainingTasks(nn.Module):
         original_types = data.original_types
 
         logits = self.mlm_head(node_embeddings)
-        loss = F.cross_entropy(logits[mask], original_types[mask], reduction='mean')
-        return loss
+        masked_logits = logits[mask]
+        masked_targets = original_types[mask]
+        virtual_weight = float(
+            getattr(self.config, "virtual_atom_loss_weight", 1.0)
+        )
+        if virtual_weight == 1.0:
+            return F.cross_entropy(
+                masked_logits, masked_targets, reduction='mean'
+            )
+
+        virtual_mask = masked_targets == VIRTUAL_ATOMIC_NUMBER
+        real_mask = ~virtual_mask
+        per_node_loss = F.cross_entropy(
+            masked_logits, masked_targets, reduction='none'
+        )
+        real_loss = (
+            (per_node_loss * real_mask).sum()
+            / real_mask.sum().clamp_min(1)
+        )
+        virtual_loss = (
+            (per_node_loss * virtual_mask).sum()
+            / virtual_mask.sum().clamp_min(1)
+        )
+        return real_loss + virtual_weight * virtual_loss
 
     def coordinate_denoising_loss(self, node_embeddings, data):
         """

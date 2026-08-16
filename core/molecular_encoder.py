@@ -12,6 +12,78 @@ from esa.utils.posenc_encoders.kernel_pos_encoder import KernelPENodeEncoder
 from core.pretraining_config import PretrainingConfig
 
 
+PROTEIN_LOCAL_SLOT_COUNT = 14
+RNA_LOCAL_SLOT_COUNT = 23
+PROTEIN_LOCAL_SLOT_OFFSET = 1
+RNA_LOCAL_SLOT_OFFSET = PROTEIN_LOCAL_SLOT_OFFSET + PROTEIN_LOCAL_SLOT_COUNT
+NUM_DOMAIN_LOCAL_SLOT_IDS = (
+    1 + PROTEIN_LOCAL_SLOT_COUNT + RNA_LOCAL_SLOT_COUNT
+)
+
+
+def build_domain_local_slot_ids(batch, num_nodes: int, device) -> torch.Tensor:
+    """Return domain-local atom ordinal ids without consulting atom identity.
+
+    ID 0 means "no reliable fixed slot". Protein blocks with exactly 14 nodes
+    receive ids 1..14; RNA blocks with exactly 23 nodes receive ids 15..37.
+    The calculation uses only graph domain, block membership, and node order,
+    so masking atomic numbers cannot reveal the target label through this id.
+    """
+    slot_ids = torch.zeros(num_nodes, dtype=torch.long, device=device)
+    if (
+        batch is None
+        or not hasattr(batch, "batch")
+        or batch.batch is None
+        or not hasattr(batch, "block_idx")
+        or batch.block_idx is None
+        or batch.batch.numel() != num_nodes
+        or batch.block_idx.numel() != num_nodes
+        or num_nodes == 0
+    ):
+        return slot_ids
+
+    graph_ids = batch.batch.to(device=device, dtype=torch.long)
+    block_ids = batch.block_idx.to(device=device)
+    raw_types = getattr(batch, "dataset_type", None)
+    if raw_types is None:
+        return slot_ids
+    if isinstance(raw_types, (list, tuple)):
+        graph_types = [str(value).lower() for value in raw_types]
+    else:
+        num_graphs = int(getattr(batch, "num_graphs", 1) or 1)
+        graph_types = [str(raw_types).lower()] * num_graphs
+
+    num_graphs = int(graph_ids.max().item()) + 1
+    expected_by_graph = torch.zeros(num_graphs, dtype=torch.long, device=device)
+    offset_by_graph = torch.zeros(num_graphs, dtype=torch.long, device=device)
+    for graph_index in range(min(num_graphs, len(graph_types))):
+        graph_type = graph_types[graph_index]
+        if graph_type in {"pdb", "protein"}:
+            expected_by_graph[graph_index] = PROTEIN_LOCAL_SLOT_COUNT
+            offset_by_graph[graph_index] = PROTEIN_LOCAL_SLOT_OFFSET
+        elif graph_type == "rna":
+            expected_by_graph[graph_index] = RNA_LOCAL_SLOT_COUNT
+            offset_by_graph[graph_index] = RNA_LOCAL_SLOT_OFFSET
+
+    # PyG preserves node order and each residue/nucleotide is contiguous. Build
+    # run ids once, then calculate run length and local ordinal vectorially.
+    run_start = torch.ones(num_nodes, dtype=torch.bool, device=device)
+    if num_nodes > 1:
+        run_start[1:] = (
+            (graph_ids[1:] != graph_ids[:-1])
+            | (block_ids[1:] != block_ids[:-1])
+        )
+    run_ids = torch.cumsum(run_start.to(torch.long), dim=0) - 1
+    run_starts = torch.where(run_start)[0]
+    run_lengths = torch.bincount(run_ids)
+    local_ordinals = torch.arange(num_nodes, device=device) - run_starts[run_ids]
+
+    expected = expected_by_graph[graph_ids]
+    valid = (expected > 0) & (run_lengths[run_ids] == expected)
+    slot_ids[valid] = offset_by_graph[graph_ids[valid]] + local_ordinals[valid]
+    return slot_ids
+
+
 def nearest_multiple_of_8(n: int) -> int:
     return math.ceil(n / 8) * 8
 
@@ -37,6 +109,14 @@ class UniversalMolecularEncoder(nn.Module):
         else:
             self.gaussian_layer = None
             self.coordinate_projection = None
+
+        self.domain_local_slot_embedding = None
+        if getattr(config, "use_domain_local_slot_embedding", False):
+            self.domain_local_slot_embedding = nn.Embedding(
+                NUM_DOMAIN_LOCAL_SLOT_IDS,
+                config.hidden_dims[0],
+                padding_idx=0,
+            )
 
         # Position encodings
         self.rwse_encoder = None
@@ -72,6 +152,10 @@ class UniversalMolecularEncoder(nn.Module):
         assert x.dtype == torch.long, f"Expected atomic numbers (torch.long), got {x.dtype}"
 
         encoded = self._encode_molecule_features(x)
+
+        if self.domain_local_slot_embedding is not None:
+            slot_ids = build_domain_local_slot_ids(batch, x.size(0), x.device)
+            encoded = encoded + self.domain_local_slot_embedding(slot_ids)
 
         # Add 3D geometric features if available
         if pos is not None and self.config.use_3d_coordinates:

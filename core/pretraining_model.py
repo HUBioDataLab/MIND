@@ -13,6 +13,9 @@ from esa.masked_layers import ESA
 from esa.mlp_utils import SmallMLP
 # Sub-module imports
 from core.pretraining_config import PretrainingConfig, create_pretraining_config
+from core.block_masking import legacy_oxt_eligible_node_mask, select_whole_blocks
+from core.masked_coordinate_corruption import apply_masked_slot_template_
+from core.masked_slot_mapping import flatten_pos_codes
 from core.molecular_encoder import UniversalMolecularEncoder, nearest_multiple_of_8
 from core.pretraining_tasks import PretrainingTasks
 
@@ -267,11 +270,12 @@ class PretrainingESAModel(pl.LightningModule):
         Default: atom-level random masking for all graph types — applied
         identically to proteins, metabolites, QM9, RNA, etc.
 
-        When `config.protein_block_mlm=True`: protein/pdb graphs switch to
-        residue-level (block) masking — all 14 atoms of a randomly chosen
-        residue are masked together. Non-protein graphs in the same batch
-        keep atom-level masking (so metabolite/QM9/RNA are never affected
-        by this flag).
+        `config.protein_block_mlm=True` switches protein/pdb graphs to whole
+        residue masking. `config.rna_block_mlm=True` independently switches
+        RNA graphs to whole nucleotide masking. Other domains remain
+        atom-level. Both block paths use one shared selection object so future
+        coordinate templating can consume the MLM selection without a second
+        random draw.
 
         Args:
             batch_idx: Batch index — used only for deterministic val/test
@@ -288,8 +292,9 @@ class PretrainingESAModel(pl.LightningModule):
             return
 
         use_block_for_protein = getattr(self.config, 'protein_block_mlm', False)
+        use_block_for_rna = getattr(self.config, 'rna_block_mlm', False)
 
-        if not use_block_for_protein:
+        if not use_block_for_protein and not use_block_for_rna:
             # =====================================================
             # LEGACY PATH — unchanged atom-level random masking.
             # Kept verbatim so flag=False is a strict no-op.
@@ -326,12 +331,14 @@ class PretrainingESAModel(pl.LightningModule):
             return
 
         # =====================================================
-        # PROTEIN BLOCK-MLM PATH — protein/pdb graphs only.
-        # Non-protein graphs in the same batch fall back to the
-        # original atom-level random masking.
+        # DOMAIN BLOCK-MLM PATH. Enabled protein/RNA domains use whole blocks;
+        # every other graph falls back to original atom-level random masking.
         # =====================================================
         atom_mask_ratio = getattr(self.config, 'mlm_mask_ratio', 0.15)
-        block_mask_ratio = getattr(self.config, 'protein_block_mlm_ratio', 0.15)
+        protein_block_mask_ratio = getattr(
+            self.config, 'protein_block_mlm_ratio', 0.15
+        )
+        rna_block_mask_ratio = getattr(self.config, 'rna_block_mlm_ratio', 0.15)
         mask_token = 0
         z = batch.z.long()
         batch.original_types = z.clone()
@@ -344,6 +351,22 @@ class PretrainingESAModel(pl.LightningModule):
         # over graphs in the batch; len == batch.num_graphs.
         dtype_list = self._graph_dtype_list(batch)
         protein_keys = {'pdb', 'protein'}
+        rna_keys = {'rna'}
+        template_settings = getattr(self.config, 'masked_slot_template', None) or {}
+        exclude_legacy_oxt = bool(
+            getattr(
+                self.config,
+                'protein_block_mlm_exclude_legacy_oxt',
+                False,
+            )
+            or (
+                template_settings.get('enabled', False)
+                and template_settings.get('protein', False)
+            )
+        )
+        pos_codes = None
+        if exclude_legacy_oxt:
+            pos_codes = flatten_pos_codes(batch.pos_code, num_nodes)
 
         # Deterministic generator for val/test so the mask is stable across
         # validation cycles. Training stays stochastic.
@@ -370,24 +393,36 @@ class PretrainingESAModel(pl.LightningModule):
                 g_dtype = dtype_list[g] if (dtype_list is not None and g < len(dtype_list)) else None
                 is_protein = (g_dtype is not None
                               and str(g_dtype).lower() in protein_keys)
+                is_rna = (g_dtype is not None
+                          and str(g_dtype).lower() in rna_keys)
                 has_block_idx = (
                     hasattr(batch, 'block_idx')
                     and batch.block_idx is not None
                     and batch.block_idx.numel() == num_nodes
                 )
 
-                if is_protein and has_block_idx:
-                    # Block-mask: pick a fraction of residues, mask all their atoms.
-                    residue_ids = batch.block_idx[indices]
-                    unique_res = torch.unique(residue_ids)
-                    num_res = unique_res.size(0)
-                    if num_res == 0:
-                        continue
-                    k = max(1, int(num_res * block_mask_ratio))
-                    perm = _randperm(num_res)
-                    picked = unique_res[perm[:k]]
-                    in_picked = torch.isin(residue_ids, picked)
-                    selected = indices[in_picked]
+                block_mask_ratio = None
+                if is_protein and use_block_for_protein:
+                    block_mask_ratio = protein_block_mask_ratio
+                elif is_rna and use_block_for_rna:
+                    block_mask_ratio = rna_block_mask_ratio
+
+                if block_mask_ratio is not None and has_block_idx:
+                    eligible_node_mask = None
+                    if is_protein and exclude_legacy_oxt:
+                        graph_pos_codes = tuple(
+                            pos_codes[int(index)] for index in indices
+                        )
+                        eligible_node_mask = legacy_oxt_eligible_node_mask(
+                            batch.block_idx[indices], graph_pos_codes
+                        )
+                    selection = select_whole_blocks(
+                        batch.block_idx[indices],
+                        block_mask_ratio,
+                        generator=gen,
+                        eligible_node_mask=eligible_node_mask,
+                    )
+                    selected = indices[selection.selected_node_mask]
                     mlm_mask[selected] = True
                     masked_types[selected] = mask_token
                 else:
@@ -451,6 +486,10 @@ class PretrainingESAModel(pl.LightningModule):
             coord_mask[torch.randperm(num_nodes, device=batch.pos.device)[:k]] = True
         batch.coord_mask = coord_mask
 
+    def _ensure_masked_slot_template(self, batch):
+        """Apply the runtime template only when its explicit feature flag is on."""
+        return apply_masked_slot_template_(batch, self.config)
+
     # ------------------------------------------------------------------
     # Loss computation
     # ------------------------------------------------------------------
@@ -473,6 +512,12 @@ class PretrainingESAModel(pl.LightningModule):
                     mask = (torch.rand(edge_index.size(1)) < 0.15).to(distances.device)
                 else:
                     mask = torch.ones(edge_index.size(1), dtype=torch.bool, device=distances.device)
+                template_nodes = getattr(batch, 'template_node_mask', None)
+                if template_nodes is not None:
+                    mask = mask & ~(
+                        template_nodes[edge_index[0]]
+                        | template_nodes[edge_index[1]]
+                    )
                 dist_loss = self.pretraining_tasks.short_range_distance_loss(
                     node_embeddings, edge_index, distances, mask
                 )
@@ -535,6 +580,13 @@ class PretrainingESAModel(pl.LightningModule):
                             random_mask = (torch.rand(remapped_edge_index.size(1)) < 0.15).to(distances.device)
                         else:
                             random_mask = torch.ones(remapped_edge_index.size(1), dtype=torch.bool, device=distances.device)
+                        template_nodes = getattr(batch, 'template_node_mask', None)
+                        if template_nodes is not None:
+                            global_edges = masked_edge_index
+                            random_mask = random_mask & ~(
+                                template_nodes[global_edges[0]]
+                                | template_nodes[global_edges[1]]
+                            )
                         masked_node_emb = node_embeddings[node_mask]
                         dist_loss = self.pretraining_tasks.short_range_distance_loss(
                             masked_node_emb, remapped_edge_index, distances, random_mask
@@ -550,6 +602,8 @@ class PretrainingESAModel(pl.LightningModule):
                     masked_batch.pos = batch.pos[node_mask]
                     masked_batch.batch = torch.zeros(node_mask.sum(), dtype=torch.long, device=device)
                     masked_batch.num_graphs = 1
+                    if getattr(batch, 'template_node_mask', None) is not None:
+                        masked_batch.template_node_mask = batch.template_node_mask[node_mask]
                     masked_node_emb = node_embeddings[node_mask]
                     long_range_loss = self.pretraining_tasks.long_range_distance_loss(masked_node_emb, masked_batch)
                     dtype_losses['long_range_distance'] = long_range_loss
@@ -559,9 +613,8 @@ class PretrainingESAModel(pl.LightningModule):
             # protein/pdb. The previous protein skip was a leftover from older
             # protein-loss experiments. When `protein_block_mlm` is active and
             # the dtype is a protein, the loss is logged under the `block_mlm`
-            # task key so W&B shows e.g. `val_pdb_block_mlm_loss` distinctly
-            # from atom-level runs; RNA/metabolite/QM9 keep the plain `mlm`
-            # key since they always use atom-level masking.
+            # task key so W&B shows e.g. `val_pdb_block_mlm_loss` or
+            # `val_rna_block_mlm_loss` distinctly from atom-level runs.
             if "mlm" in self.config.pretraining_tasks:
                 if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
                     masked_mlm = batch.mlm_mask[node_mask]
@@ -579,9 +632,20 @@ class PretrainingESAModel(pl.LightningModule):
                         masked_node_emb = node_embeddings[node_mask]
                         try:
                             mlm_loss = self.pretraining_tasks.mlm_loss(masked_node_emb, masked_batch)
-                            is_protein_dtype = dtype.lower() in ('protein', 'pdb')
-                            block_active = getattr(self.config, 'protein_block_mlm', False)
-                            key = 'block_mlm' if (is_protein_dtype and block_active) else 'mlm'
+                            normalized_dtype = dtype.lower()
+                            protein_block_active = (
+                                normalized_dtype in ('protein', 'pdb')
+                                and getattr(self.config, 'protein_block_mlm', False)
+                            )
+                            rna_block_active = (
+                                normalized_dtype == 'rna'
+                                and getattr(self.config, 'rna_block_mlm', False)
+                            )
+                            key = (
+                                'block_mlm'
+                                if protein_block_active or rna_block_active
+                                else 'mlm'
+                            )
                             dtype_losses[key] = mlm_loss
                             dtype_total += self.config.task_weights['mlm'] * mlm_loss
                         except (AssertionError, AttributeError):
@@ -611,7 +675,17 @@ class PretrainingESAModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         self._ensure_mlm_attributes(batch, batch_idx=batch_idx, is_validation=False)
+        template_stats = self._ensure_masked_slot_template(batch)
         self._ensure_coord_denoising_attributes(batch)
+
+        for name, value in template_stats.items():
+            self.log(
+                f"virtual_template_{name}",
+                float(value),
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+            )
 
         if getattr(self.config, 'log_batch_stats', False) and batch_idx % 10 == 0:
             if hasattr(batch, 'dataset_type'):
@@ -692,6 +766,7 @@ class PretrainingESAModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         self._ensure_mlm_attributes(batch, batch_idx=batch_idx, is_validation=True)
+        self._ensure_masked_slot_template(batch)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
         losses, total_loss = self._compute_pretraining_losses(
@@ -725,6 +800,7 @@ class PretrainingESAModel(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         self._ensure_mlm_attributes(batch, batch_idx=batch_idx, is_validation=True)
+        self._ensure_masked_slot_template(batch)
         self._ensure_coord_denoising_attributes(batch)
         graph_embeddings, node_embeddings = self.forward(batch)
         losses, total_loss = self._compute_pretraining_losses(

@@ -11,9 +11,11 @@ tensors for instant loading.
 
 import os
 import sys
+import json
 import torch
 import pickle
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import List, Optional, Iterator, Callable
@@ -32,6 +34,13 @@ if 'data_types' not in sys.modules:
     sys.modules['data_types'] = _data_types_module
 
 from torch_cluster import radius_graph
+from data_loading.atom_position_vocab import (
+    RARE_ATOMIC_NUMBER,
+    VIRTUAL_ATOMIC_NUMBER,
+    count_p_only_rna_blocks,
+    is_virtual_position_code,
+    rna_molecule_contains_p_only_block,
+)
 warnings.filterwarnings('ignore')
 
 # Periodic table whitelist: all other atoms collapse to R (rare atom).
@@ -48,7 +57,6 @@ ELEMENT_TO_ATOMIC_NUMBER = {
     'Br': 35,
     'I': 53,
 }
-RARE_ATOMIC_NUMBER = 119
 DEFAULT_ATOMIC_NUMBER = RARE_ATOMIC_NUMBER
 
 
@@ -57,6 +65,14 @@ def element_to_atomic_number(element: str) -> int:
     s = str(element).strip()
     element_normalized = s.capitalize() if len(s) <= 2 else s
     return ELEMENT_TO_ATOMIC_NUMBER.get(element_normalized, RARE_ATOMIC_NUMBER)
+
+
+def atom_to_model_id(atom) -> int:
+    """Map an atom to the model id without confusing vanadium with virtual V."""
+    pos_code = str(getattr(atom, 'pos_code', ''))
+    if bool(getattr(atom, 'is_virtual', False)) or is_virtual_position_code(pos_code):
+        return VIRTUAL_ATOMIC_NUMBER
+    return element_to_atomic_number(str(getattr(atom, 'element', 'C')))
 
 
 def load_molecules_iteratively(file_path: str) -> Iterator[UniversalMolecule]:
@@ -84,6 +100,7 @@ def process_single_pkl_to_pyg(args_tuple) -> str:
         max_spatial_neighbors,
         num_random_edges,
         random_edge_min_distance,
+        exclude_rna_p_only_molecules,
     ) = args_tuple
 
     dataset_class = {
@@ -101,6 +118,13 @@ def process_single_pkl_to_pyg(args_tuple) -> str:
     processed_dir = os.path.join(output_dir_path, "processed")
     if os.path.exists(processed_dir) and not force:
         pt_files = [f for f in os.listdir(processed_dir) if f.endswith('.pt')]
+        if dataset_type == "rna":
+            pt_files = [
+                filename
+                for filename in pt_files
+                if ("_rna_no_p_only_" in filename)
+                == exclude_rna_p_only_molecules
+            ]
         if pt_files:
             return f"✅ Output already exists: {os.path.join(processed_dir, pt_files[0])}"
 
@@ -116,6 +140,15 @@ def process_single_pkl_to_pyg(args_tuple) -> str:
             max_spatial_neighbors=max_spatial_neighbors,
             num_random_edges=num_random_edges,
             random_edge_min_distance=random_edge_min_distance,
+        )
+    elif dataset_type == "rna":
+        dataset = dataset_class(
+            root=str(output_dir_path),
+            universal_cache_path=str(input_pkl),
+            max_samples=max_samples,
+            cutoff_distance=cutoff,
+            max_neighbors=max_neighbors,
+            exclude_rna_p_only_molecules=exclude_rna_p_only_molecules,
         )
     else:
         dataset = dataset_class(
@@ -198,7 +231,9 @@ class OptimizedUniversalDataset(InMemoryDataset):
         random_edge_min_distance: float = 10.0,
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
-        pre_filter: Optional[Callable] = None
+        pre_filter: Optional[Callable] = None,
+        exclude_rna_p_only_molecules: bool = False,
+        conversion_num_workers: Optional[int] = None,
     ):
         """
         Initialize Optimized Universal Dataset
@@ -218,6 +253,10 @@ class OptimizedUniversalDataset(InMemoryDataset):
             transform: Transform to apply to each sample
             pre_transform: Pre-transform to apply during processing
             pre_filter: Pre-filter to apply during processing
+            exclude_rna_p_only_molecules: Exclude an entire RNA molecule when
+                any nucleotide block has one real P atom and no other real atoms
+            conversion_num_workers: Optional explicit worker cap for converting
+                molecules inside one cache file
         """
         self.universal_cache_path = universal_cache_path
         self.max_samples = max_samples
@@ -230,6 +269,10 @@ class OptimizedUniversalDataset(InMemoryDataset):
         self.max_spatial_neighbors = max_spatial_neighbors if max_spatial_neighbors is not None else 48
         self.num_random_edges = num_random_edges if num_random_edges is not None else 8
         self.random_edge_min_distance = random_edge_min_distance if random_edge_min_distance is not None else 10.0
+        self.exclude_rna_p_only_molecules = bool(exclude_rna_p_only_molecules)
+        if conversion_num_workers is not None and conversion_num_workers < 1:
+            raise ValueError("conversion_num_workers must be at least 1")
+        self.conversion_num_workers = conversion_num_workers
 
         os.makedirs(root, exist_ok=True)
         super().__init__(root, transform, pre_transform, pre_filter)
@@ -247,6 +290,8 @@ class OptimizedUniversalDataset(InMemoryDataset):
             cache_name += f"_samples_{self.max_samples}"
         if self.molecule_max_atoms:
             cache_name += f"_maxatoms_{self.molecule_max_atoms}"
+        if self.exclude_rna_p_only_molecules:
+            cache_name += "_rna_no_p_only"
         
         # Include hybrid edge parameters in cache signature
         if self.use_hybrid_edges:
@@ -295,12 +340,43 @@ class OptimizedUniversalDataset(InMemoryDataset):
         #    collated dataset is deterministic w.r.t. the input molecule order.
         molecules = list(molecule_iterator)
 
+        p_only_rejects = []
+        if self.exclude_rna_p_only_molecules:
+            retained_molecules = []
+            for molecule in molecules:
+                p_only_block_count = count_p_only_rna_blocks(molecule)
+                if p_only_block_count:
+                    p_only_rejects.append(
+                        {
+                            "molecule_id": str(getattr(molecule, "id", "unknown")),
+                            "blocks": len(getattr(molecule, "blocks", ())),
+                            "p_only_blocks": p_only_block_count,
+                        }
+                    )
+                else:
+                    retained_molecules.append(molecule)
+            input_molecule_count = len(molecules)
+            molecules = retained_molecules
+            self._write_rna_p_only_reject_manifest(
+                p_only_rejects,
+                input_molecule_count=input_molecule_count,
+                retained_molecule_count=len(molecules),
+            )
+            print(
+                "RNA P-only molecule filter: "
+                f"rejected={len(p_only_rejects):,}, retained={len(molecules):,}",
+                flush=True,
+            )
+
         data_list: List[Data] = []
         skipped_count = 0
         first_fail_reason: Optional[str] = None
 
         cpu = os.cpu_count() or 2
-        num_workers = max(1, min(16, cpu - 2))
+        if self.conversion_num_workers is None:
+            num_workers = max(1, min(16, cpu - 2))
+        else:
+            num_workers = self.conversion_num_workers
         # Don't spin up more workers than molecules.
         num_workers = max(1, min(num_workers, len(molecules)))
 
@@ -315,6 +391,7 @@ class OptimizedUniversalDataset(InMemoryDataset):
             "max_spatial_neighbors": self.max_spatial_neighbors,
             "num_random_edges": self.num_random_edges,
             "random_edge_min_distance": self.random_edge_min_distance,
+            "exclude_rna_p_only_molecules": self.exclude_rna_p_only_molecules,
         }
 
         if num_workers == 1:
@@ -334,7 +411,14 @@ class OptimizedUniversalDataset(InMemoryDataset):
         else:
             print(f"🚀 Converting with {num_workers} parallel workers...")
             # chunksize amortizes IPC; map preserves input order.
-            chunksize = max(1, len(molecules) // (num_workers * 8))
+            # An explicit worker cap is normally used for very large caches.
+            # Keep each IPC payload to one molecule in that mode; batching tens
+            # of ribosome-sized RNA objects can otherwise exhaust host memory.
+            chunksize = (
+                1
+                if self.conversion_num_workers is not None
+                else max(1, len(molecules) // (num_workers * 8))
+            )
             with ProcessPoolExecutor(
                 max_workers=num_workers,
                 initializer=_init_conversion_worker,
@@ -375,9 +459,37 @@ class OptimizedUniversalDataset(InMemoryDataset):
         torch.save((data, slices), self.processed_paths[0])
         print(f"✅ Processing complete! Saved to: {self.processed_paths[0]}")
 
+    def _write_rna_p_only_reject_manifest(
+        self,
+        rejected_molecules: list[dict],
+        *,
+        input_molecule_count: int,
+        retained_molecule_count: int,
+    ) -> None:
+        """Write an auditable sidecar without modifying the source PKL."""
+        processed_stem = Path(self.processed_file_names[0]).stem
+        manifest_path = Path(self.processed_dir) / f"{processed_stem}_rejects.json"
+        report = {
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "filter": "exclude_rna_molecules_containing_p_only_blocks",
+            "source_pkl": str(Path(self.universal_cache_path).resolve()),
+            "input_molecules": input_molecule_count,
+            "rejected_molecules": len(rejected_molecules),
+            "retained_molecules": retained_molecule_count,
+            "rejections": rejected_molecules,
+            "source_pkl_rewritten": False,
+        }
+        manifest_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        print(f"RNA P-only reject manifest: {manifest_path}", flush=True)
+
     def _diagnose_skip(self, mol: UniversalMolecule) -> str:
         """Return a short reason why this molecule would be skipped (for error messages)."""
         try:
+            if (
+                self.exclude_rna_p_only_molecules
+                and rna_molecule_contains_p_only_block(mol)
+            ):
+                return "RNA molecule contains a P-only nucleotide block"
             atoms = mol.get_all_atoms()
             if not atoms:
                 return "get_all_atoms() returned empty (molecule has no blocks or blocks have no atoms)"
@@ -396,6 +508,11 @@ class OptimizedUniversalDataset(InMemoryDataset):
 
     def _create_pyg_data_object(self, mol: UniversalMolecule) -> Optional[Data]:
         """Helper function to filter and convert a single UniversalMolecule."""
+        if (
+            self.exclude_rna_p_only_molecules
+            and rna_molecule_contains_p_only_block(mol)
+        ):
+            return None
         if self.molecule_max_atoms is not None and len(mol.get_all_atoms()) > self.molecule_max_atoms:
             return None
 
@@ -657,7 +774,7 @@ class OptimizedUniversalDataset(InMemoryDataset):
                 return [0.0, 0.0, 0.0]
             positions = torch.tensor([_pos_to_list(atom.position) for atom in atoms], dtype=torch.float32)
             atomic_numbers = torch.tensor(
-                [self._element_to_atomic_number(str(getattr(atom, 'element', 'C'))) for atom in atoms],
+                [atom_to_model_id(atom) for atom in atoms],
                 dtype=torch.long
             )
             def _safe_int(v, default: int = 0) -> int:
@@ -811,14 +928,27 @@ class OptimizedUniversalRNADataset(OptimizedUniversalDataset):
         max_neighbors: int = 32,       # Changed from 20 to 32 for consistency
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
-        pre_filter: Optional[Callable] = None
+        pre_filter: Optional[Callable] = None,
+        exclude_rna_p_only_molecules: bool = False,
+        conversion_num_workers: Optional[int] = None,
     ):
         if root is None:
             root = os.path.join(os.path.dirname(__file__), 'processed', 'rna_optimized')
         if universal_cache_path is None:
             universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_rna_all.pkl')
-        super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, 
-                        cutoff_distance, max_neighbors, transform, pre_transform, pre_filter)
+        super().__init__(
+            root,
+            universal_cache_path,
+            max_samples,
+            molecule_max_atoms,
+            cutoff_distance,
+            max_neighbors,
+            transform=transform,
+            pre_transform=pre_transform,
+            pre_filter=pre_filter,
+            exclude_rna_p_only_molecules=exclude_rna_p_only_molecules,
+            conversion_num_workers=conversion_num_workers,
+        )
 
 
 class OptimizedUniversalUniMolDataset(OptimizedUniversalDataset):
@@ -856,7 +986,20 @@ if __name__ == "__main__":
     parser.add_argument("--cutoff", type=float, default=5.0, help="Distance cutoff for edges (Å)")
     parser.add_argument("--max-neighbors", type=int, default=64, help="Maximum neighbors per atom")
     parser.add_argument("--force", action="store_true", help="Force rebuild if output exists")
-    parser.add_argument("--num-workers", type=int, default=None, help="Parallel workers for directory mode")
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Parallel workers (also caps workers inside one RNA cache)",
+    )
+    parser.add_argument(
+        "--exclude-rna-p-only-molecules",
+        action="store_true",
+        help=(
+            "For RNA only, reject an entire molecule when any block contains "
+            "one real P atom and no other real atoms"
+        ),
+    )
     
     # Hybrid edge construction (Salad-inspired)
     parser.add_argument("--use-hybrid-edges", action="store_true", help="Enable 3-tier hybrid edge construction")
@@ -916,6 +1059,7 @@ if __name__ == "__main__":
                         args.max_spatial_neighbors,
                         args.num_random_edges,
                         args.random_edge_min_distance,
+                        args.exclude_rna_p_only_molecules,
                     ),
                 ): input_pkl
                 for input_pkl in input_files
@@ -932,6 +1076,13 @@ if __name__ == "__main__":
     processed_dir = os.path.join(args.output_dir, "processed")
     if os.path.exists(processed_dir) and not args.force:
         pt_files = [f for f in os.listdir(processed_dir) if f.endswith('.pt')]
+        if args.dataset_type == "rna":
+            pt_files = [
+                filename
+                for filename in pt_files
+                if ("_rna_no_p_only_" in filename)
+                == args.exclude_rna_p_only_molecules
+            ]
         if pt_files:
             print(f"✅ Output already exists: {os.path.join(processed_dir, pt_files[0])}")
             print(f"💡 Use --force to rebuild")
@@ -960,9 +1111,24 @@ if __name__ == "__main__":
             sequence_neighbors_k=args.sequence_neighbors_k,
             max_spatial_neighbors=args.max_spatial_neighbors,
             num_random_edges=args.num_random_edges,
-            random_edge_min_distance=args.random_edge_min_distance
+            random_edge_min_distance=args.random_edge_min_distance,
+            conversion_num_workers=args.num_workers,
         )
         print(f"✅ Created {args.dataset_type.upper()} dataset with HYBRID EDGES: {len(dataset)} samples")
+    elif args.dataset_type == "rna":
+        dataset = dataset_class(
+            root=args.output_dir,
+            universal_cache_path=args.input_pkl,
+            max_samples=args.max_samples,
+            cutoff_distance=args.cutoff,
+            max_neighbors=args.max_neighbors,
+            exclude_rna_p_only_molecules=args.exclude_rna_p_only_molecules,
+            conversion_num_workers=args.num_workers,
+        )
+        print(
+            f"✅ Created RNA dataset: {len(dataset)} samples "
+            f"(exclude P-only molecules={args.exclude_rna_p_only_molecules})"
+        )
     else:
         # Legacy: radius graph
         dataset = dataset_class(

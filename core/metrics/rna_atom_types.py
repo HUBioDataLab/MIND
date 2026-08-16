@@ -12,10 +12,12 @@ This module provides vocabulary for per-atom metrics calculation.
 from typing import Dict, List
 
 from data_loading.atom_position_vocab import (
+    RARE_ATOMIC_NUMBER,
     RNA_BACKBONE_ATOMS as SHARED_RNA_BACKBONE_ATOMS,
     RNA_BASE_ATOMS_BY_NUCLEOTIDE,
     RNA_BASE_ATOM_PRIORITY,
     RNA_TERMINAL_ATOMS as SHARED_RNA_TERMINAL_ATOMS,
+    VIRTUAL_ATOMIC_NUMBER,
     is_virtual_position_code,
     normalize_rna_position_code,
 )
@@ -167,6 +169,12 @@ def pos_code_to_element(pos_code: str) -> str:
         return RNA_UNKNOWN_ATOM
     if is_virtual_position_code(code):
         return RNA_VIRTUAL_ATOM
+    # Two-letter common elements must not be reduced to their first letter.
+    explicit_elements = {'BR': 'Br', 'CL': 'Cl', 'NA': 'Na'}
+    if code.upper() in explicit_elements:
+        return explicit_elements[code.upper()]
+    if code not in ALL_RNA_ATOMS:
+        return RNA_UNKNOWN_ATOM
     return code[0]
 
 def pos_code_to_atom_class(pos_code: str) -> str:
@@ -239,7 +247,8 @@ ATOMIC_NUM_TO_ELEMENT = {
     17: 'Cl',
     35: 'Br',
     53: 'I',
-    119: 'V'
+    RARE_ATOMIC_NUMBER: RNA_UNKNOWN_ATOM,
+    VIRTUAL_ATOMIC_NUMBER: RNA_VIRTUAL_ATOM,
 }
 
 def map_atomic_num_to_rna_idx(atomic_num: int) -> int:
