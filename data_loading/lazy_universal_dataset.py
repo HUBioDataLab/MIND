@@ -26,6 +26,7 @@ import torch
 import json
 import hashlib
 import os
+import time
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from torch_geometric.data.separate import separate
@@ -135,6 +136,13 @@ class LazyUniversalDataset(Dataset):
         
         # LRU cache for loaded chunks
         self._cache = OrderedDict()
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._cache_loads = 0
+        self._cache_load_seconds = 0.0
+        self._template_metadata_cache = {}
+        self._template_metadata_hits = 0
+        self._template_metadata_misses = 0
         
         # Metadata storage
         self.metadata_loaded = False
@@ -297,8 +305,10 @@ class LazyUniversalDataset(Dataset):
                 
                 # Load chunk if not in cache
                 if pt_file not in self._cache:
+                    self._cache_misses += 1
                     self._load_chunk(pt_file)
                 else:
+                    self._cache_hits += 1
                     # Move to end (most recently used)
                     self._cache.move_to_end(pt_file)
                 
@@ -323,6 +333,44 @@ class LazyUniversalDataset(Dataset):
                         sample.dataset_type = 'rna'
                     else:
                         sample.dataset_type = 'unknown'
+
+                # Build transient numeric template roles after graph extraction.
+                # They are collated into batches but never persisted to source PTs.
+                from core.masked_slot_mapping import attach_runtime_template_metadata
+                domain = str(sample.dataset_type).lower()
+                caches_template_metadata = domain in ("pdb", "protein", "rna")
+                cached_template_metadata = (
+                    self._template_metadata_cache.get(idx)
+                    if caches_template_metadata else None
+                )
+                if cached_template_metadata is None:
+                    if caches_template_metadata:
+                        self._template_metadata_misses += 1
+                    sample = attach_runtime_template_metadata(sample)
+                    if caches_template_metadata:
+                        self._template_metadata_cache[idx] = tuple(
+                            getattr(sample, name)
+                            for name in (
+                                "template_domain_id",
+                                "template_slot_order",
+                                "template_anchor_order",
+                                "template_virtual_slot",
+                                "template_reason_bits",
+                            )
+                        )
+                else:
+                    self._template_metadata_hits += 1
+                    for name, value in zip(
+                        (
+                            "template_domain_id",
+                            "template_slot_order",
+                            "template_anchor_order",
+                            "template_virtual_slot",
+                            "template_reason_bits",
+                        ),
+                        cached_template_metadata,
+                    ):
+                        setattr(sample, name, value)
                 
                 # Apply transform
                 if self.transform is not None:
@@ -335,6 +383,7 @@ class LazyUniversalDataset(Dataset):
     
     def _load_chunk(self, pt_file: str):
         """Load a chunk file into cache"""
+        started_at = time.perf_counter()
         # Evict oldest chunk if cache is full
         if len(self._cache) >= self.max_cache_chunks:
             oldest_file = next(iter(self._cache))
@@ -343,6 +392,8 @@ class LazyUniversalDataset(Dataset):
         # Load new chunk
         data, slices = torch.load(pt_file, map_location='cpu', weights_only=False)
         self._cache[pt_file] = (data, slices)
+        self._cache_loads += 1
+        self._cache_load_seconds += time.perf_counter() - started_at
     
     def _extract_sample(self, data: Data, slices: dict, idx: int) -> Data:
         """
@@ -383,10 +434,24 @@ class LazyUniversalDataset(Dataset):
             'cache_size': self.max_cache_chunks,
             'cached_chunks': list(self._cache.keys()),
         }
+
+    def get_cache_telemetry(self):
+        """Return measured in-process chunk-cache counters."""
+        requests = self._cache_hits + self._cache_misses
+        return {
+            'hits': self._cache_hits,
+            'misses': self._cache_misses,
+            'loads': self._cache_loads,
+            'load_seconds': self._cache_load_seconds,
+            'hit_rate': self._cache_hits / requests if requests else 0.0,
+            'template_metadata_hits': self._template_metadata_hits,
+            'template_metadata_misses': self._template_metadata_misses,
+        }
     
     def clear_cache(self):
         """Clear the chunk cache to free memory"""
         self._cache.clear()
+        self._template_metadata_cache.clear()
     
     def _load_metadata(self):
         """

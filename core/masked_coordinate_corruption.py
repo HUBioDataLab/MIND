@@ -12,12 +12,11 @@ import time
 from typing import Iterable, Tuple
 
 import torch
-from torch_cluster import radius_graph
+from torch_cluster import knn, radius_graph
 
 from core.masked_slot_mapping import (
     MaskedSlotMapping,
     QuarantinedSlotBlock,
-    flatten_pos_codes,
     map_all_template_slots,
     map_masked_template_slots,
 )
@@ -28,7 +27,6 @@ from core.virtual_atom_templates import (
 from data_loading.atom_position_vocab import (
     VIRTUAL_ATOMIC_NUMBER,
     is_virtual_position_code,
-    normalize_rna_position_code,
 )
 
 
@@ -88,12 +86,10 @@ class RebuiltTemplateEdges:
 
 def _batched_global_templates(
     *,
-    clean_pos_cpu: torch.Tensor,
-    pos_codes: Tuple[str, ...],
-    block_nodes_by_key: dict,
+    clean_pos: torch.Tensor,
     mapped_blocks: Tuple,
 ) -> tuple[dict, dict]:
-    """Build all local-frame templates in two batched CPU operations."""
+    """Build local-frame templates on the batch device without full-node CPU copies."""
     templates = {}
     reasons = {}
 
@@ -106,18 +102,10 @@ def _batched_global_templates(
         keys = []
         for block in domain_blocks:
             key = (block.graph_index, block.block_id, block.domain)
-            node_list = block_nodes_by_key[(block.graph_index, block.block_id)]
-            if domain == "protein":
-                code_to_node = {pos_codes[index].strip(): index for index in node_list}
-                anchor_codes = ("N", "CA", "C")
-            else:
-                code_to_node = {
-                    normalize_rna_position_code(pos_codes[index]): index
-                    for index in node_list
-                }
-                anchor_codes = ("C2'", "C3'", "C4'", "O2'")
+            if block.anchor_node_indices is None:
+                raise RuntimeError("template mapping is missing numeric anchor nodes")
             anchor_rows.append(
-                torch.stack([clean_pos_cpu[code_to_node[code]] for code in anchor_codes])
+                clean_pos[block.anchor_node_indices.to(clean_pos.device)]
             )
             keys.append(key)
 
@@ -153,11 +141,11 @@ def _batched_global_templates(
 
         if domain == "protein":
             local_template = protein_sidechain_template(
-                dtype=anchors.dtype, device="cpu"
+                dtype=anchors.dtype, device=anchors.device
             )
         else:
             local_template = rna_base_template(
-                dtype=anchors.dtype, device="cpu"
+                dtype=anchors.dtype, device=anchors.device
             )
         global_templates = (
             local_template.unsqueeze(0) @ basis.transpose(1, 2)
@@ -250,17 +238,6 @@ def build_masked_coordinate_corruption(
             & ~batch.mlm_mask.bool()
             & enabled_graph[batch.batch]
         )
-    pos_codes = flatten_pos_codes(batch.pos_code, num_nodes)
-    clean_pos_cpu = clean_pos.detach().cpu()
-    graph_indices_cpu = batch.batch.detach().cpu().tolist()
-    block_indices_cpu = batch.block_idx.detach().cpu().tolist()
-    block_nodes_by_key = {}
-    for node_index, (graph_index, block_id) in enumerate(
-        zip(graph_indices_cpu, block_indices_cpu)
-    ):
-        block_nodes_by_key.setdefault(
-            (int(graph_index), int(block_id)), []
-        ).append(node_index)
     applied_blocks = []
     context_virtual_blocks = []
     coordinate_quarantines = []
@@ -281,9 +258,7 @@ def build_masked_coordinate_corruption(
         )
         frame_blocks = mapping.mapped_blocks
     global_templates, global_template_reasons = _batched_global_templates(
-        clean_pos_cpu=clean_pos_cpu,
-        pos_codes=pos_codes,
-        block_nodes_by_key=block_nodes_by_key,
+        clean_pos=clean_pos,
         mapped_blocks=frame_blocks,
     )
 
@@ -337,14 +312,17 @@ def build_masked_coordinate_corruption(
         if block_key in selected_block_keys:
             continue
 
-        virtual_local_indices = torch.tensor(
-            [
-                index
-                for index, code in enumerate(mapped_block.pos_codes)
-                if is_virtual_position_code(code)
-            ],
-            dtype=torch.long,
-        )
+        if mapped_block.virtual_slot_mask is None:
+            virtual_local_indices = torch.tensor(
+                [
+                    index
+                    for index, code in enumerate(mapped_block.pos_codes)
+                    if is_virtual_position_code(code)
+                ],
+                dtype=torch.long,
+            )
+        else:
+            virtual_local_indices = torch.where(mapped_block.virtual_slot_mask)[0]
         if virtual_local_indices.numel() == 0:
             continue
 
@@ -377,12 +355,16 @@ def build_masked_coordinate_corruption(
         )
 
     if not relocate_context_virtuals and bool(context_virtual_node_mask.any()):
-        context_nodes_by_block = {}
-        context_indices = torch.where(context_virtual_node_mask)[0].detach().cpu().tolist()
-        for node_index in context_indices:
-            key = (int(graph_indices_cpu[node_index]), int(block_indices_cpu[node_index]))
-            context_nodes_by_block.setdefault(key, []).append(node_index)
-        for (graph_index, block_id), node_indices in context_nodes_by_block.items():
+        context_indices = torch.where(context_virtual_node_mask)[0]
+        context_pairs = torch.stack(
+            (batch.batch[context_indices], batch.block_idx[context_indices]), dim=1
+        )
+        for graph_index, block_id in torch.unique(context_pairs, dim=0).cpu().tolist():
+            pair_mask = (
+                (batch.batch[context_indices] == graph_index)
+                & (batch.block_idx[context_indices] == block_id)
+            )
+            node_indices = context_indices[pair_mask]
             graph_type = graph_types[graph_index]
             domain = "rna" if graph_type == "rna" else "protein"
             context_virtual_blocks.append(
@@ -390,7 +372,7 @@ def build_masked_coordinate_corruption(
                     graph_index=graph_index,
                     block_id=block_id,
                     domain=domain,
-                    node_indices=torch.tensor(node_indices, dtype=torch.long),
+                    node_indices=node_indices.detach().cpu(),
                 )
             )
 
@@ -457,38 +439,24 @@ def rebuild_template_incident_edges(
     moved_nodes = int(template_node_mask.sum().item())
     use_targeted_rebuild = moved_nodes * 4 <= num_nodes
     if moved_nodes and num_nodes > 1 and use_targeted_rebuild:
-        candidate_parts = []
-        for graph_id in torch.unique(batch.batch):
-            graph_nodes = torch.where(batch.batch == graph_id)[0]
-            template_nodes = graph_nodes[template_node_mask[graph_nodes]]
-            if template_nodes.numel() == 0 or graph_nodes.numel() <= 1:
-                continue
-            distances = torch.cdist(input_pos[template_nodes], input_pos[graph_nodes])
-            distances[
-                template_nodes[:, None] == graph_nodes[None, :]
-            ] = torch.inf
-            k = min(max_neighbors, max(1, graph_nodes.numel() - 1))
-            nearest_distances, nearest_local = torch.topk(
-                distances, k=k, dim=1, largest=False, sorted=True
-            )
-            valid = nearest_distances <= cutoff
-            if not bool(valid.any()):
-                continue
-            sources = template_nodes[:, None].expand_as(nearest_local)[valid]
-            targets = graph_nodes[nearest_local[valid]]
-            candidate_parts.append(
-                torch.stack(
-                    (
-                        torch.cat((sources, targets)),
-                        torch.cat((targets, sources)),
-                    ),
-                    dim=0,
-                )
-            )
-        candidate_edges = (
-            torch.cat(candidate_parts, dim=1)
-            if candidate_parts
-            else torch.empty((2, 0), dtype=torch.long, device=edge_index.device)
+        template_nodes = torch.where(template_node_mask)[0]
+        assignments = knn(
+            input_pos,
+            input_pos[template_nodes],
+            k=int(max_neighbors) + 1,
+            batch_x=batch.batch,
+            batch_y=batch.batch[template_nodes],
+        )
+        sources = template_nodes[assignments[0]]
+        targets = assignments[1]
+        distances = torch.linalg.vector_norm(
+            input_pos[sources] - input_pos[targets], dim=1
+        )
+        valid = (sources != targets) & (distances <= float(cutoff))
+        sources = sources[valid]
+        targets = targets[valid]
+        candidate_edges = torch.stack(
+            (torch.cat((sources, targets)), torch.cat((targets, sources))), dim=0
         )
     elif moved_nodes and num_nodes > 1:
         candidate_edges = radius_graph(
@@ -548,6 +516,7 @@ def rebuild_template_incident_edges(
 
 def apply_masked_slot_template_(batch: object, config: object) -> dict:
     """Apply the enabled template feature to one batch in place."""
+    template_started_at = time.perf_counter()
     settings = getattr(config, "masked_slot_template", None) or {}
     if not settings.get("enabled", False):
         return {}
@@ -650,6 +619,7 @@ def apply_masked_slot_template_(batch: object, config: object) -> dict:
             "excluded_short_edges": 0,
             "excluded_long_pairs": 0,
             "edge_rebuild_ms": 0.0,
+            "template_total_ms": (time.perf_counter() - template_started_at) * 1000.0,
         }
 
     rebuilt = rebuild_template_incident_edges(
@@ -704,5 +674,6 @@ def apply_masked_slot_template_(batch: object, config: object) -> dict:
             - eligible_nodes * (eligible_nodes - 1) // 2
         ),
         "edge_rebuild_ms": rebuilt.rebuild_ms,
+        "template_total_ms": (time.perf_counter() - template_started_at) * 1000.0,
     }
     return batch.virtual_template_stats

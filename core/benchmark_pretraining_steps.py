@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import statistics
 import time
@@ -29,6 +30,12 @@ class StepTimingCallback(Callback):
         self.compute_seconds: list[float] = []
         self.inter_step_seconds: list[float] = []
         self.edge_rebuild_ms: list[float] = []
+        self.template_total_ms: list[float] = []
+        self.data_wait_seconds: list[float] = []
+        self.atoms_per_second: list[float] = []
+        self.edges_per_second: list[float] = []
+        self.graphs_per_second: list[float] = []
+        self._batch_counts: tuple[int, int, int] | None = None
         self._step_start: float | None = None
         self._previous_end: float | None = None
         self._fit_start: float | None = None
@@ -46,30 +53,52 @@ class StepTimingCallback(Callback):
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx) -> None:
         self._synchronize()
-        self._step_start = time.perf_counter()
+        now = time.perf_counter()
+        if self._previous_end is not None:
+            self.data_wait_seconds.append(now - self._previous_end)
+        self._step_start = now
+        self._batch_counts = (
+            int(batch.num_nodes),
+            int(batch.edge_index.shape[1]) if hasattr(batch, "edge_index") else 0,
+            int(batch.num_graphs),
+        )
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
         self._synchronize()
         now = time.perf_counter()
         if self._step_start is not None:
-            self.compute_seconds.append(now - self._step_start)
+            step_seconds = now - self._step_start
+            self.compute_seconds.append(step_seconds)
+            if self._batch_counts is not None:
+                atoms, edges, graphs = self._batch_counts
+                self.atoms_per_second.append(atoms / step_seconds)
+                self.edges_per_second.append(edges / step_seconds)
+                self.graphs_per_second.append(graphs / step_seconds)
         if self._previous_end is not None:
             self.inter_step_seconds.append(now - self._previous_end)
         template_stats = getattr(batch, "virtual_template_stats", None) or {}
         if "edge_rebuild_ms" in template_stats:
             self.edge_rebuild_ms.append(float(template_stats["edge_rebuild_ms"]))
+        if "template_total_ms" in template_stats:
+            self.template_total_ms.append(float(template_stats["template_total_ms"]))
         self._previous_end = now
 
     @staticmethod
     def _summary(values: list[float]) -> dict[str, float | int | None]:
         if not values:
             return {"count": 0, "mean": None, "median": None, "min": None, "max": None}
+        ordered = sorted(values)
+        percentile = lambda fraction: ordered[
+            min(len(ordered) - 1, max(0, math.ceil(len(ordered) * fraction) - 1))
+        ]
         return {
             "count": len(values),
             "mean": statistics.fmean(values),
             "median": statistics.median(values),
             "min": min(values),
             "max": max(values),
+            "p50": percentile(0.50),
+            "p90": percentile(0.90),
         }
 
     def on_fit_end(self, trainer, pl_module) -> None:
@@ -91,6 +120,21 @@ class StepTimingCallback(Callback):
             "end_to_end_inter_step_seconds_after_warmup": self._summary(inter_after_warmup),
             "edge_rebuild_ms_after_warmup": self._summary(
                 self.edge_rebuild_ms[self.warmup_steps :]
+            ),
+            "template_total_ms_after_warmup": self._summary(
+                self.template_total_ms[self.warmup_steps :]
+            ),
+            "data_wait_seconds_after_warmup": self._summary(
+                self.data_wait_seconds[max(0, self.warmup_steps - 1) :]
+            ),
+            "atoms_per_second_after_warmup": self._summary(
+                self.atoms_per_second[self.warmup_steps :]
+            ),
+            "edges_per_second_after_warmup": self._summary(
+                self.edges_per_second[self.warmup_steps :]
+            ),
+            "graphs_per_second_after_warmup": self._summary(
+                self.graphs_per_second[self.warmup_steps :]
             ),
             "cuda_available": torch.cuda.is_available(),
             "cuda_device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,

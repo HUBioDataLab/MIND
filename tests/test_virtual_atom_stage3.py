@@ -1153,6 +1153,7 @@ def test_enabled_template_is_a_noop_for_unimol_only_batch():
     )
     before = copy.deepcopy(batch)
     stats = apply_masked_slot_template_(batch, _enabled_runtime_template_config())
+    assert stats.pop("template_total_ms") >= 0.0
     assert stats == {
         "templated_blocks": 0,
         "templated_nodes": 0,
