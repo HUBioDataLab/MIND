@@ -220,6 +220,13 @@ task_weights:
   short_range_distance: 1.0
   mlm: 0.3
 mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task
+# Optional COCONUT/metabolite masking settings. Metabolite stays disabled in
+# this protein/RNA/UniMol comparison run.
+coconut_masking_method: random_walk  # random_atom | random_walk
+coconut_mask_ratio: 0.15
+coconut_num_random_walks: 1
+log_coconut_masking_stats: true
+log_coconut_masking_frequency: 50
 
 # Protein-only block MLM: when true, MLM mask for pdb/protein graphs covers
 # whole residues (all 14 atoms of selected residues), not random atoms. Other

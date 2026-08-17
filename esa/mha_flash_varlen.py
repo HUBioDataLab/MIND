@@ -284,4 +284,3 @@ def create_padding_mask(seq_lens, max_len=None, device=None):
     mask = torch.arange(max_len, device=device).unsqueeze(0).expand(batch_size, -1)
     mask = mask < seq_lens.unsqueeze(1)
     return mask
-

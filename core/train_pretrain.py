@@ -81,16 +81,31 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
     )
     if "mlm" in config.pretraining_tasks and not uses_batch_time_block_mlm:
         mask_ratio = getattr(config, 'mlm_mask_ratio', 0.15)
+        coconut_mask_ratio = getattr(config, 'coconut_mask_ratio', mask_ratio)
+        coconut_masking_method = getattr(config, 'coconut_masking_method', 'random_atom')
+        coconut_num_random_walks = getattr(config, 'coconut_num_random_walks', 1)
         transforms.append(MaskAtomTypes(
             mask_ratio=mask_ratio,
-            mask_token=0  # Assuming 0 is the mask token
+            mask_token=0,
+            coconut_mask_ratio=coconut_mask_ratio,
+            coconut_masking_method=coconut_masking_method,
+            coconut_num_random_walks=coconut_num_random_walks,
         ))
 
     # Add coordinate denoising transform (noise on pos, clean_pos + coord_mask)
     if "coordinate_denoising" in config.pretraining_tasks:
         noise_std = getattr(config, 'coordinate_denoising_noise_std', 0.1)
         mask_ratio = getattr(config, 'coordinate_denoising_mask_ratio', 0.15)
-        transforms.append(AddRandomNoise(noise_std=noise_std, mask_ratio=mask_ratio))
+        coconut_mask_ratio = getattr(config, 'coconut_mask_ratio', mask_ratio)
+        coconut_masking_method = getattr(config, 'coconut_masking_method', 'random_atom')
+        coconut_num_random_walks = getattr(config, 'coconut_num_random_walks', 1)
+        transforms.append(AddRandomNoise(
+            noise_std=noise_std,
+            mask_ratio=mask_ratio,
+            coconut_mask_ratio=coconut_mask_ratio,
+            coconut_masking_method=coconut_masking_method,
+            coconut_num_random_walks=coconut_num_random_walks,
+        ))
 
     return Compose(transforms) if len(transforms) > 0 else None
 
@@ -302,8 +317,11 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             )
 
         elif dataset_name.upper() == 'QM9':
-            max_samples = getattr(config, 'max_samples', 50000)
-            print(f"📊 Loading {max_samples:,} samples from universal cache...")
+            max_samples = getattr(config, 'max_samples', None)
+            if max_samples:
+                print(f"📊 Loading {max_samples:,} samples from universal cache...")
+            else:
+                print(f"📊 Loading ALL samples from universal cache...")
 
             full_dataset = OptimizedUniversalQM9Dataset(
                 root=dataset_dir,
@@ -809,27 +827,46 @@ def train_universal_pretraining(
     callbacks.append(protein_metrics_callback)
     print("✅ Protein per-atom + per-AA (binary & block) metrics callback enabled")
 
-    # Create wandb logger
-    wandb_logger = WandbLogger(
-        project=wandb_project,
-        name=wandb_run_name,
-        save_dir=output_dir,
-        config=vars(config),
-    )
+    # Create logger (CSVLogger or WandbLogger based on config)
+    use_wandb = getattr(config, 'use_wandb', False)
+    if use_wandb:
+        logger = WandbLogger(
+            project=wandb_project,
+            name=wandb_run_name,
+            save_dir=output_dir,
+            config=vars(config),
+        )
+        print("📊 Logging to Weights & Biases (WandB)")
+    else:
+        from pytorch_lightning.loggers import CSVLogger
+        logger = CSVLogger(save_dir=output_dir, name="logs")
+        print(f"📊 Local CSV Logging enabled in {output_dir}/logs")
 
     # Validation and logging frequency (from config)
     val_check_interval = getattr(config, 'val_check_interval', 0.25)
     log_every_n_steps = getattr(config, 'log_every_n_steps', 1)
 
-    # Create trainer with ESA optimizations
+    devices = getattr(config, 'devices', 1)
+    strategy = getattr(config, 'strategy', 'auto')
+
+    # DDP Strategy setup
+    if strategy == "ddp" or (isinstance(devices, int) and devices > 1) or (isinstance(devices, (list, tuple)) and len(devices) > 1):
+        from pytorch_lightning.strategies import DDPStrategy
+        strategy = DDPStrategy(find_unused_parameters=True)
+
+    print(f"⚙️ Multi-GPU Strategy: {strategy} | Devices: {devices}")
+
+    # Create trainer with ESA optimizations and Multi-GPU support
     trainer = pl.Trainer(
         max_epochs=config.max_epochs,
         callbacks=callbacks,
-        logger=wandb_logger,
+        logger=logger,
         gradient_clip_val=config.gradient_clip_val,
         precision="bf16-mixed" if config.use_bfloat16 else "32",
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
+        devices=devices,
+        strategy=strategy,
+        use_distributed_sampler=False,
         num_sanity_val_steps=getattr(config, 'num_sanity_val_steps', 0),
         log_every_n_steps=log_every_n_steps,
         val_check_interval=val_check_interval,
@@ -938,6 +975,8 @@ def main():
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum number of samples to use")
     parser.add_argument("--max-epochs", type=int, default=None, help="Maximum number of epochs")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
+    parser.add_argument("--devices", type=str, default=None, help="Number of GPUs or device IDs (e.g. 2, '0,1,2', or 'auto')")
+    parser.add_argument("--strategy", type=str, default=None, help="Multi-GPU strategy (e.g. 'ddp', 'ddp_spawn', 'auto')")
     parser.add_argument("--output-dir", type=str, default="./outputs/universal_pretrain", help="Output directory")
 
     args = parser.parse_args()
@@ -960,6 +999,18 @@ def main():
     if args.batch_size is not None:
         config_dict['batch_size'] = args.batch_size
 
+    if args.devices is not None:
+        # Convert numeric string to int if possible (e.g. "4" -> 4)
+        if args.devices.isdigit():
+            config_dict['devices'] = int(args.devices)
+        elif ',' in args.devices:
+            config_dict['devices'] = [int(x.strip()) for x in args.devices.split(',')]
+        else:
+            config_dict['devices'] = args.devices
+
+    if args.strategy is not None:
+        config_dict['strategy'] = args.strategy
+
     # Create config object
     config = create_pretraining_config(**config_dict)
 
@@ -972,8 +1023,8 @@ def main():
         dataset_name=config.dataset,
         dataset_dir=config.dataset_download_dir,
         output_dir=args.output_dir,
-        wandb_project=config.wandb_project_name,
-        wandb_run_name=config.wandb_run_name
+        wandb_project=getattr(config, 'wandb_project_name', 'esa-universal-pretraining'),
+        wandb_run_name=getattr(config, 'wandb_run_name', 'universal-pretraining')
     )
 
     print("🎉 Training completed successfully!")

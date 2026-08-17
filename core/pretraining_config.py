@@ -142,6 +142,13 @@ class PretrainingConfig:
     # Domain-specific block MLM. Protein masks complete residues; RNA masks
     # complete nucleotides. Each option is independently default-false, and
     # validation/test use a deterministic seed so masks stay stable.
+
+    # COCONUT / metabolite masking (random_atom vs random_walk on bond_edge_index)
+    coconut_masking_method: str = "random_atom"  # random_atom | random_walk
+    coconut_mask_ratio: float = 0.15
+    coconut_num_random_walks: int = 1
+    log_coconut_masking_stats: bool = True  # wandb masking/* metrics for coconut/metabolite
+    log_coconut_masking_frequency: int = 50  # log every N training batches (0 = every step)
     protein_block_mlm: bool = False
     protein_block_mlm_ratio: float = 0.15
     rna_block_mlm: bool = False

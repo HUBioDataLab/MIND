@@ -802,11 +802,22 @@ class OptimizedUniversalDataset(InMemoryDataset):
                 edge_index = torch.empty((2, 0), dtype=torch.long)
                 edge_attr = torch.empty((0, 1), dtype=torch.float32)
 
+            bond_edge_index = torch.empty((2, 0), dtype=torch.long)
+            bond_edges = mol.properties.get('bond_edges') if mol.properties else None
+            if bond_edges:
+                edges_bidir = []
+                for i, j in bond_edges:
+                    edges_bidir.append([i, j])
+                    edges_bidir.append([j, i])
+                if edges_bidir:
+                    bond_edge_index = torch.tensor(edges_bidir, dtype=torch.long).t().contiguous()
+
             data = Data(
                 pos=positions,
                 z=atomic_numbers,
                 edge_index=edge_index,
                 edge_attr=edge_attr,
+                bond_edge_index=bond_edge_index,
                 block_idx=block_indices,
                 entity_idx=entity_indices,
                 pos_code=pos_codes,

@@ -316,6 +316,7 @@ class LazyUniversalDataset(Dataset):
                 data, slices = self._cache[pt_file]
                 sample = self._extract_sample(data, slices, local_idx)
                 sample = normalize_legacy_atom_ids(sample)
+                sample = self._normalize_sample_for_collate(sample)
                 
                 # Add dataset_type for batch statistics
                 if self.metadata_loaded and chunk_idx < len(self.chunk_metadata):
@@ -394,6 +395,13 @@ class LazyUniversalDataset(Dataset):
         self._cache[pt_file] = (data, slices)
         self._cache_loads += 1
         self._cache_load_seconds += time.perf_counter() - started_at
+
+    @staticmethod
+    def _normalize_sample_for_collate(sample: Data) -> Data:
+        """Give every domain the optional fields required by mixed PyG collation."""
+        if not hasattr(sample, "bond_edge_index") or sample.bond_edge_index is None:
+            sample.bond_edge_index = torch.empty((2, 0), dtype=torch.long)
+        return sample
     
     def _extract_sample(self, data: Data, slices: dict, idx: int) -> Data:
         """

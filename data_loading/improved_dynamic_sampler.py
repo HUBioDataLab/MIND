@@ -48,6 +48,8 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         epoch_atom_budget: int | None = None,
         domain_atom_weights: dict[str, float] | None = None,
         epoch_num_batches: int | str | None = None,
+        num_replicas: int | None = None,
+        rank: int | None = None,
     ):
         """
         Initialize ImprovedDynamicBatchSampler
@@ -67,6 +69,8 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             epoch_num_batches: Fixed train batch-plan length, or ``"auto"`` /
                 ``None`` to use the natural greedy batch count. Fixed plans are
                 reached by splitting, never merging or padding with repeats.
+            num_replicas: Number of distributed processes sharing the epoch plan
+            rank: Current distributed process rank
 
         Raises:
             ValueError: If metadata is not loaded
@@ -117,6 +121,28 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         self._batch_plan = None
         self._batch_plan_epoch = None
         self.plan_stats = None
+
+        if num_replicas is None:
+            num_replicas = (
+                torch.distributed.get_world_size()
+                if torch.distributed.is_available()
+                and torch.distributed.is_initialized()
+                else 1
+            )
+        if rank is None:
+            rank = (
+                torch.distributed.get_rank()
+                if torch.distributed.is_available()
+                and torch.distributed.is_initialized()
+                else 0
+            )
+        if num_replicas <= 0 or not 0 <= rank < num_replicas:
+            raise ValueError(
+                f"Invalid distributed sampler layout: rank={rank}, "
+                f"num_replicas={num_replicas}"
+            )
+        self.num_replicas = num_replicas
+        self.rank = rank
 
         if self.epoch_atom_budget is not None:
             if not self.enable_cross_modal_batches:
@@ -646,14 +672,21 @@ class ImprovedDynamicBatchSampler(BatchSampler):
 
     def __iter__(self) -> Iterator[List[int]]:
         """Yield the same authoritative plan reported by ``__len__``."""
-        batches = self._get_batch_plan()
+        batches = self._get_rank_batch_plan()
 
         for batch in batches:
             yield batch
 
     def __len__(self) -> int:
         """Return the exact number of batches in the current epoch plan."""
-        return len(self._get_batch_plan())
+        return len(self._get_rank_batch_plan())
+
+    def _get_rank_batch_plan(self) -> List[List[int]]:
+        """Partition the shared deterministic epoch plan across DDP ranks."""
+        plan = self._get_batch_plan()
+        if self.num_replicas == 1:
+            return plan
+        return plan[self.rank::self.num_replicas]
 
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""

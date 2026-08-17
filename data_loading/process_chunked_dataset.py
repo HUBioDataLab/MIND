@@ -17,6 +17,8 @@ Usage:
         --num-chunks 10
 
     # COCONUT dataset (no manifest needed, reads from SDF)
+    # Re-run after coconut_adapter changes so .pt chunks include bond_edge_index
+    # (required for coconut_masking_method: random_walk in training YAML).
     python data_loading/process_chunked_dataset.py \
         --config-yaml-path core/pretraining_config_coconut.yaml \
         --dataset coconut \

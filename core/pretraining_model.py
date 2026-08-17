@@ -18,6 +18,13 @@ from core.masked_coordinate_corruption import apply_masked_slot_template_
 from core.masked_slot_mapping import flatten_pos_codes
 from core.molecular_encoder import UniversalMolecularEncoder, nearest_multiple_of_8
 from core.pretraining_tasks import PretrainingTasks
+from data_loading.masking_utils import (
+    compute_coconut_masking_metrics,
+    get_graph_dataset_type,
+    is_coconut_dataset_type,
+    select_mask_indices,
+    slice_bond_edge_index,
+)
 
 # Backward-compatibility re-exports (other files can still import from here)
 __all__ = [
@@ -44,11 +51,14 @@ class PretrainingESAModel(pl.LightningModule):
         # Universal molecular encoder
         self.encoder = UniversalMolecularEncoder(config)
 
+        use_triton_attn = getattr(config, 'use_triton_flash_attention', True)
+        attn_choice = "triton" if use_triton_attn else getattr(config, 'xformers_or_torch_attn', "triton")
+
         # ESA backbone (with layer-wise equivariant integration if enabled)
         st_args = dict(
             num_outputs=32,
             dim_output=config.graph_dim,
-            xformers_or_torch_attn=config.xformers_or_torch_attn,
+            xformers_or_torch_attn=attn_choice,
             dim_hidden=config.hidden_dims,
             num_heads=config.num_heads,
             sab_dropout=config.sab_dropout,
@@ -68,6 +78,7 @@ class PretrainingESAModel(pl.LightningModule):
             pma_residual_dropout=config.pma_residual_dropout,
             use_mlp_ln=config.use_mlp_ln,
             mlp_dropout=config.mlp_dropout,
+            use_triton_varlen_flash_attention=getattr(config, 'use_triton_varlen_flash_attention', True),
             use_equivariant=config.use_equivariant_features,
             equivariant_lmax=config.equivariant_lmax,
             equivariant_num_features=config.equivariant_num_features,
@@ -135,12 +146,12 @@ class PretrainingESAModel(pl.LightningModule):
         assert pos is not None, "Coordinates (pos) are required for pretraining tasks"
 
         # Center positions for translation invariance (per-graph)
-        pos_centered = pos.clone()
-        for graph_id in torch.unique(batch_mapping):
-            mask = batch_mapping == graph_id
-            if mask.sum() > 0:
-                com = pos[mask].mean(dim=0, keepdim=True)
-                pos_centered[mask] = pos[mask] - com
+        if hasattr(batch, 'ptr') and batch.ptr is not None:
+            com = torch.segment_reduce(pos, 'mean', offsets=batch.ptr)
+        else:
+            from torch_scatter import scatter_mean
+            com = scatter_mean(pos, batch_mapping, dim=0)
+        pos_centered = pos - com[batch_mapping]
         pos = pos_centered
         batch.pos = pos_centered
 
@@ -242,19 +253,35 @@ class PretrainingESAModel(pl.LightningModule):
                 counts = torch.bincount(batch_mapping)
                 num_max_items = nearest_multiple_of_8(int(counts.max().item()) + 1)
 
-            h, dense_batch_index = to_dense_batch(
-                h, batch_mapping, fill_value=0, max_num_nodes=num_max_items
-            )
+            if hasattr(batch, 'ptr') and batch.ptr is not None:
+                ptr = batch.ptr
+                node_idx_in_graph = torch.arange(h.size(0), device=h.device) - ptr[batch_mapping]
+                h, _ = to_dense_batch(h, batch_mapping, fill_value=0, max_num_nodes=num_max_items)
 
-            esa_output = self.esa_backbone(
-                h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
-            )
-            graph_emb, node_emb_before_pma = esa_output
+                esa_output = self.esa_backbone(
+                    h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
+                )
+                graph_emb, node_emb_before_pma = esa_output
 
-            if node_emb_before_pma.dim() == 3:
-                h_node_level = node_emb_before_pma[dense_batch_index]
+                if node_emb_before_pma.dim() == 3:
+                    flat_idx = batch_mapping * num_max_items + node_idx_in_graph
+                    h_node_level = node_emb_before_pma.view(-1, node_emb_before_pma.size(-1))[flat_idx]
+                else:
+                    h_node_level = node_emb_before_pma
             else:
-                h_node_level = node_emb_before_pma
+                h, dense_batch_index = to_dense_batch(
+                    h, batch_mapping, fill_value=0, max_num_nodes=num_max_items
+                )
+
+                esa_output = self.esa_backbone(
+                    h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
+                )
+                graph_emb, node_emb_before_pma = esa_output
+
+                if node_emb_before_pma.dim() == 3:
+                    h_node_level = node_emb_before_pma[dense_batch_index]
+                else:
+                    h_node_level = node_emb_before_pma
 
             h = graph_emb
 
@@ -263,6 +290,51 @@ class PretrainingESAModel(pl.LightningModule):
     # ------------------------------------------------------------------
     # Pre-encoder masking helpers (called before forward() in each step)
     # ------------------------------------------------------------------
+
+    def _graph_masking_params(self, dataset_type: Optional[str], for_coord: bool = False):
+        """Ratio and bond edges config for a single graph in a batch."""
+        if is_coconut_dataset_type(dataset_type):
+            ratio = getattr(self.config, 'coconut_mask_ratio', 0.15)
+            method = getattr(self.config, 'coconut_masking_method', 'random_atom')
+            num_walks = getattr(self.config, 'coconut_num_random_walks', 1)
+        else:
+            if for_coord:
+                ratio = getattr(self.config, 'coordinate_denoising_mask_ratio', 0.15)
+            else:
+                ratio = getattr(self.config, 'mlm_mask_ratio', 0.15)
+            method = 'random_atom'
+            num_walks = 1
+        return ratio, method, num_walks
+
+    def _select_graph_mask_indices(
+        self,
+        batch,
+        graph_idx: int,
+        indices: torch.Tensor,
+        for_coord: bool = False,
+    ) -> torch.Tensor:
+        n = indices.size(0)
+        device = indices.device
+        dtype = get_graph_dataset_type(getattr(batch, 'dataset_type', None), graph_idx)
+        ratio, coconut_method, num_walks = self._graph_masking_params(dtype, for_coord=for_coord)
+        bond_edge_index = getattr(batch, 'bond_edge_index', None)
+        bond_sub = None
+        if bond_edge_index is not None and bond_edge_index.numel() > 0:
+            node_offset = int(indices[0].item())
+            bond_sub = slice_bond_edge_index(bond_edge_index, node_offset, n)
+            if bond_sub.numel() > 0:
+                bond_sub = bond_sub.to(device)
+        local_indices = select_mask_indices(
+            n,
+            ratio,
+            method='random_atom',
+            bond_edge_index=bond_sub,
+            dataset_type=dtype,
+            coconut_method=coconut_method,
+            num_walks=num_walks,
+            device=device,
+        )
+        return indices[local_indices]
 
     def _ensure_mlm_attributes(self, batch, batch_idx: int = 0, is_validation: bool = False):
         """Add MLM masking on-the-fly if not already present.
@@ -293,47 +365,6 @@ class PretrainingESAModel(pl.LightningModule):
 
         use_block_for_protein = getattr(self.config, 'protein_block_mlm', False)
         use_block_for_rna = getattr(self.config, 'rna_block_mlm', False)
-
-        if not use_block_for_protein and not use_block_for_rna:
-            # =====================================================
-            # LEGACY PATH — unchanged atom-level random masking.
-            # Kept verbatim so flag=False is a strict no-op.
-            # =====================================================
-            mask_ratio = getattr(self.config, 'mlm_mask_ratio', 0.15)
-            mask_token = 0
-            z = batch.z.long()
-            batch.original_types = z.clone()
-            num_nodes = z.size(0)
-            mlm_mask = torch.zeros(num_nodes, dtype=torch.bool, device=z.device)
-            masked_types = z.clone()
-
-            if hasattr(batch, 'batch') and batch.batch is not None:
-                graph_idx = batch.batch
-                for g in graph_idx.unique().tolist():
-                    node_mask = (graph_idx == g)
-                    indices = torch.where(node_mask)[0]
-                    n = indices.size(0)
-                    if n > 0:
-                        k = max(1, int(n * mask_ratio))
-                        perm = torch.randperm(n, device=z.device)[:k]
-                        selected = indices[perm]
-                        mlm_mask[selected] = True
-                        masked_types[selected] = mask_token
-            else:
-                k = max(1, int(num_nodes * mask_ratio))
-                selected = torch.randperm(num_nodes, device=z.device)[:k]
-                mlm_mask[selected] = True
-                masked_types[selected] = mask_token
-
-            batch.mlm_mask = mlm_mask
-            batch.masked_types = masked_types
-            batch.z = masked_types  # encoder sees masked input
-            return
-
-        # =====================================================
-        # DOMAIN BLOCK-MLM PATH. Enabled protein/RNA domains use whole blocks;
-        # every other graph falls back to original atom-level random masking.
-        # =====================================================
         atom_mask_ratio = getattr(self.config, 'mlm_mask_ratio', 0.15)
         protein_block_mask_ratio = getattr(
             self.config, 'protein_block_mlm_ratio', 0.15
@@ -381,7 +412,20 @@ class PretrainingESAModel(pl.LightningModule):
                 return torch.randperm(n, generator=gen).to(device)
             return torch.randperm(n, device=device)
 
-        if hasattr(batch, 'batch') and batch.batch is not None:
+        use_vectorized_random_masking = (
+            getattr(self.config, 'use_vectorized_mlm_masking', True)
+            and not use_block_for_protein
+            and not use_block_for_rna
+        )
+        if use_vectorized_random_masking:
+            # Fully Vectorized Batch-Wide Random MLM Masking (0 Python loops across entire batch)
+            if gen is not None:
+                rand_vals = torch.rand(num_nodes, generator=gen, device='cpu').to(device)
+            else:
+                rand_vals = torch.rand(num_nodes, device=device)
+            mlm_mask = rand_vals < atom_mask_ratio
+            masked_types[mlm_mask] = mask_token
+        elif hasattr(batch, 'batch') and batch.batch is not None:
             graph_idx = batch.batch
             for g in graph_idx.unique().tolist():
                 node_mask = (graph_idx == g)
@@ -426,24 +470,45 @@ class PretrainingESAModel(pl.LightningModule):
                     mlm_mask[selected] = True
                     masked_types[selected] = mask_token
                 else:
-                    # Atom-level random — preserves legacy behaviour for
-                    # metabolite, QM9, RNA, and protein graphs missing block_idx.
-                    k = max(1, int(n * atom_mask_ratio))
-                    perm = _randperm(n)
-                    selected = indices[perm[:k]]
+                    if is_coconut_dataset_type(g_dtype):
+                        # COCONUT may opt into bond-aware masking. Keep that
+                        # feature isolated from every legacy atom-level domain.
+                        selected = PretrainingESAModel._select_graph_mask_indices(
+                            self, batch, int(g), indices, for_coord=False
+                        )
+                    else:
+                        k = max(1, int(n * atom_mask_ratio))
+                        selected = indices[_randperm(n)[:k]]
                     mlm_mask[selected] = True
                     masked_types[selected] = mask_token
         else:
-            # No batch index → treat whole tensor as single graph (atom-level).
-            k = max(1, int(num_nodes * atom_mask_ratio))
-            perm = _randperm(num_nodes)
-            selected = perm[:k]
-            mlm_mask[selected] = True
-            masked_types[selected] = mask_token
+            # No batch index → treat whole tensor as single graph
+            dtype = get_graph_dataset_type(getattr(batch, 'dataset_type', None), 0)
+            if is_coconut_dataset_type(dtype):
+                ratio, coconut_method, num_walks = PretrainingESAModel._graph_masking_params(
+                    self, dtype, for_coord=False
+                )
+                bond_edge_index = getattr(batch, 'bond_edge_index', None)
+                local = select_mask_indices(
+                    num_nodes,
+                    ratio,
+                    method='random_atom',
+                    bond_edge_index=bond_edge_index,
+                    dataset_type=dtype,
+                    coconut_method=coconut_method,
+                    num_walks=num_walks,
+                    device=z.device,
+                )
+            else:
+                k = max(1, int(num_nodes * atom_mask_ratio))
+                local = _randperm(num_nodes)[:k]
+            mlm_mask[local] = True
+            masked_types[local] = mask_token
 
         batch.mlm_mask = mlm_mask
         batch.masked_types = masked_types
         batch.z = masked_types
+        batch.x = masked_types
 
     @staticmethod
     def _graph_dtype_list(batch):
@@ -457,6 +522,36 @@ class PretrainingESAModel(pl.LightningModule):
         n = getattr(batch, 'num_graphs', 1) or 1
         return [dt] * n
 
+    def _log_coconut_masking_metrics(self, batch, batch_idx: int) -> None:
+        """Log coconut-only masking diagnostics to wandb under the ``masking/`` namespace."""
+        if "mlm" not in self.config.pretraining_tasks:
+            return
+        if not getattr(self.config, "log_coconut_masking_stats", True):
+            return
+        freq = int(getattr(self.config, "log_coconut_masking_frequency", 50))
+        if freq > 0 and batch_idx % freq != 0:
+            return
+
+        metrics = compute_coconut_masking_metrics(batch, self.config)
+        if metrics is None:
+            return
+
+        for key in (
+            "mask_frac",
+            "mask_target_frac",
+            "mask_connected_frac",
+            "bond_edges_per_graph",
+            "mask_fallback_rate",
+        ):
+            self.log(
+                f"masking/{key}",
+                float(metrics[key]),
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+                batch_size=1,
+            )
+
     def _ensure_coord_denoising_attributes(self, batch):
         """Add coordinate noise on-the-fly if not already present."""
         if "coordinate_denoising" not in self.config.pretraining_tasks:
@@ -467,23 +562,38 @@ class PretrainingESAModel(pl.LightningModule):
             return
 
         noise_std = getattr(self.config, 'coordinate_denoising_noise_std', 0.1)
-        mask_ratio = getattr(self.config, 'coordinate_denoising_mask_ratio', 0.15)
         batch.clean_pos = batch.pos.clone()
         noise = torch.randn_like(batch.pos, device=batch.pos.device, dtype=batch.pos.dtype) * noise_std
         batch.pos = batch.clean_pos + noise
         num_nodes = batch.pos.size(0)
+
+        if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
+            batch.coord_mask = batch.mlm_mask.clone()
+            return
+
         coord_mask = torch.zeros(num_nodes, dtype=torch.bool, device=batch.pos.device)
         if hasattr(batch, 'batch') and batch.batch is not None:
             for g in batch.batch.unique().tolist():
                 node_mask = (batch.batch == g)
                 indices = torch.where(node_mask)[0]
-                n = indices.size(0)
-                k = max(1, int(n * mask_ratio))
-                perm = torch.randperm(n, device=batch.pos.device)[:k]
-                coord_mask[indices[perm]] = True
+                if indices.size(0) > 0:
+                    selected = self._select_graph_mask_indices(batch, int(g), indices, for_coord=True)
+                    coord_mask[selected] = True
         else:
-            k = max(1, int(num_nodes * mask_ratio))
-            coord_mask[torch.randperm(num_nodes, device=batch.pos.device)[:k]] = True
+            dtype = get_graph_dataset_type(getattr(batch, 'dataset_type', None), 0)
+            ratio, coconut_method, num_walks = self._graph_masking_params(dtype, for_coord=True)
+            bond_edge_index = getattr(batch, 'bond_edge_index', None)
+            local = select_mask_indices(
+                num_nodes,
+                ratio,
+                method='random_atom',
+                bond_edge_index=bond_edge_index,
+                dataset_type=dtype,
+                coconut_method=coconut_method,
+                num_walks=num_walks,
+                device=batch.pos.device,
+            )
+            coord_mask[local] = True
         batch.coord_mask = coord_mask
 
     def _ensure_masked_slot_template(self, batch):
@@ -677,6 +787,7 @@ class PretrainingESAModel(pl.LightningModule):
         self._ensure_mlm_attributes(batch, batch_idx=batch_idx, is_validation=False)
         template_stats = self._ensure_masked_slot_template(batch)
         self._ensure_coord_denoising_attributes(batch)
+        self._log_coconut_masking_metrics(batch, batch_idx)
 
         for name, value in template_stats.items():
             self.log(
@@ -774,8 +885,8 @@ class PretrainingESAModel(pl.LightningModule):
         )
 
         for task_name, loss_value in losses.items():
-            self.log(f"val_{task_name}_loss", loss_value, on_epoch=True, logger=True)
-        self.log("val_total_loss", total_loss, on_epoch=True, logger=True)
+            self.log(f"val_{task_name}_loss", loss_value, on_epoch=True, logger=True, sync_dist=True)
+        self.log("val_total_loss", total_loss, on_epoch=True, logger=True, sync_dist=True)
 
         if self.config.compute_per_type_losses:
             type_losses = self._compute_per_type_losses(
@@ -783,7 +894,7 @@ class PretrainingESAModel(pl.LightningModule):
             )
             for dtype, dtype_losses in type_losses.items():
                 for task_name, loss_value in dtype_losses.items():
-                    self.log(f"val_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
+                    self.log(f"val_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True, sync_dist=True)
 
         outputs = {'loss': total_loss}
         if "mlm" in self.config.pretraining_tasks:
@@ -808,8 +919,8 @@ class PretrainingESAModel(pl.LightningModule):
         )
 
         for task_name, loss_value in losses.items():
-            self.log(f"test_{task_name}_loss", loss_value, on_epoch=True, logger=True)
-        self.log("test_total_loss", total_loss, on_epoch=True, logger=True)
+            self.log(f"test_{task_name}_loss", loss_value, on_epoch=True, logger=True, sync_dist=True)
+        self.log("test_total_loss", total_loss, on_epoch=True, logger=True, sync_dist=True)
 
         if self.config.compute_per_type_losses:
             type_losses = self._compute_per_type_losses(
@@ -837,11 +948,21 @@ class PretrainingESAModel(pl.LightningModule):
         total_norm = total_norm ** 0.5
         self.log("grad_norm_before_clip", total_norm, on_step=True, logger=True)
 
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val=None, gradient_clip_algorithm=None):
+        """
+        Custom gradient clipping override to support Fused CUDA AdamW kernel with PyTorch Lightning.
+        Avoids Lightning AMP unscaling collision when fused=True.
+        """
+        clip_val = gradient_clip_val if gradient_clip_val is not None else getattr(self.config, 'gradient_clip_val', 0.5)
+        if clip_val is not None and clip_val > 0:
+            torch.nn.utils.clip_grad_norm_(self.parameters(), clip_val)
+
     def configure_optimizers(self):
-        optimizer = bnb.optim.AdamW8bit(
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.config.lr,
             weight_decay=self.config.optimiser_weight_decay,
+            fused=True,
         )
 
         total_epochs = getattr(self.config, 'max_epochs', 100)

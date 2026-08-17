@@ -66,7 +66,9 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
         subset_indices: List[int] = None,
         seed: int = 42,
         enable_cross_modal_batches: bool = False,
-        cycle_short_domains: bool = True
+        cycle_short_domains: bool = True,
+        num_replicas: int | None = None,
+        rank: int | None = None,
     ):
         """
         Initialize DynamicChunkAwareBatchSampler
@@ -80,6 +82,8 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
             seed: Random seed for reproducibility
             enable_cross_modal_batches: If True, mix different dataset types in same batch
             cycle_short_domains: Reuse shorter domain samples in cross-modal mode
+            num_replicas: Number of distributed processes sharing the epoch plan
+            rank: Current distributed process rank
         """
         # Handle Subset from random_split
         from torch.utils.data import Subset
@@ -105,6 +109,28 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
         self.seed = seed
         self._batch_plan = None
         self._batch_plan_epoch = None
+
+        if num_replicas is None:
+            num_replicas = (
+                torch.distributed.get_world_size()
+                if torch.distributed.is_available()
+                and torch.distributed.is_initialized()
+                else 1
+            )
+        if rank is None:
+            rank = (
+                torch.distributed.get_rank()
+                if torch.distributed.is_available()
+                and torch.distributed.is_initialized()
+                else 0
+            )
+        if num_replicas <= 0 or not 0 <= rank < num_replicas:
+            raise ValueError(
+                f"Invalid distributed sampler layout: rank={rank}, "
+                f"num_replicas={num_replicas}"
+            )
+        self.num_replicas = num_replicas
+        self.rank = rank
 
         # Validate dataset attributes
         if not hasattr(self.dataset, 'chunk_pt_files'):
@@ -447,12 +473,19 @@ class DynamicChunkAwareBatchSampler(BatchSampler):
 
     def __iter__(self) -> Iterator[List[int]]:
         """Yield the same authoritative plan reported by ``__len__``."""
-        for batch in self._get_batch_plan():
+        for batch in self._get_rank_batch_plan():
             yield batch
 
     def __len__(self) -> int:
         """Return the exact number of batches in the current epoch plan."""
-        return len(self._get_batch_plan())
+        return len(self._get_rank_batch_plan())
+
+    def _get_rank_batch_plan(self) -> List[List[int]]:
+        """Partition the shared deterministic epoch plan across DDP ranks."""
+        plan = self._get_batch_plan()
+        if self.num_replicas == 1:
+            return plan
+        return plan[self.rank::self.num_replicas]
 
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""
