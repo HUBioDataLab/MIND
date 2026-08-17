@@ -662,8 +662,7 @@ def create_data_loaders(dataset, config: PretrainingConfig):
 
     if is_lazy_dataset:
         print(f"   ⚡ ChunkAwareSampler enabled")
-        print(f"   ⚡ Cache hit rate: ~99.97% (chunk-aware reading)")
-        print(f"   ⚡ Expected iteration speed: 3.5-4.0 it/s")
+        print("   📏 Cache hit rate and throughput will be measured during training")
     else:
         print(f"   ℹ️  Using standard DataLoader (non-chunked)")
         print(f"   💡 To enable chunking for this dataset:")
