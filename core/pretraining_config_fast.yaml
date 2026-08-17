@@ -65,7 +65,7 @@ use_dynamic_batching: true
 use_improved_sampler: true
 max_atoms_per_batch: 6000  # Safe fast-validation budget for 32 GB GPUs.
 log_batch_statistics: true
-batch_stats_log_frequency: 10
+batch_stats_log_frequency: 1  # User decision: print measured telemetry for every batch.
 
 compute_per_type_losses: true
 log_per_type_frequency: 10
