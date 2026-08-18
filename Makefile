@@ -71,6 +71,11 @@ RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
 
 NUM_CHUNKS ?= 10
 PARALLEL ?= 1
+RNA_JUNE_V2_MANIFEST ?= /home/yusuf/data/rna/rna_june_equivalent_v2_manifest.csv
+RNA_JUNE_V2_REPORT ?= /home/yusuf/data/rna/rna_june_equivalent_v2_audit.json
+RNA_JUNE_V2_OUTPUT_ROOT ?= /media/ubuntu/8TB/yusuf/mind_virtual_v1/rna/june_equivalent_23slot_v2
+RNA_JUNE_V2_MANIFEST_LOG ?= $(LOG_MONTH_DIR)/rna_june_v2_manifest_$(_LOG_DATETIME).log
+RNA_JUNE_V2_DERIVE_LOG ?= $(LOG_MONTH_DIR)/rna_june_v2_derive_$(_LOG_DATETIME).log
 PROCESS_ARGS = --config-yaml-path core/pretraining_config_multidomain.yaml \
 	--dataset pdb \
 	--data-path /home/yusuf/data/proteins/raw_structures_hq_40k \
@@ -80,7 +85,7 @@ PROCESS_ARGS = --config-yaml-path core/pretraining_config_multidomain.yaml \
 	--num-chunks $(NUM_CHUNKS) \
 	--use-hybrid-edges --force
 
-.PHONY: train stop status logs help process-protein
+.PHONY: train stop status logs help process-protein rna-june-v2-manifest rna-june-v2-derive
 
 train:
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then \
@@ -155,6 +160,34 @@ else
 	@echo "Follow: tail -f process_protein_*.log"
 endif
 
+rna-june-v2-manifest:
+	@echo "=== Auditing immutable June-equivalent RNA membership ==="
+	@echo "  Manifest: $(RNA_JUNE_V2_MANIFEST)"
+	@echo "  Report:   $(RNA_JUNE_V2_REPORT)"
+	@echo "  Log:      $(RNA_JUNE_V2_MANIFEST_LOG)"
+	@mkdir -p $(LOG_MONTH_DIR)
+	@set -o pipefail; $(CONDA_RUN) python data_loading/build_rna_june_equivalent_manifest.py \
+		--source-base /home/yusuf/data/rna/processed_23slot \
+		--historical-raw-manifest /home/arya/rna3db-main/MIND/data/rna/manifests/manifest_rna.csv \
+		--legacy-filtered-dir /home/arya/rna3db-main/MIND/data/rna/filtered_structures \
+		--current-manifest /home/yusuf/data/rna/rna_final_23slot_manifest.csv \
+		--output-manifest $(RNA_JUNE_V2_MANIFEST) \
+		--output-report $(RNA_JUNE_V2_REPORT) \
+		2>&1 | tee $(RNA_JUNE_V2_MANIFEST_LOG)
+
+rna-june-v2-derive:
+	@echo "=== Deriving immutable June-equivalent RNA PT chunks ==="
+	@echo "  Manifest:   $(RNA_JUNE_V2_MANIFEST)"
+	@echo "  Output root: $(RNA_JUNE_V2_OUTPUT_ROOT)"
+	@echo "  Log:         $(RNA_JUNE_V2_DERIVE_LOG)"
+	@mkdir -p $(LOG_MONTH_DIR)
+	@set -o pipefail; $(CONDA_RUN) python data_loading/derive_rna_june_equivalent_pt.py \
+		--source-base /home/yusuf/data/rna/processed_23slot \
+		--manifest-path $(RNA_JUNE_V2_MANIFEST) \
+		--output-root $(RNA_JUNE_V2_OUTPUT_ROOT) \
+		--first-chunk 0 --last-chunk 66 \
+		2>&1 | tee $(RNA_JUNE_V2_DERIVE_LOG)
+
 logs:
 	@find logs/ -name "*.log" -printf "%T@ %p\n" 2>/dev/null | sort -rn | head -10 | awk '{print $$2}' || echo "No log files found."
 
@@ -171,5 +204,7 @@ help:
 	@echo "  Data Processing:"
 	@echo "    make process-protein                 All chunks (sequential, nohup)"
 	@echo "    make process-protein PARALLEL=2      2 parallel groups (nohup)"
+	@echo "    make rna-june-v2-manifest            Audit exact June RNA membership"
+	@echo "    make rna-june-v2-derive              Derive immutable 23-slot PT chunks"
 	@echo ""
 	@echo "  CONFIG shortcuts: m=multidomain, f=fast"
