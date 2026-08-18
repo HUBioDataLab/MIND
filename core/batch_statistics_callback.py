@@ -26,6 +26,8 @@ class BatchStatisticsCallback(Callback):
     
     def __init__(self, log_every_n_batches=10, enabled=True):
         super().__init__()
+        if int(log_every_n_batches) <= 0:
+            raise ValueError("log_every_n_batches must be positive")
         self.log_every_n_batches = log_every_n_batches
         self.enabled = enabled
         self.batch_stats = []
@@ -55,7 +57,7 @@ class BatchStatisticsCallback(Callback):
             if hasattr(batch, 'dataset_type'):
                 dataset_types = batch.dataset_type
                 # Count samples per dataset type
-                stats = self._compute_batch_stats(dataset_types, batch)
+                stats = self._compute_batch_stats(dataset_types, batch, graph_sizes)
                 if batch_idx % self.log_every_n_batches == 0:
                     self._print_batch_stats(batch_idx, stats, num_nodes, num_graphs)
             else:
@@ -70,6 +72,7 @@ class BatchStatisticsCallback(Callback):
                 'num_edges': num_edges,
                 'graph_sizes': graph_sizes,
                 'domains': stats,
+                'emit_telemetry': batch_idx % self.log_every_n_batches == 0,
                 'data_wait_seconds': (
                     started_at - self._previous_batch_end
                     if self._previous_batch_end is not None else None
@@ -106,52 +109,52 @@ class BatchStatisticsCallback(Callback):
             f"{record['edge_rebuild_ms']:.2f}"
             if record['edge_rebuild_ms'] is not None else "na"
         )
-        print(
-            f"TELEMETRY epoch={record['epoch']} batch={batch_idx} "
-            f"graphs={record['num_graphs']} atoms={record['num_nodes']} "
-            f"edges={record['num_edges']} step_ms={1000.0 * step_seconds:.2f} "
-            f"data_wait_ms={wait_ms:.2f} atoms_s={record['atoms_per_second']:.1f} "
-            f"edges_s={record['edges_per_second']:.1f} "
-            f"graphs_s={record['graphs_per_second']:.2f} "
-            f"template_ms={template_ms} edge_rebuild_ms={edge_rebuild_ms}"
-        )
+        if record['emit_telemetry']:
+            print(
+                f"TELEMETRY epoch={record['epoch']} batch={batch_idx} "
+                f"graphs={record['num_graphs']} atoms={record['num_nodes']} "
+                f"edges={record['num_edges']} step_ms={1000.0 * step_seconds:.2f} "
+                f"data_wait_ms={wait_ms:.2f} atoms_s={record['atoms_per_second']:.1f} "
+                f"edges_s={record['edges_per_second']:.1f} "
+                f"graphs_s={record['graphs_per_second']:.2f} "
+                f"template_ms={template_ms} edge_rebuild_ms={edge_rebuild_ms}"
+            )
         self._previous_batch_end = ended_at
         self._active_batch_stat = None
     
-    def _compute_batch_stats(self, dataset_types, batch):
-        """Compute statistics about batch composition."""
+    def _compute_batch_stats(self, dataset_types, batch, graph_sizes=None):
+        """Compute statistics with one vector transfer and CPU aggregation."""
         stats = defaultdict(lambda: {'samples': 0, 'atoms': 0})
-        
-        # If dataset_types is a list/tensor
-        if isinstance(dataset_types, (list, tuple)):
-            for dt in dataset_types:
-                stats[dt]['samples'] += 1
+
+        num_graphs = int(batch.num_graphs if hasattr(batch, 'num_graphs') else 1)
+        if isinstance(dataset_types, str):
+            graph_domains = [dataset_types] * num_graphs
         elif isinstance(dataset_types, torch.Tensor):
-            unique, counts = torch.unique(dataset_types, return_counts=True)
-            for dt, count in zip(unique.tolist(), counts.tolist()):
-                stats[dt]['samples'] = count
-        elif isinstance(dataset_types, str):
-            # Single dataset type for whole batch
-            stats[dataset_types]['samples'] = batch.num_graphs if hasattr(batch, 'num_graphs') else 1
-        
-        # Count atoms per dataset if batch_mapping available
-        if hasattr(batch, 'batch') and hasattr(batch, 'dataset_type'):
-            batch_mapping = batch.batch
-            
-            # If dataset_type is per-graph
-            if isinstance(dataset_types, (list, tuple, torch.Tensor)):
-                for graph_idx in range(batch.num_graphs):
-                    # Count atoms for this graph
-                    atoms_in_graph = (batch_mapping == graph_idx).sum().item()
-                    
-                    # Get dataset type for this graph
-                    if isinstance(dataset_types, torch.Tensor):
-                        dt = dataset_types[graph_idx].item() if dataset_types.dim() > 0 else dataset_types.item()
-                    else:
-                        dt = dataset_types[graph_idx] if graph_idx < len(dataset_types) else dataset_types[0]
-                    
-                    stats[dt]['atoms'] += atoms_in_graph
-        
+            graph_domains = dataset_types.detach().cpu().tolist()
+        else:
+            graph_domains = list(dataset_types)
+        if len(graph_domains) != num_graphs:
+            raise ValueError(
+                f"dataset_type count {len(graph_domains)} != graph count {num_graphs}"
+            )
+
+        if graph_sizes is None:
+            if not hasattr(batch, 'batch'):
+                graph_sizes = [int(batch.num_nodes)]
+            else:
+                graph_sizes = torch.bincount(
+                    batch.batch, minlength=num_graphs
+                ).detach().cpu().tolist()
+        if len(graph_sizes) != num_graphs:
+            raise ValueError(
+                f"graph size count {len(graph_sizes)} != graph count {num_graphs}"
+            )
+
+        # The only device-to-host transfer is the graph-size vector above.
+        # All per-graph aggregation happens on ordinary Python values.
+        for dt, atoms in zip(graph_domains, graph_sizes):
+            stats[dt]['samples'] += 1
+            stats[dt]['atoms'] += int(atoms)
         return dict(stats)
     
     def _print_batch_stats(self, batch_idx, stats, num_nodes, num_graphs):

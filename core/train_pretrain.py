@@ -734,6 +734,32 @@ def set_data_loader_epoch(data_loader, epoch: int):
     return updated
 
 
+def create_experiment_logger(
+    config: PretrainingConfig,
+    *,
+    project: str,
+    run_name: str,
+    output_dir: str,
+):
+    """Resolve and announce the experiment logger before model construction."""
+    use_wandb = bool(getattr(config, "use_wandb", False))
+    if not use_wandb:
+        print("🧾 Experiment logger: disabled (use_wandb=false)")
+        return False
+
+    logger = WandbLogger(
+        project=project,
+        name=run_name,
+        save_dir=output_dir,
+        config=vars(config),
+    )
+    print(
+        "🧾 Experiment logger: W&B enabled "
+        f"(project={project}, run={run_name}, save_dir={output_dir})"
+    )
+    return logger
+
+
 def train_universal_pretraining(
     config: PretrainingConfig,
     dataset_name: str,
@@ -776,6 +802,15 @@ def train_universal_pretraining(
 
     # Create data loaders
     train_loader, val_loader, test_loader = create_data_loaders(full_dataset, config)
+
+    # Resolve logging before constructing the model so the selected backend is
+    # visible even if model initialization fails.
+    experiment_logger = create_experiment_logger(
+        config,
+        project=wandb_project,
+        run_name=wandb_run_name,
+        output_dir=output_dir,
+    )
 
     # Create model
     print("🔄 Creating model...")
@@ -847,14 +882,6 @@ def train_universal_pretraining(
     callbacks.append(protein_metrics_callback)
     print("✅ Protein per-atom + per-AA (binary & block) metrics callback enabled")
 
-    # Create wandb logger
-    wandb_logger = WandbLogger(
-        project=wandb_project,
-        name=wandb_run_name,
-        save_dir=output_dir,
-        config=vars(config),
-    )
-
     # Validation and logging frequency (from config)
     val_check_interval = getattr(config, 'val_check_interval', 0.25)
     log_every_n_steps = getattr(config, 'log_every_n_steps', 1)
@@ -873,7 +900,7 @@ def train_universal_pretraining(
     trainer = pl.Trainer(
         max_epochs=config.max_epochs,
         callbacks=callbacks,
-        logger=wandb_logger,
+        logger=experiment_logger,
         gradient_clip_val=config.gradient_clip_val,
         precision="bf16-mixed" if config.use_bfloat16 else "32",
         accelerator="gpu" if torch.cuda.is_available() else "cpu",

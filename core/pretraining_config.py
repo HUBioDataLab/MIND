@@ -184,6 +184,9 @@ class PretrainingConfig:
     # Verbose batch logging (BATCH N, dataset mix, step loss prints); set true to enable
     log_batch_stats: bool = False
 
+    # Experiment logger is explicit so a config cannot silently lose W&B visibility.
+    use_wandb: bool = False
+
     # Equivariant features (experimental)
     use_equivariant_features: bool = False  # Set to true to enable equivariant branch
     equivariant_lmax: int = 2  # Maximum angular momentum (l=0,1,2)
