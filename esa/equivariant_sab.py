@@ -222,7 +222,7 @@ class EquivariantSAB(nn.Module):
             equivariant_features = data[AtomicDataDict.NODE_FEATURES_KEY]  # [total_nodes, irreps_out.dim]
             
             # Project to scalar space
-            equivariant_scalar = self.equivariant_to_scalar(equivariant_features)  # [total_nodes, dim_out]
+            equivariant_scalar = self.equivariant_to_scalar(equivariant_features).to(dtype=X.dtype)  # [total_nodes, dim_out]
             
             # Convert back to dense format (vectorized)
             if batch_mapping is not None:
@@ -233,7 +233,7 @@ class EquivariantSAB(nn.Module):
             
             # Cross-connection: Equivariant -> Invariant (gate attention)
             if self.cross_connection:
-                equivariant_gate = self.equiv_to_inv_gate(equivariant_features)  # [total_nodes, dim_out]
+                equivariant_gate = self.equiv_to_inv_gate(equivariant_features).to(dtype=X.dtype)  # [total_nodes, dim_out]
                 
                 # Convert gate to dense (vectorized)
                 if batch_mapping is not None:

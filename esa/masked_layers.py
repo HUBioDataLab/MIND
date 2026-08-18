@@ -108,8 +108,15 @@ def get_adj_mask_from_edge_index_node(
     edge_dst_rel = edge_index[1] - node_offsets[edge_index[1]]
     edge_batch_mapping = batch_mapping.index_select(0, edge_index[0])
 
+    valid_edges = (
+        (edge_src_rel >= 0) & (edge_src_rel < max_items) &
+        (edge_dst_rel >= 0) & (edge_dst_rel < max_items) &
+        (edge_batch_mapping < batch_size) &
+        (batch_mapping[edge_index[0]] == batch_mapping[edge_index[1]])
+    )
+
     adj_mask[
-        edge_batch_mapping, edge_src_rel, edge_dst_rel
+        edge_batch_mapping[valid_edges], edge_src_rel[valid_edges], edge_dst_rel[valid_edges]
     ] = edge_mask_fill_value
 
     if xformers_or_torch_attn in ["torch"]:
@@ -459,9 +466,9 @@ class SABComplete(nn.Module):
         else:
             # Standard attention (triton, xformers, or torch)
             if self.use_triton_varlen_flash_attention:
-                num_graphs = int(batch_mapping.max().item()) + 1 if batch_mapping.numel() > 0 else 0
-                counts = torch.bincount(batch_mapping, minlength=num_graphs)
-                seq_lens = counts.to(torch.int32)
+                batch_size = X.shape[0]
+                counts = torch.bincount(batch_mapping, minlength=batch_size)
+                seq_lens = counts[:batch_size].to(device=X.device, dtype=torch.int32)
             else:
                 seq_lens = None
 

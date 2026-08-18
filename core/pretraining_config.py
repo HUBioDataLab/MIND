@@ -40,6 +40,14 @@ class PretrainingConfig:
     use_mlp_ln: bool = False
     mlp_dropout: float = 0
 
+    # Optimization Flags (Atomic Configurable Switches)
+    use_vectorized_geometric_features: bool = False
+    use_vectorized_mlm_masking: bool = False
+    use_vectorized_edge_masking: bool = False
+    use_triton_flash_attention: bool = False
+    use_triton_varlen_flash_attention: bool = False
+    use_bfloat16_loss_head: bool = False
+
     # Development controls (optional)
     debug_subset_n: Optional[int] = None
     debug_verbose: bool = False

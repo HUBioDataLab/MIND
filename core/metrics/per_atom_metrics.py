@@ -357,13 +357,19 @@ class PerAtomMetricsCalculator:
                         m['Support'],
                     ])
             
-            from tabulate import tabulate
-            table = tabulate(
-                rows,
-                headers=['Group', 'Accuracy', 'Precision', 'Recall', 'F1', 'Support'],
-                tablefmt='grid'
-            )
-            print(table)
+            try:
+                from tabulate import tabulate
+                table = tabulate(
+                    rows,
+                    headers=['Group', 'Accuracy', 'Precision', 'Recall', 'F1', 'Support'],
+                    tablefmt='grid'
+                )
+                print(table)
+            except ImportError:
+                print(f"{'Group':<25} | {'Accuracy':<8} | {'Precision':<9} | {'Recall':<8} | {'F1':<8} | {'Support':<8}")
+                print("-" * 75)
+                for r in rows:
+                    print(f"{str(r[0]):<25} | {str(r[1]):<8} | {str(r[2]):<9} | {str(r[3]):<8} | {str(r[4]):<8} | {str(r[5]):<8}")
         
         print("\n" + "="*100 + "\n")
 

@@ -581,6 +581,7 @@ class PretrainingESAModel(pl.LightningModule):
 
         return losses, total_loss
 
+    @torch.no_grad()
     def _compute_per_type_losses(self, batch, graph_embeddings, node_embeddings, is_training: bool = True):
         """
         Compute losses separately for each dataset type using the same embeddings.

@@ -196,22 +196,14 @@ class UniversalMolecularEncoder(nn.Module):
         close_cutoff = getattr(self.config, 'close_cutoff', 3.0)
         close_mask = (edge_distances < close_cutoff) & (edge_distances > 0.5)
         medium_mask = (edge_distances < self.config.cutoff_distance) & (edge_distances > 0.5)
-
         num_nodes = len(x)
 
-        if getattr(self.config, 'use_triton_gather_scatter', False) and x.is_cuda:
-            from esa.triton_graph_gather_scatter import triton_fused_gather_scatter
-            feat_matrix = torch.stack([close_mask.float(), medium_mask.float()], dim=-1)
-            fused_sparse = triton_fused_gather_scatter(feat_matrix, edge_index, num_nodes=num_nodes)
-            close_coordination_sparse = fused_sparse[:, 0]
-            distance_coordination_sparse = fused_sparse[:, 1]
-        else:
-            close_coordination_sparse = scatter_add(
-                close_mask.float(), edge_src, dim=0, dim_size=num_nodes
-            )
-            distance_coordination_sparse = scatter_add(
-                medium_mask.float(), edge_src, dim=0, dim_size=num_nodes
-            )
+        close_coordination_sparse = scatter_add(
+            close_mask.float(), edge_src, dim=0, dim_size=num_nodes
+        )
+        distance_coordination_sparse = scatter_add(
+            medium_mask.float(), edge_src, dim=0, dim_size=num_nodes
+        )
 
         close_coordination, _ = to_dense_batch(close_coordination_sparse, batch, fill_value=0)
         distance_based_coordination, _ = to_dense_batch(distance_coordination_sparse, batch, fill_value=0)

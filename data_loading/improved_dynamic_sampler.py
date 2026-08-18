@@ -88,6 +88,7 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             )
 
         self.max_atoms_per_batch = max_atoms_per_batch
+        self.max_single_sample_atoms = max_atoms_per_batch
         self.shuffle_chunks = shuffle_chunks
         self.shuffle_within_chunk = shuffle_within_chunk
         self.enable_cross_modal_batches = enable_cross_modal_batches
@@ -237,6 +238,10 @@ class ImprovedDynamicBatchSampler(BatchSampler):
                 global_idx = self.subset_indices[subset_idx] if self.subset_indices is not None else subset_idx
                 atom_count = self._get_atom_count_fast(global_idx)
 
+                # Skip single oversized samples that exceed GPU capacity
+                if atom_count > self.max_single_sample_atoms:
+                    continue
+
                 # Check if adding this sample exceeds limit
                 if current_atoms + atom_count > self.max_atoms_per_batch and current_batch:
                     # Batch is full, save it and start new one
@@ -382,6 +387,10 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         for subset_idx in mixed_samples:
             global_idx = self.subset_indices[subset_idx] if self.subset_indices is not None else subset_idx
             atom_count = self._get_atom_count_fast(global_idx)
+
+            # Skip single oversized samples that exceed GPU capacity
+            if atom_count > self.max_single_sample_atoms:
+                continue
 
             if current_atoms + atom_count > self.max_atoms_per_batch and current_batch:
                 batches.append(current_batch)

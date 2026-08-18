@@ -52,18 +52,25 @@ class MAB(nn.Module):
         if adj_mask is not None:
             if adj_mask.device != Q.device:
                 adj_mask = adj_mask.to(Q.device)
-            adj_mask = adj_mask.expand(-1, self.num_heads, -1, -1)
+            if self.xformers_or_torch_attn not in ["triton"]:
+                adj_mask = adj_mask.expand(-1, self.num_heads, -1, -1)
 
         if self.xformers_or_torch_attn == "xformers":
             out = memory_efficient_attention(Q, K, V, attn_bias=adj_mask, p=self.dropout_p if self.training else 0)
             out = out.reshape(batch_size, -1, self.num_heads * head_dim)
             
         elif self.xformers_or_torch_attn == "triton":
-            from esa.triton_flash_mha import triton_flash_attn_func
             Q_t = Q.transpose(1, 2)
             K_t = K.transpose(1, 2)
             V_t = V.transpose(1, 2)
-            out = triton_flash_attn_func(Q_t, K_t, V_t, mask=adj_mask, seq_lens=seq_lens)
+            if Q_t.size(-2) == K_t.size(-2):
+                from esa.triton_flash_mha import triton_flash_attn_func
+                out = triton_flash_attn_func(Q_t, K_t, V_t, mask=adj_mask, seq_lens=seq_lens)
+            else:
+                # PMA Cross-Attention with 1 seed (num_seeds << num_nodes)
+                out = F.scaled_dot_product_attention(
+                    Q_t, K_t, V_t, attn_mask=adj_mask, dropout_p=self.dropout_p if self.training else 0, is_causal=False
+                )
             out = out.transpose(1, 2).reshape(batch_size, -1, self.num_heads * head_dim)
 
         elif self.xformers_or_torch_attn in ["torch"]:

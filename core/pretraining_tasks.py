@@ -108,6 +108,13 @@ class PretrainingTasks(nn.Module):
             i_indices, j_indices = torch.triu_indices(
                 num_atoms, num_atoms, offset=1, device=node_embeddings.device
             )
+        elif getattr(self.config, 'use_vectorized_edge_masking', False):
+            # Vectorized GPU pair sampling (0 Python loops, 0 CPU-GPU transfers)
+            rand_i = torch.randint(0, num_atoms, (max_pairs * 2,), device=pos.device)
+            rand_j = torch.randint(0, num_atoms, (max_pairs * 2,), device=pos.device)
+            valid_mask = rand_i != rand_j
+            i_indices = rand_i[valid_mask][:max_pairs]
+            j_indices = rand_j[valid_mask][:max_pairs]
         else:
             pairs = set()
             attempts = 0
@@ -134,30 +141,48 @@ class PretrainingTasks(nn.Module):
         emb_j = node_embeddings[j_indices]
         pair_embeddings = torch.cat([emb_i, emb_j], dim=-1)
 
-        distance_logits = self.long_range_distance_head(pair_embeddings)
-        pos_i = pos[i_indices]
-        pos_j = pos[j_indices]
-        true_distances = torch.norm(pos_i - pos_j, dim=1)
-        distance_bins = self._distances_to_bins(true_distances)
-        loss = F.cross_entropy(distance_logits, distance_bins, reduction='mean')
+        if getattr(self.config, 'use_bfloat16_loss_head', False) and node_embeddings.is_cuda:
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                distance_logits = self.long_range_distance_head(pair_embeddings)
+                pos_i = pos[i_indices]
+                pos_j = pos[j_indices]
+                true_distances = torch.norm(pos_i - pos_j, dim=1)
+                distance_bins = self._distances_to_bins(true_distances)
+                loss = F.cross_entropy(distance_logits, distance_bins, reduction='mean')
+        else:
+            distance_logits = self.long_range_distance_head(pair_embeddings)
+            pos_i = pos[i_indices]
+            pos_j = pos[j_indices]
+            true_distances = torch.norm(pos_i - pos_j, dim=1)
+            distance_bins = self._distances_to_bins(true_distances)
+            loss = F.cross_entropy(distance_logits, distance_bins, reduction='mean')
         return loss
 
     def short_range_distance_loss(self, node_embeddings, edge_index, distances, mask):
         """Short-range distance loss over graph edges (all within cutoff_distance ≤ 5Å)."""
         valid_mask = torch.isfinite(distances) & mask
-        if not valid_mask.any():
+        if valid_mask.sum() == 0:
             return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
 
-        # Filter edge indices FIRST to avoid gathering embeddings for invalid/padded edges
-        filtered_edge = edge_index[:, valid_mask]
-        source_emb = node_embeddings[filtered_edge[0]]
-        target_emb = node_embeddings[filtered_edge[1]]
-        edge_emb = torch.cat([source_emb, target_emb], dim=-1)
+        if getattr(self.config, 'use_vectorized_edge_masking', False):
+            # Mask edge indices FIRST to avoid gathering embeddings for invalid edges
+            filtered_edge = edge_index[:, valid_mask]
+            source_emb = node_embeddings[filtered_edge[0]]
+            target_emb = node_embeddings[filtered_edge[1]]
+            edge_emb = torch.cat([source_emb, target_emb], dim=-1)
+            logits = self.distance_head(edge_emb)
+            distance_bins = self._short_range_distances_to_bins(distances[valid_mask])
+            loss = F.cross_entropy(logits, distance_bins, reduction='mean')
+            return loss
+        else:
+            source_emb = node_embeddings[edge_index[0]]
+            target_emb = node_embeddings[edge_index[1]]
+            edge_emb = torch.cat([source_emb, target_emb], dim=-1)
 
-        logits = self.distance_head(edge_emb)
-        distance_bins = self._short_range_distances_to_bins(distances[valid_mask])
-        loss = F.cross_entropy(logits, distance_bins, reduction='mean')
-        return loss
+            logits = self.distance_head(edge_emb)
+            distance_bins = self._short_range_distances_to_bins(distances)
+            loss = F.cross_entropy(logits[valid_mask], distance_bins[valid_mask], reduction='mean')
+            return loss
 
     def mlm_loss(self, node_embeddings, data):
         """Compute masked language modeling loss"""
@@ -167,11 +192,16 @@ class PretrainingTasks(nn.Module):
         mask = data.mlm_mask
         original_types = data.original_types
 
-        if mask is None or not mask.any():
+        if mask is None or mask.sum() == 0:
             return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
 
-        logits = self.mlm_head(node_embeddings)
-        loss = F.cross_entropy(logits[mask], original_types[mask], reduction='mean')
+        if getattr(self.config, 'use_bfloat16_loss_head', False) and node_embeddings.is_cuda:
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                logits = self.mlm_head(node_embeddings)
+                loss = F.cross_entropy(logits[mask], original_types[mask], reduction='mean')
+        else:
+            logits = self.mlm_head(node_embeddings)
+            loss = F.cross_entropy(logits[mask], original_types[mask], reduction='mean')
         return loss
 
     def coordinate_denoising_loss(self, node_embeddings, data):
