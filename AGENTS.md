@@ -91,11 +91,46 @@ make logs                             # List 10 most recent log files
 
 Log files are auto-routed to `logs/<MonthYear>/<name>_<YYYYMMDD_HHMMSS>.log` for multidomain or `logs/<MonthYear>/<name>fast_<YYYYMMDD_HHMMSS>.log` for fast runs.
 
+## Execution Authority and Process Verification
+
+These rules are mandatory for every Codex session in this repository:
+
+- Codex must not start, stop, resume, or background any training, validation, data
+  processing, dataset conversion, full benchmark, or other long-running workload.
+- Every user-run workload must have a Make target. If a target is missing, Codex must
+  add or update the Make target first and then give the user only the exact `make ...`
+  command. Do not give the user a raw `python`, `nohup`, `tmux`, shell-background, or
+  scheduler command for these workloads.
+- After giving a Make command, Codex must ask whether the user ran it and wait for the
+  user's confirmation. Only after confirmation may Codex monitor the workload.
+- Codex may directly run only small, bounded tests that it wrote or focused existing
+  unit tests. It may also run read-only inspection and monitoring commands. It must
+  not treat a smoke train, data conversion, or benchmark as a small test to bypass
+  this rule.
+- Codex must never infer that a workload stopped from a remembered PID, a stale PID,
+  a sandbox-local process list, or one unchanged log snapshot.
+- To verify a user-started workload, Codex must inspect the host process table using
+  the full command/output-directory identity, map the live PID to the GPU with
+  `nvidia-smi`, and check that the intended log's size/mtime or progress advances
+  across two observations. A process in `D` state is still alive and requires log/I/O
+  checks; it must not be reported as stopped merely because GPU utilization is 0%.
+- If host-level process visibility is unavailable, Codex must say that status is
+  unverified and request permission for the read-only host check. It must not report
+  the process as stopped.
+- Monitoring must distinguish the launcher shell PID, Python worker PID, GPU PID,
+  output directory, and log path. Conclusions must be based on the Python worker and
+  current log progress, not only the launcher.
+- Generated data and long-run outputs remain outside Git unless explicitly requested.
+
 For direct runs:
 ```bash
 python -m core.train_pretrain --config-yaml-path core/pretraining_config_fast.yaml
 python data_loading/validate_adapters.py --adapter protein --max_samples 5
 ```
+
+The direct commands above are developer references only. When instructing the user
+to run an equivalent workload, expose and provide a Make target as required by the
+execution-authority rules.
 
 ## Known Issues & Active Work
 
