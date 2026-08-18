@@ -51,14 +51,11 @@ class PretrainingESAModel(pl.LightningModule):
         # Universal molecular encoder
         self.encoder = UniversalMolecularEncoder(config)
 
-        use_triton_attn = getattr(config, 'use_triton_flash_attention', True)
-        attn_choice = "triton" if use_triton_attn else getattr(config, 'xformers_or_torch_attn', "triton")
-
         # ESA backbone (with layer-wise equivariant integration if enabled)
         st_args = dict(
             num_outputs=32,
             dim_output=config.graph_dim,
-            xformers_or_torch_attn=attn_choice,
+            xformers_or_torch_attn=config.xformers_or_torch_attn,
             dim_hidden=config.hidden_dims,
             num_heads=config.num_heads,
             sab_dropout=config.sab_dropout,
@@ -78,7 +75,6 @@ class PretrainingESAModel(pl.LightningModule):
             pma_residual_dropout=config.pma_residual_dropout,
             use_mlp_ln=config.use_mlp_ln,
             mlp_dropout=config.mlp_dropout,
-            use_triton_varlen_flash_attention=getattr(config, 'use_triton_varlen_flash_attention', True),
             use_equivariant=config.use_equivariant_features,
             equivariant_lmax=config.equivariant_lmax,
             equivariant_num_features=config.equivariant_num_features,
@@ -146,12 +142,12 @@ class PretrainingESAModel(pl.LightningModule):
         assert pos is not None, "Coordinates (pos) are required for pretraining tasks"
 
         # Center positions for translation invariance (per-graph)
-        if hasattr(batch, 'ptr') and batch.ptr is not None:
-            com = torch.segment_reduce(pos, 'mean', offsets=batch.ptr)
-        else:
-            from torch_scatter import scatter_mean
-            com = scatter_mean(pos, batch_mapping, dim=0)
-        pos_centered = pos - com[batch_mapping]
+        pos_centered = pos.clone()
+        for graph_id in torch.unique(batch_mapping):
+            mask = batch_mapping == graph_id
+            if mask.sum() > 0:
+                com = pos[mask].mean(dim=0, keepdim=True)
+                pos_centered[mask] = pos[mask] - com
         pos = pos_centered
         batch.pos = pos_centered
 
@@ -253,35 +249,19 @@ class PretrainingESAModel(pl.LightningModule):
                 counts = torch.bincount(batch_mapping)
                 num_max_items = nearest_multiple_of_8(int(counts.max().item()) + 1)
 
-            if hasattr(batch, 'ptr') and batch.ptr is not None:
-                ptr = batch.ptr
-                node_idx_in_graph = torch.arange(h.size(0), device=h.device) - ptr[batch_mapping]
-                h, _ = to_dense_batch(h, batch_mapping, fill_value=0, max_num_nodes=num_max_items)
+            h, dense_batch_index = to_dense_batch(
+                h, batch_mapping, fill_value=0, max_num_nodes=num_max_items
+            )
 
-                esa_output = self.esa_backbone(
-                    h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
-                )
-                graph_emb, node_emb_before_pma = esa_output
+            esa_output = self.esa_backbone(
+                h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
+            )
+            graph_emb, node_emb_before_pma = esa_output
 
-                if node_emb_before_pma.dim() == 3:
-                    flat_idx = batch_mapping * num_max_items + node_idx_in_graph
-                    h_node_level = node_emb_before_pma.view(-1, node_emb_before_pma.size(-1))[flat_idx]
-                else:
-                    h_node_level = node_emb_before_pma
+            if node_emb_before_pma.dim() == 3:
+                h_node_level = node_emb_before_pma[dense_batch_index]
             else:
-                h, dense_batch_index = to_dense_batch(
-                    h, batch_mapping, fill_value=0, max_num_nodes=num_max_items
-                )
-
-                esa_output = self.esa_backbone(
-                    h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
-                )
-                graph_emb, node_emb_before_pma = esa_output
-
-                if node_emb_before_pma.dim() == 3:
-                    h_node_level = node_emb_before_pma[dense_batch_index]
-                else:
-                    h_node_level = node_emb_before_pma
+                h_node_level = node_emb_before_pma
 
             h = graph_emb
 
@@ -412,20 +392,7 @@ class PretrainingESAModel(pl.LightningModule):
                 return torch.randperm(n, generator=gen).to(device)
             return torch.randperm(n, device=device)
 
-        use_vectorized_random_masking = (
-            getattr(self.config, 'use_vectorized_mlm_masking', True)
-            and not use_block_for_protein
-            and not use_block_for_rna
-        )
-        if use_vectorized_random_masking:
-            # Fully Vectorized Batch-Wide Random MLM Masking (0 Python loops across entire batch)
-            if gen is not None:
-                rand_vals = torch.rand(num_nodes, generator=gen, device='cpu').to(device)
-            else:
-                rand_vals = torch.rand(num_nodes, device=device)
-            mlm_mask = rand_vals < atom_mask_ratio
-            masked_types[mlm_mask] = mask_token
-        elif hasattr(batch, 'batch') and batch.batch is not None:
+        if hasattr(batch, 'batch') and batch.batch is not None:
             graph_idx = batch.batch
             for g in graph_idx.unique().tolist():
                 node_mask = (graph_idx == g)
@@ -948,21 +915,11 @@ class PretrainingESAModel(pl.LightningModule):
         total_norm = total_norm ** 0.5
         self.log("grad_norm_before_clip", total_norm, on_step=True, logger=True)
 
-    def configure_gradient_clipping(self, optimizer, gradient_clip_val=None, gradient_clip_algorithm=None):
-        """
-        Custom gradient clipping override to support Fused CUDA AdamW kernel with PyTorch Lightning.
-        Avoids Lightning AMP unscaling collision when fused=True.
-        """
-        clip_val = gradient_clip_val if gradient_clip_val is not None else getattr(self.config, 'gradient_clip_val', 0.5)
-        if clip_val is not None and clip_val > 0:
-            torch.nn.utils.clip_grad_norm_(self.parameters(), clip_val)
-
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
+        optimizer = bnb.optim.AdamW8bit(
             self.parameters(),
             lr=self.config.lr,
             weight_decay=self.config.optimiser_weight_decay,
-            fused=True,
         )
 
         total_epochs = getattr(self.config, 'max_epochs', 100)

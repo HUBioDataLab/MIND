@@ -79,8 +79,6 @@ def compute_distance_bias(pos, batch_mapping, max_items, distance_scale=1.0, dis
 def get_adj_mask_from_edge_index_node(
     edge_index, batch_size, max_items, batch_mapping, xformers_or_torch_attn, use_bfloat16=True, device="cuda:0"
 ):
-    target_device = batch_mapping.device
-
     if xformers_or_torch_attn in ["torch"]:
         empty_mask_fill_value = False
         mask_dtype = torch.bool
@@ -90,26 +88,25 @@ def get_adj_mask_from_edge_index_node(
         mask_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
         edge_mask_fill_value = 0
 
+    # FIXED: Removed incorrect manual reindexing and premature check
+    # unbatch_edge_index (line 65) handles per-graph reindexing correctly
+    # The check was too early - it ran BEFORE unbatch_edge_index could fix the indices!
+
     adj_mask = torch.full(
         size=(batch_size, max_items, max_items),
         fill_value=empty_mask_fill_value,
-        device=target_device,
+        device=device,
         dtype=mask_dtype,
         requires_grad=False,
     )
 
-    # Fully vectorized graph node offset computation (replaces slow unbatch_edge_index Python loop)
-    deg = torch.bincount(batch_mapping, minlength=batch_size)
-    ptr = torch.zeros(batch_size + 1, device=target_device, dtype=batch_mapping.dtype)
-    torch.cumsum(deg, dim=0, out=ptr[1:])
+    edge_index_unbatched = unbatch_edge_index(edge_index, batch_mapping)
+    edge_batch_non_cumulative = torch.cat(edge_index_unbatched, dim=1)
 
-    node_offsets = ptr[batch_mapping]
-    edge_src_rel = edge_index[0] - node_offsets[edge_index[0]]
-    edge_dst_rel = edge_index[1] - node_offsets[edge_index[1]]
-    edge_batch_mapping = batch_mapping.index_select(0, edge_index[0])
+    edge_batch_mapping = batch_mapping.index_select(0, edge_index[0, :])
 
     adj_mask[
-        edge_batch_mapping, edge_src_rel, edge_dst_rel
+        edge_batch_mapping, edge_batch_non_cumulative[0, :], edge_batch_non_cumulative[1, :]
     ] = edge_mask_fill_value
 
     if xformers_or_torch_attn in ["torch"]:
@@ -224,8 +221,6 @@ def get_adj_mask_from_edge_index_edge(
     use_bfloat16=True,
     device="cuda:0",
 ):
-    target_device = batch_mapping.device
-
     if xformers_or_torch_attn in ["torch"]:
         empty_mask_fill_value = False
         mask_dtype = torch.bool
@@ -238,25 +233,31 @@ def get_adj_mask_from_edge_index_edge(
     adj_mask = torch.full(
         size=(batch_size, max_items, max_items),
         fill_value=empty_mask_fill_value,
-        device=target_device,
+        device=device,
         dtype=mask_dtype,
         requires_grad=False,
     )
 
-    deg = torch.bincount(batch_mapping, minlength=batch_size)
-    ptr = torch.zeros(batch_size + 1, device=target_device, dtype=batch_mapping.dtype)
-    torch.cumsum(deg, dim=0, out=ptr[1:])
+    edge_batch_mapping = batch_mapping.index_select(0, edge_index[0, :])
 
-    node_offsets = ptr[batch_mapping]
-    edge_src_rel = edge_index[0] - node_offsets[edge_index[0]]
-    edge_dst_rel = edge_index[1] - node_offsets[edge_index[1]]
-    edge_batch_mapping = batch_mapping.index_select(0, edge_index[0])
+    edge_adj_matrix = create_edge_adjacency_mask(edge_index, edge_index.shape[1])
 
-    valid_bounds = (edge_src_rel >= 0) & (edge_src_rel < max_items) & (edge_dst_rel >= 0) & (edge_dst_rel < max_items)
+    edge_batch_index_to_original_index = generate_consecutive_tensor(
+        get_first_unique_index(edge_batch_mapping), edge_batch_mapping.shape[0]
+    )
+
+    try:
+        eam_nonzero = edge_adj_matrix.nonzero()
+    except:
+        # Adjust chunk size as desired
+        eam_nonzero = nonzero_chunked(edge_adj_matrix, 3)
 
     adj_mask[
-        edge_batch_mapping[valid_bounds], edge_src_rel[valid_bounds], edge_dst_rel[valid_bounds]
+        edge_batch_mapping.index_select(0, eam_nonzero[:, 0]),
+        edge_batch_index_to_original_index.index_select(0, eam_nonzero[:, 0]),
+        edge_batch_index_to_original_index.index_select(0, eam_nonzero[:, 1]),
     ] = edge_mask_fill_value
+
 
     if xformers_or_torch_attn in ["torch"]:
         adj_mask = ~adj_mask
@@ -293,7 +294,6 @@ class SABComplete(nn.Module):
         equivariant_num_features=16,
         equivariant_fusion_method="add",
         equivariant_cross_connection=True,
-        use_triton_varlen_flash_attention=False,
     ):
         super(SABComplete, self).__init__()
 
@@ -311,7 +311,6 @@ class SABComplete(nn.Module):
         self.num_mlp_layers = num_mlp_layers
         self.pre_or_post = pre_or_post
         self.use_equivariant = use_equivariant
-        self.use_triton_varlen_flash_attention = use_triton_varlen_flash_attention
 
         if self.pre_or_post == "post":
             self.residual_attn = as_module(num_layers_for_residual)
@@ -422,8 +421,9 @@ class SABComplete(nn.Module):
             # For flash_varlen: compute actual sequence lengths from batch_mapping
             # batch_mapping: [total_nodes] where each value is the batch index
             # We need to count how many nodes each batch has
-            num_graphs = int(batch_mapping.max().item()) + 1 if batch_mapping.numel() > 0 else 0
-            counts = torch.bincount(batch_mapping, minlength=num_graphs)
+            batch_size = X.size(0)
+            # Count nodes per batch using bincount
+            counts = torch.bincount(batch_mapping, minlength=batch_size)
             seq_lens = counts.to(torch.int32)
             
             # Note: adj_mask is not fully supported in flash_varlen mode yet
@@ -457,18 +457,11 @@ class SABComplete(nn.Module):
                 batch_mapping=batch_mapping,
             )
         else:
-            # Standard attention (triton, xformers, or torch)
-            if self.use_triton_varlen_flash_attention:
-                num_graphs = int(batch_mapping.max().item()) + 1 if batch_mapping.numel() > 0 else 0
-                counts = torch.bincount(batch_mapping, minlength=num_graphs)
-                seq_lens = counts.to(torch.int32)
-            else:
-                seq_lens = None
-
+            # Standard attention (xformers or torch)
             if self.idx == 1:
-                out_attn = self.sab(X, adj_mask, seq_lens=seq_lens)
+                out_attn = self.sab(X, adj_mask)
             else:
-                out_attn = self.sab(X, None, seq_lens=seq_lens)
+                out_attn = self.sab(X, None)
 
         if out_attn.shape[-1] != X.shape[-1]:
             X = self.proj_1(X)
@@ -657,7 +650,6 @@ class ESA(nn.Module):
         equivariant_num_features=16,
         equivariant_fusion_method="add",
         equivariant_cross_connection=True,
-        use_triton_varlen_flash_attention=False,
     ):
         super(ESA, self).__init__()
 
@@ -665,7 +657,6 @@ class ESA(nn.Module):
 
         self.dim_hidden = dim_hidden
         self.num_heads = num_heads
-        self.use_triton_varlen_flash_attention = use_triton_varlen_flash_attention
         self.layer_types = layer_types
         self.node_or_edge = node_or_edge
         self.xformers_or_torch_attn = xformers_or_torch_attn
@@ -742,7 +733,6 @@ class ESA(nn.Module):
                         equivariant_num_features=equivariant_num_features,
                         equivariant_fusion_method=equivariant_fusion_method,
                         equivariant_cross_connection=equivariant_cross_connection,
-                        use_triton_varlen_flash_attention=self.use_triton_varlen_flash_attention,
                     )
                 )
                 
@@ -775,7 +765,6 @@ class ESA(nn.Module):
                         equivariant_num_features=equivariant_num_features,
                         equivariant_fusion_method=equivariant_fusion_method,
                         equivariant_cross_connection=equivariant_cross_connection,
-                        use_triton_varlen_flash_attention=self.use_triton_varlen_flash_attention,
                     )
                 )
                 
@@ -835,7 +824,6 @@ class ESA(nn.Module):
                         equivariant_num_features=equivariant_num_features,
                         equivariant_fusion_method=equivariant_fusion_method,
                         equivariant_cross_connection=equivariant_cross_connection,
-                        use_triton_varlen_flash_attention=self.use_triton_varlen_flash_attention,
                     )
                 )
 
