@@ -12,7 +12,7 @@ from torch.utils.data import Subset
 from torch_geometric.data import Data, InMemoryDataset
 from torch_geometric.loader import DataLoader as GeometricDataLoader
 
-from core.train_pretrain import set_data_loader_epoch
+from core.train_pretrain import _build_train_batch_sampler, set_data_loader_epoch
 from data_loading.dynamic_chunk_sampler import DynamicChunkAwareBatchSampler
 from data_loading.improved_dynamic_sampler import ImprovedDynamicBatchSampler
 from data_loading.lazy_universal_dataset import LazyUniversalDataset
@@ -277,6 +277,403 @@ class DynamicSamplerEpochPlanTest(unittest.TestCase):
                 ):
                     cached_dataset = LazyUniversalDataset(selection_a, verbose=False)
                 self.assertEqual(cached_dataset.total_samples, dataset_a.total_samples)
+
+
+    def test_full_pass_cross_modal_consumes_all_samples_exactly_once(self):
+        dataset = _metadata_dataset([
+            ("protein", [400, 500, 600, 700, 800]),
+            ("rna", [300, 450, 600]),
+            ("unimol", [50, 60, 70, 80, 90, 100, 110, 120, 130, 140]),
+        ])
+        total_samples = len(dataset)
+        total_atoms = sum(
+            dataset.sample_metadata_index[idx]["num_atoms"]
+            for idx in range(total_samples)
+        )
+
+        sampler = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            max_atoms_per_batch=1000,
+            enable_cross_modal_batches=True,
+            cycle_short_domains=False,
+            epoch_atom_budget=None,
+        )
+
+        batches = list(sampler)
+        self.assertEqual(len(sampler), len(batches))
+        flattened = [idx for batch in batches for idx in batch]
+
+        self.assertEqual(len(flattened), total_samples)
+        self.assertEqual(len(set(flattened)), total_samples)
+        self.assertEqual(set(flattened), set(range(total_samples)))
+
+        stats = sampler.plan_stats
+        self.assertIsNotNone(stats)
+        self.assertEqual(stats["mode"], "full_pass")
+        self.assertIsNone(stats["requested_total_atoms"])
+        self.assertEqual(stats["actual_total_atoms"], total_atoms)
+        self.assertEqual(stats["natural_batches"], len(batches))
+        self.assertEqual(stats["planned_batches"], len(batches))
+
+        for dtype, domain_stats in stats["domains"].items():
+            self.assertEqual(
+                domain_stats["selected_samples"], domain_stats["available_samples"]
+            )
+            self.assertEqual(
+                domain_stats["unique_samples"], domain_stats["available_samples"]
+            )
+            self.assertEqual(domain_stats["repeated_samples"], 0)
+            self.assertGreater(domain_stats["actual_atoms"], 0)
+
+    def test_full_pass_proportional_interleaving_distribution(self):
+        dataset = _metadata_dataset([
+            ("protein", [500] * 20),
+            ("rna", [400] * 10),
+            ("unimol", [50] * 100),
+        ])
+        sampler = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            max_atoms_per_batch=1000,
+            enable_cross_modal_batches=True,
+            cycle_short_domains=False,
+            epoch_atom_budget=None,
+        )
+
+        batches = list(sampler)
+        flattened = [idx for batch in batches for idx in batch]
+        self.assertEqual(len(flattened), 130)
+
+        # Check that RNA and Protein are not front-loaded (both present in first half and second half)
+        midpoint = len(flattened) // 2
+        first_half = flattened[:midpoint]
+        second_half = flattened[midpoint:]
+
+        first_half_types = [
+            dataset.sample_metadata_index[idx]["dataset_type"] for idx in first_half
+        ]
+        second_half_types = [
+            dataset.sample_metadata_index[idx]["dataset_type"] for idx in second_half
+        ]
+
+        self.assertGreater(first_half_types.count("protein"), 0)
+        self.assertGreater(second_half_types.count("protein"), 0)
+        self.assertGreater(first_half_types.count("rna"), 0)
+        self.assertGreater(second_half_types.count("rna"), 0)
+        self.assertGreater(first_half_types.count("unimol"), 0)
+        self.assertGreater(second_half_types.count("unimol"), 0)
+
+        # Proportions in both halves should be close to natural proportions (20/130, 10/130, 100/130)
+        self.assertTrue(8 <= first_half_types.count("protein") <= 12)
+        self.assertTrue(8 <= second_half_types.count("protein") <= 12)
+        self.assertTrue(3 <= first_half_types.count("rna") <= 7)
+        self.assertTrue(3 <= second_half_types.count("rna") <= 7)
+
+    def test_full_pass_multi_epoch_reshuffle_preserves_membership(self):
+        dataset = _metadata_dataset([
+            ("protein", [400] * 10),
+            ("rna", [300] * 5),
+            ("unimol", [50] * 30),
+        ])
+        sampler = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            max_atoms_per_batch=1000,
+            enable_cross_modal_batches=True,
+            cycle_short_domains=False,
+            epoch_atom_budget=None,
+        )
+
+        sampler.set_epoch(0)
+        epoch_0_batches = list(sampler)
+        epoch_0_flattened = [idx for batch in epoch_0_batches for idx in batch]
+
+        sampler.set_epoch(1)
+        epoch_1_batches = list(sampler)
+        epoch_1_flattened = [idx for batch in epoch_1_batches for idx in batch]
+
+        self.assertEqual(len(epoch_0_flattened), len(dataset))
+        self.assertEqual(len(epoch_1_flattened), len(dataset))
+        self.assertEqual(set(epoch_0_flattened), set(range(len(dataset))))
+        self.assertEqual(set(epoch_1_flattened), set(range(len(dataset))))
+        self.assertNotEqual(epoch_0_flattened, epoch_1_flattened)
+
+    def test_full_pass_ddp_rank_partitioning(self):
+        dataset = _metadata_dataset([
+            ("protein", [400] * 8),
+            ("rna", [300] * 4),
+            ("unimol", [50] * 20),
+        ])
+        common_kwargs = {
+            "max_atoms_per_batch": 1000,
+            "enable_cross_modal_batches": True,
+            "cycle_short_domains": False,
+            "epoch_atom_budget": None,
+            "shuffle_chunks": False,
+            "shuffle_within_chunk": False,
+            "num_replicas": 2,
+        }
+        sampler_rank0 = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            rank=0,
+            **common_kwargs,
+        )
+        sampler_rank1 = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            rank=1,
+            **common_kwargs,
+        )
+
+        batches_0 = list(sampler_rank0)
+        batches_1 = list(sampler_rank1)
+
+        self.assertEqual(len(sampler_rank0), len(batches_0))
+        self.assertEqual(len(sampler_rank1), len(batches_1))
+
+        # Combined batches should equal the full plan
+        full_plan = sampler_rank0._get_batch_plan()
+        self.assertEqual(len(batches_0) + len(batches_1), len(full_plan))
+        self.assertEqual(batches_0, full_plan[0::2])
+        self.assertEqual(batches_1, full_plan[1::2])
+
+
+    def test_train_batch_sampler_builder_handles_quota_and_full_pass(self):
+        dataset = _metadata_dataset([
+            ("protein", [400, 500]),
+            ("rna", [300, 450]),
+        ])
+
+        import types
+
+        config_full_pass = types.SimpleNamespace(
+            seed=42,
+            multi_domain={
+                "enabled": True,
+                "atom_sampling": {
+                    "enabled": False,
+                    "epoch_atom_budget": None,
+                    "epoch_num_batches": None,
+                    "cycle_to_quota": False,
+                },
+            },
+            use_improved_sampler=True,
+        )
+
+        sampler_fp = _build_train_batch_sampler(
+            train_dataset=dataset,
+            config=config_full_pass,
+            max_atoms_per_batch=1000,
+            is_multi_domain=True,
+            use_improved_sampler=True,
+        )
+        self.assertIsInstance(sampler_fp, ImprovedDynamicBatchSampler)
+        self.assertIsNone(sampler_fp.epoch_atom_budget)
+        self.assertFalse(sampler_fp.cycle_short_domains)
+        self.assertTrue(sampler_fp.enable_cross_modal_batches)
+
+        config_quota = types.SimpleNamespace(
+            seed=42,
+            multi_domain={
+                "enabled": True,
+                "atom_sampling": {
+                    "enabled": True,
+                    "epoch_atom_budget": 5000,
+                    "epoch_num_batches": "auto",
+                    "cycle_to_quota": True,
+                    "domain_weights": {"protein": 50, "rna": 50},
+                },
+            },
+            use_improved_sampler=True,
+        )
+
+        sampler_quota = _build_train_batch_sampler(
+            train_dataset=dataset,
+            config=config_quota,
+            max_atoms_per_batch=1000,
+            is_multi_domain=True,
+            use_improved_sampler=True,
+        )
+        self.assertIsInstance(sampler_quota, ImprovedDynamicBatchSampler)
+        self.assertEqual(sampler_quota.epoch_atom_budget, 5000)
+        self.assertTrue(sampler_quota.cycle_short_domains)
+
+    def test_ddp_partition_equalizes_odd_batches_by_splitting(self):
+        # 3 batches naturally with splittable samples
+        dataset = _metadata_dataset([
+            ("protein", [300, 300, 300, 300, 300, 300]),
+        ])
+        common_kwargs = {
+            "max_atoms_per_batch": 600,
+            "enable_cross_modal_batches": False,
+            "shuffle_chunks": False,
+            "shuffle_within_chunk": False,
+            "num_replicas": 2,
+        }
+        sampler_rank0 = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            rank=0,
+            **common_kwargs,
+        )
+        sampler_rank1 = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            rank=1,
+            **common_kwargs,
+        )
+
+        batches_0 = list(sampler_rank0)
+        batches_1 = list(sampler_rank1)
+
+        # 3 natural batches should be equalized to 4 batches (2 per rank)
+        self.assertEqual(len(batches_0), 2)
+        self.assertEqual(len(batches_1), 2)
+        self.assertEqual(len(sampler_rank0), 2)
+        self.assertEqual(len(sampler_rank1), 2)
+
+        # Combined samples must contain all dataset samples exactly once
+        flattened = [idx for b in (batches_0 + batches_1) for idx in b]
+        self.assertEqual(len(flattened), len(dataset))
+        self.assertEqual(set(flattened), set(range(len(dataset))))
+
+    def test_ddp_partition_rebuilds_plan_cached_before_process_group_init(self):
+        dataset = _metadata_dataset([
+            ("protein", [300, 300, 300, 300, 300, 300]),
+        ])
+        sampler = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            max_atoms_per_batch=600,
+            enable_cross_modal_batches=False,
+            shuffle_chunks=False,
+            shuffle_within_chunk=False,
+        )
+
+        self.assertEqual(len(sampler), 3)
+        self.assertEqual(sampler._batch_plan_num_replicas, 1)
+
+        with mock.patch.multiple(
+            "torch.distributed",
+            is_available=mock.Mock(return_value=True),
+            is_initialized=mock.Mock(return_value=True),
+            get_world_size=mock.Mock(return_value=2),
+            get_rank=mock.Mock(return_value=0),
+        ):
+            rank_batches = list(sampler)
+            self.assertEqual(sampler._batch_plan_num_replicas, 2)
+            self.assertEqual(len(sampler._get_batch_plan()), 4)
+
+        self.assertEqual(len(rank_batches), 2)
+
+    def test_ddp_partition_uses_all_split_capacity_in_one_batch(self):
+        dataset = _metadata_dataset([
+            ("protein", [300, 300, 300]),
+        ])
+        samplers = [
+            _sampler(
+                ImprovedDynamicBatchSampler,
+                dataset,
+                max_atoms_per_batch=900,
+                enable_cross_modal_batches=False,
+                shuffle_chunks=False,
+                shuffle_within_chunk=False,
+                num_replicas=3,
+                rank=rank,
+            )
+            for rank in range(3)
+        ]
+
+        rank_batches = [list(sampler) for sampler in samplers]
+        self.assertEqual([len(batches) for batches in rank_batches], [1, 1, 1])
+        flattened = [
+            index
+            for batches in rank_batches
+            for batch in batches
+            for index in batch
+        ]
+        self.assertEqual(len(flattened), len(dataset))
+        self.assertEqual(set(flattened), set(range(len(dataset))))
+
+    def test_ddp_partition_fails_fast_when_unsplittable_odd_batches(self):
+        dataset = _metadata_dataset([
+            ("protein", [600, 600, 600]),
+        ])
+        sampler_rank0 = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            max_atoms_per_batch=600,
+            enable_cross_modal_batches=False,
+            shuffle_chunks=False,
+            shuffle_within_chunk=False,
+            num_replicas=2,
+            rank=0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "DDP partition error"):
+            list(sampler_rank0)
+
+    def test_ddp_partition_fails_fast_when_world_size_exceeds_batch_count_and_unsplittable(self):
+        dataset = _metadata_dataset([
+            ("protein", [600, 600]),
+        ])
+        sampler_rank0 = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            max_atoms_per_batch=600,
+            enable_cross_modal_batches=False,
+            shuffle_chunks=False,
+            shuffle_within_chunk=False,
+            num_replicas=4,
+            rank=0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "DDP partition error"):
+            list(sampler_rank0)
+
+    def test_telemetry_mode_label_full_pass_and_quota(self):
+        dataset = _metadata_dataset([
+            ("protein", [100] * 10),
+            ("rna", [50] * 10),
+            ("unimol", [10] * 50),
+        ])
+
+        sampler_fp = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            max_atoms_per_batch=500,
+            enable_cross_modal_batches=True,
+            cycle_short_domains=False,
+            epoch_atom_budget=None,
+        )
+        list(sampler_fp)
+        self.assertEqual(sampler_fp.plan_stats["mode"], "full_pass")
+
+        sampler_qa = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            max_atoms_per_batch=500,
+            enable_cross_modal_batches=True,
+            epoch_atom_budget=500,
+            epoch_num_batches="auto",
+            domain_atom_weights={"protein": 30, "rna": 25, "unimol": 45},
+        )
+        list(sampler_qa)
+        self.assertEqual(sampler_qa.plan_stats["mode"], "auto")
+
+        sampler_qf = _sampler(
+            ImprovedDynamicBatchSampler,
+            dataset,
+            max_atoms_per_batch=500,
+            enable_cross_modal_batches=True,
+            epoch_atom_budget=500,
+            epoch_num_batches=4,
+            domain_atom_weights={"protein": 30, "rna": 25, "unimol": 45},
+        )
+        list(sampler_qf)
+        self.assertEqual(sampler_qf.plan_stats["mode"], "fixed")
 
 
 if __name__ == "__main__":

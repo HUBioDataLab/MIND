@@ -65,17 +65,16 @@ multi_domain:
       enabled: false  # Future expansion
       chunk_dir: "../data/dna/processed_chunks"
 
-  # Train-only atom quotas. Whole graphs are selected until each domain reaches
-  # its epoch target; graphs and PT chunks are never split or regenerated.
+  # Full-pass epoch semantics:
+  # In full multidomain training, atom-quota boundaries and domain cycling are DISABLED.
+  # Every selected train graph is consumed exactly once per epoch (single-pass proportional
+  # interleaving, zero repeated samples, no quota cutoff, natural dataset distribution).
   atom_sampling:
-    enabled: true
-    epoch_atom_budget: 4800000
-    epoch_num_batches: auto  # Derive epoch length from atom budget, graph sizes, and max_atoms_per_batch.
-    cycle_to_quota: true  # Repeat only after unique samples exhaust and only to close a quota.
-    domain_weights:
-      protein: 30
-      rna: 25
-      unimol: 45
+    enabled: false
+    epoch_atom_budget: null   # Disabled (null): No artificial 4.8M atom cap. Uses 100% of selected train data.
+    epoch_num_batches: null   # Disabled (null): Natural full-pass batch count derived from dataset size.
+    cycle_to_quota: false     # Disabled (false): Zero sample repetition (selected == available == unique, repeated == 0).
+    domain_weights: null      # Disabled (null): Natural data coverage is used (domain loss weights used if needed).
   
   # Rotational Sampling Parameters
   target_atoms_per_rotation: 50000  #! Not used anymore. Target total atoms per rotation (adjust based on GPU RAM) 

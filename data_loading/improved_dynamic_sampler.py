@@ -120,6 +120,7 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         self.seed = seed
         self._batch_plan = None
         self._batch_plan_epoch = None
+        self._batch_plan_num_replicas = None
         self.plan_stats = None
 
         if num_replicas is None:
@@ -302,6 +303,36 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             if current_batch:
                 batches.append(current_batch)
 
+        total_atoms = 0
+        total_samples = 0
+        for chunk_idx, samples in samples_by_chunk.items():
+            total_samples += len(samples)
+            for subset_idx in samples:
+                global_idx = self.subset_indices[subset_idx] if self.subset_indices is not None else subset_idx
+                total_atoms += self._get_atom_count_fast(global_idx)
+
+        dtype = self._get_dataset_type(chunk_order[0]) if chunk_order else "single_domain"
+        self.plan_stats = {
+            "epoch": self.epoch,
+            "mode": "standard",
+            "requested_total_atoms": None,
+            "actual_total_atoms": total_atoms,
+            "natural_batches": len(batches),
+            "planned_batches": len(batches),
+            "domains": {
+                dtype: {
+                    "weight": None,
+                    "target_atoms": None,
+                    "actual_atoms": total_atoms,
+                    "actual_atom_ratio": 1.0,
+                    "selected_samples": total_samples,
+                    "unique_samples": total_samples,
+                    "repeated_samples": 0,
+                    "available_samples": total_samples,
+                }
+            },
+        }
+
         return batches
 
     @staticmethod
@@ -335,10 +366,13 @@ class ImprovedDynamicBatchSampler(BatchSampler):
 
         while any(type_positions[dtype] < len(samples_by_type[dtype]) for dtype in samples_by_type):
             available_types = [
-                dtype for dtype in samples_by_type
+                dtype for dtype in sorted(samples_by_type)
                 if type_positions[dtype] < len(samples_by_type[dtype])
             ]
-            selected_type = max(available_types, key=lambda dtype: type_credits[dtype])
+            selected_type = max(
+                available_types,
+                key=lambda dtype: (type_credits[dtype], dtype),
+            )
             mixed_samples.append(samples_by_type[selected_type][type_positions[selected_type]])
             type_positions[selected_type] += 1
 
@@ -467,6 +501,7 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         actual_total = sum(selected_atoms.values())
         self.plan_stats = {
             "epoch": self.epoch,
+            "mode": "auto" if self.epoch_num_batches is None else "fixed",
             "requested_total_atoms": self.epoch_atom_budget,
             "actual_total_atoms": actual_total,
             "domains": {
@@ -492,23 +527,37 @@ class ImprovedDynamicBatchSampler(BatchSampler):
     def _print_atom_quota_stats(self) -> None:
         if not self.plan_stats:
             return
-        print(
-            f"   Atom quota: requested={self.plan_stats['requested_total_atoms']:,}, "
-            f"actual={self.plan_stats['actual_total_atoms']:,}"
-        )
+        if self.plan_stats.get("requested_total_atoms") is not None:
+            print(
+                f"   Atom quota: requested={self.plan_stats['requested_total_atoms']:,}, "
+                f"actual={self.plan_stats['actual_total_atoms']:,}"
+            )
+        else:
+            print(
+                f"   Total atoms: actual={self.plan_stats['actual_total_atoms']:,}"
+            )
+        mode_str = self.plan_stats.get("mode")
+        if mode_str is None:
+            mode_str = "auto" if self.epoch_num_batches is None else "fixed"
         print(
             f"   Batch plan: natural={self.plan_stats['natural_batches']:,}, "
             f"planned={self.plan_stats['planned_batches']:,}, "
-            f"mode={'auto' if self.epoch_num_batches is None else 'fixed'}"
+            f"mode={mode_str}"
         )
         for dtype, stats in self.plan_stats["domains"].items():
+            target_str = (
+                f"target={stats['target_atoms']:,} "
+                if stats.get("target_atoms") is not None
+                else ""
+            )
             print(
-                f"   {dtype.upper():10s} target={stats['target_atoms']:,} "
+                f"   {dtype.upper():10s} {target_str}"
                 f"actual={stats['actual_atoms']:,} "
                 f"ratio={100.0 * stats['actual_atom_ratio']:.2f}% "
                 f"samples={stats['selected_samples']:,} "
                 f"unique={stats['unique_samples']:,} "
-                f"repeated={stats['repeated_samples']:,}"
+                f"repeated={stats['repeated_samples']:,} "
+                f"available={stats['available_samples']:,}"
             )
 
     def _atom_count_for_subset_index(self, subset_idx: int) -> int:
@@ -645,12 +694,150 @@ class ImprovedDynamicBatchSampler(BatchSampler):
                 self.plan_stats["planned_batches"] = len(batches)
             else:
                 batches = self._split_batches_to_fixed_count(batches)
+        else:
+            domain_atom_counts = {dtype: 0 for dtype in samples_by_type}
+            domain_selected_counts = {dtype: 0 for dtype in samples_by_type}
+            domain_unique_samples = {
+                dtype: len(set(samples)) for dtype, samples in samples_by_type.items()
+            }
+
+            sample_to_dtype = {}
+            for dtype, samples in samples_by_type.items():
+                for subset_idx in samples:
+                    sample_to_dtype[subset_idx] = dtype
+
+            for subset_idx in mixed_samples:
+                dtype = sample_to_dtype[subset_idx]
+                global_idx = (
+                    self.subset_indices[subset_idx]
+                    if self.subset_indices is not None
+                    else subset_idx
+                )
+                atom_count = int(self._get_atom_count_fast(global_idx))
+                domain_atom_counts[dtype] += atom_count
+                domain_selected_counts[dtype] += 1
+
+            actual_total = sum(domain_atom_counts.values())
+            self.plan_stats = {
+                "epoch": self.epoch,
+                "mode": (
+                    "cycled"
+                    if (self.cycle_short_domains and len(samples_by_type) > 1)
+                    else "full_pass"
+                ),
+                "requested_total_atoms": None,
+                "actual_total_atoms": actual_total,
+                "natural_batches": len(batches),
+                "planned_batches": len(batches),
+                "domains": {
+                    dtype: {
+                        "weight": (
+                            float(self.domain_atom_weights[dtype])
+                            if (self.domain_atom_weights and dtype in self.domain_atom_weights)
+                            else None
+                        ),
+                        "target_atoms": None,
+                        "actual_atoms": domain_atom_counts[dtype],
+                        "actual_atom_ratio": (
+                            domain_atom_counts[dtype] / actual_total
+                            if actual_total > 0
+                            else 0.0
+                        ),
+                        "selected_samples": domain_selected_counts[dtype],
+                        "unique_samples": domain_unique_samples.get(
+                            dtype, len(samples_by_type[dtype])
+                        ),
+                        "repeated_samples": max(
+                            0,
+                            domain_selected_counts[dtype]
+                            - domain_unique_samples.get(
+                                dtype, len(samples_by_type[dtype])
+                            ),
+                        ),
+                        "available_samples": len(samples_by_type[dtype]),
+                    }
+                    for dtype in sorted(samples_by_type)
+                },
+            }
+
+        return batches
+
+    def _resolve_distributed_layout(self) -> tuple[int, int]:
+        """Resolve effective num_replicas and rank, detecting active process group if initialized."""
+        num_replicas = self.num_replicas
+        rank = self.rank
+        if num_replicas == 1 and torch.distributed.is_available() and torch.distributed.is_initialized():
+            num_replicas = torch.distributed.get_world_size()
+            rank = torch.distributed.get_rank()
+        return num_replicas, rank
+
+    def _equalize_batches_for_ddp(
+        self, batches: List[List[int]], num_replicas: int
+    ) -> List[List[int]]:
+        """Split largest batches so total batch count divides evenly by num_replicas."""
+        if num_replicas <= 1 or len(batches) == 0 or len(batches) % num_replicas == 0:
+            return batches
+
+        target_batches = ((len(batches) + num_replicas - 1) // num_replicas) * num_replicas
+        needed_splits = target_batches - len(batches)
+
+        split_capacity = sum(max(0, len(batch) - 1) for batch in batches)
+        if split_capacity < needed_splits:
+            raise RuntimeError(
+                f"DDP partition error: global batch plan has {len(batches)} batches "
+                f"which is not divisible by num_replicas={num_replicas} (target={target_batches}). "
+                f"Cannot split batches to reach an equal partition across all ranks without "
+                "violating exact-once training semantics "
+                f"(available split capacity: {split_capacity})."
+            )
+
+        batches = [list(batch) for batch in batches]
+        while len(batches) < target_batches:
+            splittable = [
+                (index, batch)
+                for index, batch in enumerate(batches)
+                if len(batch) > 1
+            ]
+            batch_index, batch = max(
+                splittable,
+                key=lambda item: (
+                    sum(self._atom_count_for_subset_index(idx) for idx in item[1]),
+                    len(item[1]),
+                    -item[0],
+                ),
+            )
+            atom_counts = [
+                self._atom_count_for_subset_index(idx) for idx in batch
+            ]
+            total_atoms = sum(atom_counts)
+            prefix_atoms = 0
+            best_cut = 1
+            best_difference = total_atoms
+            for cut, atom_count in enumerate(atom_counts[:-1], start=1):
+                prefix_atoms += atom_count
+                difference = abs(total_atoms - 2 * prefix_atoms)
+                if difference < best_difference:
+                    best_cut = cut
+                    best_difference = difference
+
+            batches[batch_index : batch_index + 1] = [
+                batch[:best_cut],
+                batch[best_cut:],
+            ]
+
+        if self.plan_stats is not None:
+            self.plan_stats["planned_batches"] = len(batches)
 
         return batches
 
     def _get_batch_plan(self) -> List[List[int]]:
         """Build one authoritative batch plan for the current epoch."""
-        if self._batch_plan_epoch == self.epoch and self._batch_plan is not None:
+        num_replicas, _ = self._resolve_distributed_layout()
+        if (
+            self._batch_plan_epoch == self.epoch
+            and self._batch_plan is not None
+            and self._batch_plan_num_replicas == num_replicas
+        ):
             return self._batch_plan
 
         # Step 1: Organize samples by chunk
@@ -664,8 +851,12 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         else:
             batches = self._create_batches_standard(samples_by_chunk)
 
+        if num_replicas > 1:
+            batches = self._equalize_batches_for_ddp(batches, num_replicas)
+
         self._batch_plan = batches
         self._batch_plan_epoch = self.epoch
+        self._batch_plan_num_replicas = num_replicas
         print(f"\r✅ Ready! {len(batches)} batches created.                    ")
         self._print_atom_quota_stats()
         return self._batch_plan
@@ -683,10 +874,17 @@ class ImprovedDynamicBatchSampler(BatchSampler):
 
     def _get_rank_batch_plan(self) -> List[List[int]]:
         """Partition the shared deterministic epoch plan across DDP ranks."""
+        num_replicas, rank = self._resolve_distributed_layout()
         plan = self._get_batch_plan()
-        if self.num_replicas == 1:
+        if num_replicas == 1:
             return plan
-        return plan[self.rank::self.num_replicas]
+        if len(plan) % num_replicas != 0:
+            target = ((len(plan) + num_replicas - 1) // num_replicas) * num_replicas
+            raise RuntimeError(
+                f"DDP partition error: global batch plan length {len(plan)} is not divisible "
+                f"by num_replicas={num_replicas} (target={target})."
+            )
+        return plan[rank::num_replicas]
 
     def set_epoch(self, epoch: int):
         """Set epoch for shuffling"""
@@ -695,4 +893,5 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         self.epoch = epoch
         self._batch_plan = None
         self._batch_plan_epoch = None
+        self._batch_plan_num_replicas = None
         self.plan_stats = None

@@ -401,6 +401,61 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         return full_dataset
 
 
+def _build_train_batch_sampler(
+    train_dataset,
+    config: PretrainingConfig,
+    max_atoms_per_batch: int,
+    is_multi_domain: bool,
+    use_improved_sampler: bool,
+):
+    """Build training batch sampler consistently for both initial and fallback creation."""
+    multi_domain_config = getattr(config, 'multi_domain', None) or {}
+    atom_sampling_config = (
+        multi_domain_config.get('atom_sampling', {}) if is_multi_domain else {}
+    )
+    use_atom_quota_sampling = bool(atom_sampling_config.get('enabled', False))
+
+    if use_improved_sampler:
+        return ImprovedDynamicBatchSampler(
+            train_dataset,
+            max_atoms_per_batch=max_atoms_per_batch,
+            shuffle_chunks=True,
+            shuffle_within_chunk=True,
+            seed=config.seed,
+            enable_cross_modal_batches=is_multi_domain,
+            cycle_short_domains=(
+                bool(atom_sampling_config.get('cycle_to_quota', False))
+                if use_atom_quota_sampling
+                else False
+            ),
+            epoch_atom_budget=(
+                int(atom_sampling_config['epoch_atom_budget'])
+                if use_atom_quota_sampling and atom_sampling_config.get('epoch_atom_budget') is not None
+                else None
+            ),
+            domain_atom_weights=(
+                atom_sampling_config.get('domain_weights')
+                if use_atom_quota_sampling
+                else None
+            ),
+            epoch_num_batches=(
+                atom_sampling_config.get('epoch_num_batches', 'auto')
+                if use_atom_quota_sampling
+                else None
+            ),
+        )
+    else:
+        return DynamicChunkAwareBatchSampler(
+            train_dataset,
+            max_atoms_per_batch=max_atoms_per_batch,
+            shuffle_chunks=True,
+            shuffle_within_chunk=True,
+            seed=config.seed,
+            enable_cross_modal_batches=is_multi_domain,
+            cycle_short_domains=False,
+        )
+
+
 def create_data_loaders(dataset, config: PretrainingConfig):
     """Create train/val/test data loaders"""
     print("🔄 Creating data loaders...")
@@ -473,45 +528,13 @@ def create_data_loaders(dataset, config: PretrainingConfig):
             print(f"   💡 Batches will mix different dataset types (PDB, QM9, etc.)")
 
         # Select sampler
-        if use_improved_sampler:
-            train_batch_sampler = ImprovedDynamicBatchSampler(
-                train_dataset,
-                max_atoms_per_batch=max_atoms_per_batch,
-                shuffle_chunks=True,
-                shuffle_within_chunk=True,
-                seed=config.seed,
-                enable_cross_modal_batches=is_multi_domain,
-                cycle_short_domains=(
-                    bool(atom_sampling_config.get('cycle_to_quota', True))
-                    if use_atom_quota_sampling
-                    else is_multi_domain
-                ),
-                epoch_atom_budget=(
-                    int(atom_sampling_config['epoch_atom_budget'])
-                    if use_atom_quota_sampling
-                    else None
-                ),
-                domain_atom_weights=(
-                    atom_sampling_config.get('domain_weights')
-                    if use_atom_quota_sampling
-                    else None
-                ),
-                epoch_num_batches=(
-                    atom_sampling_config.get('epoch_num_batches', 'auto')
-                    if use_atom_quota_sampling
-                    else None
-                ),
-            )
-        else:
-            train_batch_sampler = DynamicChunkAwareBatchSampler(
-                train_dataset,
-                max_atoms_per_batch=max_atoms_per_batch,
-                shuffle_chunks=True,
-                shuffle_within_chunk=True,
-                seed=config.seed,
-                enable_cross_modal_batches=is_multi_domain,
-                cycle_short_domains=is_multi_domain
-            )
+        train_batch_sampler = _build_train_batch_sampler(
+            train_dataset=train_dataset,
+            config=config,
+            max_atoms_per_batch=max_atoms_per_batch,
+            is_multi_domain=is_multi_domain,
+            use_improved_sampler=use_improved_sampler,
+        )
 
         # Create DataLoader with batch_sampler
         num_workers = getattr(config, 'num_workers', 0)
@@ -910,26 +933,13 @@ def train_universal_pretraining(
                 is_multi_domain = multi_domain_config and multi_domain_config.get('enabled', False)
 
                 # Recreate batch sampler
-                if use_improved_sampler:
-                    train_batch_sampler = ImprovedDynamicBatchSampler(
-                        train_dataset,
-                        max_atoms_per_batch=max_atoms_per_batch,
-                        shuffle_chunks=True,
-                        shuffle_within_chunk=True,
-                        seed=config.seed,
-                        enable_cross_modal_batches=is_multi_domain,
-                        cycle_short_domains=is_multi_domain
-                    )
-                else:
-                    train_batch_sampler = DynamicChunkAwareBatchSampler(
-                        train_dataset,
-                        max_atoms_per_batch=max_atoms_per_batch,
-                        shuffle_chunks=True,
-                        shuffle_within_chunk=True,
-                        seed=config.seed,
-                        enable_cross_modal_batches=is_multi_domain,
-                        cycle_short_domains=is_multi_domain
-                    )
+                train_batch_sampler = _build_train_batch_sampler(
+                    train_dataset=train_dataset,
+                    config=config,
+                    max_atoms_per_batch=max_atoms_per_batch,
+                    is_multi_domain=is_multi_domain,
+                    use_improved_sampler=use_improved_sampler,
+                )
 
                 # Recreate DataLoader
                 train_loader = GeometricDataLoader(
