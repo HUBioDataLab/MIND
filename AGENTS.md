@@ -95,18 +95,17 @@ Log files are auto-routed to `logs/<MonthYear>/<name>_<YYYYMMDD_HHMMSS>.log` for
 
 These rules are mandatory for every Codex session in this repository:
 
-- Codex must not start, stop, resume, or background any training, validation, data
-  processing, dataset conversion, full benchmark, or other long-running workload.
-- Every user-run workload must have a Make target. If a target is missing, Codex must
-  add or update the Make target first and then give the user only the exact `make ...`
-  command. Do not give the user a raw `python`, `nohup`, `tmux`, shell-background, or
-  scheduler command for these workloads.
-- After giving a Make command, Codex must ask whether the user ran it and wait for the
-  user's confirmation. Only after confirmation may Codex monitor the workload.
-- Codex may directly run only small, bounded tests that it wrote or focused existing
-  unit tests. It may also run read-only inspection and monitoring commands. It must
-  not treat a smoke train, data conversion, or benchmark as a small test to bypass
-  this rule.
+- Training, training-style validation, smoke training, and full benchmark workloads
+  remain user-controlled and must be exposed through a Make target. Codex must not
+  start, stop, resume, or background those workloads.
+- After giving a training-related Make command, Codex must ask whether the user ran it
+  and wait for confirmation. Only after confirmation may Codex monitor the workload.
+- Data audits, data processing, dataset conversion, and immutable derived-dataset
+  generation do not require Make targets. Codex may run them directly only when the
+  user explicitly requests execution. The exact command, inputs, output directory,
+  log path, and result must be reported; generated data remains outside Git.
+- Codex may directly run small, bounded tests that it wrote or focused existing unit
+  tests, as well as read-only inspection and monitoring commands.
 - Codex must never infer that a workload stopped from a remembered PID, a stale PID,
   a sandbox-local process list, or one unchanged log snapshot.
 - To verify a user-started workload, Codex must inspect the host process table using
@@ -122,15 +121,15 @@ These rules are mandatory for every Codex session in this repository:
   current log progress, not only the launcher.
 - Generated data and long-run outputs remain outside Git unless explicitly requested.
 
-For direct runs:
+Developer references:
 ```bash
 python -m core.train_pretrain --config-yaml-path core/pretraining_config_fast.yaml
 python data_loading/validate_adapters.py --adapter protein --max_samples 5
 ```
 
-The direct commands above are developer references only. When instructing the user
-to run an equivalent workload, expose and provide a Make target as required by the
-execution-authority rules.
+Training commands above remain developer references only and must be exposed through
+a Make target when the user will run them. Explicitly requested data-processing
+commands may be run directly under the rules above.
 
 ## Known Issues & Active Work
 

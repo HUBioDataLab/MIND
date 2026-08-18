@@ -20,7 +20,10 @@ from typing import Any
 
 import torch
 
-from data_loading.atom_position_vocab import VIRTUAL_ATOMIC_NUMBER
+try:
+    from data_loading.atom_position_vocab import VIRTUAL_ATOMIC_NUMBER
+except ModuleNotFoundError:
+    from atom_position_vocab import VIRTUAL_ATOMIC_NUMBER
 
 
 HYDROGEN_ATOMIC_NUMBER = 1
