@@ -21,6 +21,12 @@ CONDA_RUN := source /opt/anaconda3/bin/activate && conda activate mind_esa3d &&
 GPU ?= auto
 CONFIG ?= m
 LOG ?=
+EPOCHS ?=
+PYTEST_ARGS ?= tests --ignore=tests/test_multigpu_training.py
+
+ifneq ($(strip $(EPOCHS)),)
+  TRAIN_EPOCH_ARGS := --max-epochs $(EPOCHS)
+endif
 
 # Map single-letter shortcuts to full config names
 ifeq ($(CONFIG),m)
@@ -80,7 +86,10 @@ PROCESS_ARGS = --config-yaml-path core/pretraining_config_multidomain.yaml \
 	--num-chunks $(NUM_CHUNKS) \
 	--use-hybrid-edges --force
 
-.PHONY: train stop status logs help process-protein
+.PHONY: train test-unit stop status logs help process-protein
+
+test-unit:
+	$(CONDA_RUN) python -m pytest -q $(PYTEST_ARGS)
 
 train:
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then \
@@ -94,11 +103,13 @@ train:
 	@echo "=== MIND Training ==="
 	@echo "  GPU:    $(RESOLVED_GPU) $(if $(filter auto,$(GPU)),(auto-selected))"
 	@echo "  Config: $(CONFIG_FILE)"
+	@echo "  Epochs: $(if $(strip $(EPOCHS)),$(EPOCHS),config default)"
 	@echo "  Log:    $(LOG_FILE)"
 	@echo "====================="
 	@mkdir -p $(LOG_MONTH_DIR)
 	$(CONDA_RUN) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -m core.train_pretrain \
 		--config-yaml-path $(CONFIG_FILE) \
+		$(TRAIN_EPOCH_ARGS) \
 		> $(LOG_FILE) 2>&1 &
 	@echo "PID: $$!"
 	@echo "Follow: tail -f $(LOG_FILE)"
@@ -164,6 +175,8 @@ help:
 	@echo "  Training:"
 	@echo "    make train CONFIG=m LOG=run1         Full multidomain training"
 	@echo "    make train CONFIG=f                  Fast sanity check (~10 min)"
+	@echo "    make train CONFIG=f EPOCHS=1         Override config epoch count"
+	@echo "    make test-unit                       Run the complete unit-test suite"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"
 	@echo "    make logs                            List recent log files"

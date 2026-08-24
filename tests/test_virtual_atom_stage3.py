@@ -246,19 +246,19 @@ def test_absent_and_explicit_false_config_normalize_identically():
     assert absent is not explicit
 
 
-def test_fast_and_multidomain_yaml_enable_prepositioned_templates():
-    expected = {
+def test_fast_and_multidomain_yaml_select_one_virtual_slot_policy():
+    expected_prepositioned = {
         "enabled": True,
         "protein": True,
         "rna": True,
         "visible_virtuals_prepositioned": True,
     }
+    selected_policies = []
     for relative_path in (
         "core/pretraining_config_fast.yaml",
         "core/pretraining_config_multidomain.yaml",
     ):
         config = yaml.safe_load((REPO_ROOT / relative_path).read_text())
-        assert config["masked_slot_template"] == expected
         assert config["protein_block_mlm"] is True
         assert config["rna_block_mlm"] is True
         assert config["rna_block_mlm_ratio"] == 0.15
@@ -266,8 +266,23 @@ def test_fast_and_multidomain_yaml_enable_prepositioned_templates():
         assert config["virtual_atom_loss_weight"] == 0.2
         assert config["protein_block_mlm_exclude_legacy_oxt"] is True
         parsed = create_pretraining_config(**config)
-        assert parsed.masked_slot_template == expected
+        neutral = getattr(parsed, "geometry_neutral_virtual_slots", None) or {}
+        prepositioned_enabled = (
+            parsed.masked_slot_template == expected_prepositioned
+        )
+        neutral_enabled = (
+            neutral.get("enabled") is True
+            and neutral.get("protein") is True
+            and neutral.get("rna") is True
+            and parsed.masked_slot_template == MASKED_SLOT_TEMPLATE_DEFAULTS
+        )
+        assert prepositioned_enabled != neutral_enabled
+        selected_policies.append(
+            "prepositioned" if prepositioned_enabled else "geometry_neutral"
+        )
         assert parsed.rna_block_mlm is True
+
+    assert len(set(selected_policies)) == 1
 
 
 def test_flag_on_requires_matching_domain_block_mlm():
