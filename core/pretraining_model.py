@@ -785,8 +785,13 @@ class PretrainingESAModel(pl.LightningModule):
                     if hasattr(batch, 'x') and batch.x is not None:
                         masked_batch.x = batch.x[node_mask]
                     masked_batch.pos = batch.pos[node_mask]
-                    masked_batch.batch = torch.zeros(node_mask.sum(), dtype=torch.long, device=device)
-                    masked_batch.num_graphs = 1
+                    _, compact_graph_ids = torch.unique(
+                        batch.batch[node_mask], sorted=True, return_inverse=True
+                    )
+                    masked_batch.batch = compact_graph_ids
+                    masked_batch.num_graphs = int(
+                        compact_graph_ids.max().item()
+                    ) + 1
                     if getattr(batch, 'template_node_mask', None) is not None:
                         masked_batch.template_node_mask = batch.template_node_mask[node_mask]
                     masked_node_emb = node_embeddings[node_mask]

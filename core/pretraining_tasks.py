@@ -90,6 +90,81 @@ class PretrainingTasks(nn.Module):
             nn.Linear(self.config.graph_dim // 2, max_types)
         )
 
+    @staticmethod
+    def _sample_graph_local_pairs(
+        batch_mapping: torch.Tensor,
+        eligible_indices: torch.Tensor,
+        max_pairs: int = 1000,
+    ):
+        """Return atom pairs sampled only within their original graph.
+
+        All pairs are enumerated when the batch contains at most ``max_pairs``
+        eligible intra-graph pairs. Larger batches are sampled uniformly with
+        replacement over the union of their intra-graph pairs.
+        """
+        device = eligible_indices.device
+        empty = torch.empty(0, dtype=torch.long, device=device)
+        if eligible_indices.numel() < 2 or max_pairs <= 0:
+            return empty, empty
+
+        eligible_graphs = batch_mapping[eligible_indices]
+        graph_ids, graph_counts = torch.unique(
+            eligible_graphs, sorted=True, return_counts=True
+        )
+        pair_counts = graph_counts * (graph_counts - 1) // 2
+        usable = pair_counts > 0
+        graph_ids = graph_ids[usable]
+        graph_counts = graph_counts[usable]
+        pair_counts = pair_counts[usable]
+        if graph_ids.numel() == 0:
+            return empty, empty
+
+        total_pairs = int(pair_counts.sum().item())
+        target_pairs = min(max_pairs, total_pairs)
+        if total_pairs <= max_pairs:
+            left_parts = []
+            right_parts = []
+            for graph_id, graph_count in zip(
+                graph_ids.tolist(), graph_counts.tolist()
+            ):
+                graph_nodes = eligible_indices[eligible_graphs == graph_id]
+                local_left, local_right = torch.triu_indices(
+                    graph_count,
+                    graph_count,
+                    offset=1,
+                    device=device,
+                )
+                left_parts.append(graph_nodes[local_left])
+                right_parts.append(graph_nodes[local_right])
+            return torch.cat(left_parts), torch.cat(right_parts)
+
+        sampled_graph_positions = torch.multinomial(
+            pair_counts.float(), target_pairs, replacement=True
+        )
+        sampled_positions, samples_per_graph = torch.unique(
+            sampled_graph_positions, sorted=True, return_counts=True
+        )
+        left_parts = []
+        right_parts = []
+        for graph_position, sample_count in zip(
+            sampled_positions.tolist(), samples_per_graph.tolist()
+        ):
+            graph_id = graph_ids[graph_position]
+            graph_nodes = eligible_indices[eligible_graphs == graph_id]
+            graph_count = int(graph_nodes.numel())
+            local_left = torch.randint(
+                graph_count, (sample_count,), device=device
+            )
+            local_right = torch.randint(
+                graph_count - 1, (sample_count,), device=device
+            )
+            local_right += (local_right >= local_left).long()
+            lower = torch.minimum(local_left, local_right)
+            upper = torch.maximum(local_left, local_right)
+            left_parts.append(graph_nodes[lower])
+            right_parts.append(graph_nodes[upper])
+        return torch.cat(left_parts), torch.cat(right_parts)
+
     def long_range_distance_loss(self, node_embeddings, data):
         """
         Long-range distance prediction loss for global 3D structure learning.
@@ -98,66 +173,51 @@ class PretrainingTasks(nn.Module):
         to learn overall molecular geometry. This is completely SE(3) invariant.
         """
         if not hasattr(data, 'pos') or data.pos is None:
-            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+            return node_embeddings.sum() * 0.0
 
         pos = data.pos
         num_atoms = pos.size(0)
 
+        geometry_valid_mask = getattr(data, 'geometry_valid_mask', None)
         template_node_mask = getattr(data, 'template_node_mask', None)
-        if template_node_mask is None:
-            eligible_indices = None
-            eligible_atoms = num_atoms
-        else:
+        exclusion_mask = None
+        if geometry_valid_mask is not None:
+            if geometry_valid_mask.numel() != num_atoms:
+                raise ValueError(
+                    "geometry_valid_mask must contain one value per atom"
+                )
+            exclusion_mask = ~geometry_valid_mask.to(
+                device=pos.device, dtype=torch.bool
+            )
+        elif template_node_mask is not None:
             if template_node_mask.numel() != num_atoms:
                 raise ValueError(
                     "template_node_mask must contain one value per atom"
                 )
-            eligible_indices = torch.where(
-                ~template_node_mask.to(device=pos.device, dtype=torch.bool)
-            )[0]
-            eligible_atoms = int(eligible_indices.numel())
-
-        if eligible_atoms < 2:
-            return torch.tensor(
-                0.0, device=node_embeddings.device, requires_grad=True
+            exclusion_mask = template_node_mask.to(
+                device=pos.device, dtype=torch.bool
             )
 
-        max_pairs = min(1000, eligible_atoms * (eligible_atoms - 1) // 2)
+        if exclusion_mask is None:
+            eligible_indices = torch.arange(num_atoms, device=pos.device)
+        else:
+            eligible_indices = torch.where(~exclusion_mask)[0]
 
-        if eligible_atoms <= 50:
-            i_indices, j_indices = torch.triu_indices(
-                eligible_atoms,
-                eligible_atoms,
-                offset=1,
-                device=node_embeddings.device,
+        batch_mapping = getattr(data, 'batch', None)
+        if batch_mapping is None:
+            batch_mapping = torch.zeros(
+                num_atoms, dtype=torch.long, device=pos.device
             )
         else:
-            pairs = set()
-            attempts = 0
-            while len(pairs) < max_pairs and attempts < max_pairs * 3:
-                i, j = torch.randint(
-                    0, eligible_atoms, (2,), device=pos.device
-                ).tolist()
-                if i != j:
-                    pair = (min(i, j), max(i, j))
-                    pairs.add(pair)
-                attempts += 1
+            if batch_mapping.numel() != num_atoms:
+                raise ValueError("batch must contain one graph id per atom")
+            batch_mapping = batch_mapping.to(device=pos.device, dtype=torch.long)
 
-            pairs = list(pairs)
-
-            if pairs:
-                i_indices, j_indices = zip(*pairs)
-                i_indices = torch.tensor(i_indices, device=node_embeddings.device)
-                j_indices = torch.tensor(j_indices, device=node_embeddings.device)
-            else:
-                return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
-
-        if eligible_indices is not None:
-            i_indices = eligible_indices[i_indices]
-            j_indices = eligible_indices[j_indices]
-
-        if len(i_indices) == 0:
-            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+        i_indices, j_indices = self._sample_graph_local_pairs(
+            batch_mapping, eligible_indices, max_pairs=1000
+        )
+        if i_indices.numel() == 0:
+            return node_embeddings.sum() * 0.0
 
         emb_i = node_embeddings[i_indices]
         emb_j = node_embeddings[j_indices]
@@ -175,20 +235,24 @@ class PretrainingTasks(nn.Module):
         return loss
 
     def short_range_distance_loss(self, node_embeddings, edge_index, distances, mask):
-        """Short-range distance loss over graph edges (all within cutoff_distance ≤ 5Å)."""
-        source_emb = node_embeddings[edge_index[0]]
-        target_emb = node_embeddings[edge_index[1]]
+        """Short-range loss over finite, selected edges within its distance range."""
+        valid_mask = (
+            torch.isfinite(distances)
+            & mask.to(device=distances.device, dtype=torch.bool)
+            & (distances <= float(self.config.short_range_max_distance))
+        )
+        if not bool(valid_mask.any()):
+            return node_embeddings.sum() * 0.0
+
+        valid_edges = edge_index[:, valid_mask]
+        valid_distances = distances[valid_mask]
+        source_emb = node_embeddings[valid_edges[0]]
+        target_emb = node_embeddings[valid_edges[1]]
         edge_emb = torch.cat([source_emb, target_emb], dim=-1)
 
         logits = self.distance_head(edge_emb)
-
-        distance_bins = self._short_range_distances_to_bins(distances)
-
-        valid_mask = torch.isfinite(distances) & mask
-        if valid_mask.sum() == 0:
-            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
-
-        loss = F.cross_entropy(logits[valid_mask], distance_bins[valid_mask], reduction='mean')
+        distance_bins = self._short_range_distances_to_bins(valid_distances)
+        loss = F.cross_entropy(logits, distance_bins, reduction='mean')
         return loss
 
     def mlm_loss(self, node_embeddings, data):
