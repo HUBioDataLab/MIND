@@ -311,6 +311,8 @@ class SABComplete(nn.Module):
         self.num_mlp_layers = num_mlp_layers
         self.pre_or_post = pre_or_post
         self.use_equivariant = use_equivariant
+        self.equivariant_requested = bool(use_equivariant)
+        self.equivariant_effective = False
 
         if self.pre_or_post == "post":
             self.residual_attn = as_module(num_layers_for_residual)
@@ -322,7 +324,13 @@ class SABComplete(nn.Module):
         # Choose attention implementation based on equivariant features and xformers_or_torch_attn
         if self.use_equivariant:
             try:
-                from esa.equivariant_sab import EquivariantSAB
+                from esa.equivariant_sab import EquivariantSAB, NEQUIP_AVAILABLE
+                if not NEQUIP_AVAILABLE:
+                    raise RuntimeError(
+                        "use_equivariant_features=true requires working "
+                        "NequIP and e3nn installations; silent invariant "
+                        "fallback is disabled"
+                    )
                 self.sab = EquivariantSAB(
                     dim_in=dim_in,
                     dim_out=dim_out,
@@ -335,16 +343,16 @@ class SABComplete(nn.Module):
                     fusion_method=equivariant_fusion_method,
                     cross_connection=equivariant_cross_connection,
                 )
-                print(f"✅ EquivariantSAB enabled for layer {idx}")
+                self.equivariant_effective = bool(self.sab.use_equivariant)
+                print(f"✅ EquivariantSAB effective for layer {idx}")
             except ImportError as e:
-                print(f"⚠️  Warning: EquivariantSAB not available, falling back to standard SAB. Error: {e}")
-                self.use_equivariant = False
-                if xformers_or_torch_attn == "flash_varlen":
-                    self.sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
-                else:
-                    self.sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
+                raise RuntimeError(
+                    "use_equivariant_features=true requires working NequIP "
+                    "and e3nn installations"
+                ) from e
         else:
             # Standard attention (no equivariant features)
+            self.equivariant_effective = False
             if xformers_or_torch_attn == "flash_varlen":
                 self.sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
             else:

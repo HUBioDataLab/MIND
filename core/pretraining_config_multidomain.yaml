@@ -133,9 +133,9 @@ fast_dev_run: false #! Not used
 apply_attention_on: node
 graph_dim: 256
 edge_dim: 64 #! Not used
-hidden_dims: [256, 256, 256, 256, 256, 256, 256, 256]
-num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
-layer_types: ["M", "S", "M", "S", "M", "S", "P", "P"]
+hidden_dims: [256, 256, 256, 256, 256, 256, 256]
+num_heads: [16, 16, 16, 16, 16, 16, 16]
+layer_types: ["M", "S", "M", "S", "M", "S", "P"]
 xformers_or_torch_attn: flash_varlen  # ⚡ Padding-free for mixed sizes (CORRECT: flash_varlen not varlen_flash!)
 norm_type: LN
 use_3d_coordinates: true
@@ -145,7 +145,7 @@ triu_attn_mask: false #! Not used
 # -------------------------
 # Equivariant Features
 # -------------------------
-use_equivariant_features: true
+use_equivariant_features: false
 equivariant_lmax: 2
 equivariant_num_features: 16
 equivariant_fusion_method: add

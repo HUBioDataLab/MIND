@@ -37,16 +37,104 @@ __all__ = [
 ]
 
 
+_LEGACY_INVARIANT_SAB_TOKEN = ".sab.invariant_sab."
+_REAL_EQUIVARIANT_STATE_TOKENS = (
+    ".equivariant_interaction.",
+    ".equivariant_to_scalar.",
+    ".inv_to_equiv.",
+    ".equiv_to_inv_gate.",
+)
+
+
+def _migrate_legacy_invariant_sab_state_dict(state_dict, expected_keys):
+    """Rename wrapper-only SAB keys for the direct invariant architecture.
+
+    Historical configs requested equivariance even though NequIP/e3nn were
+    unavailable. Those checkpoints contain only invariant SAB tensors nested
+    under ``sab.invariant_sab``. The tensor values are directly compatible
+    with today's invariant SAB; only their names differ.
+    """
+    if any(
+        token in key
+        for key in state_dict
+        for token in _REAL_EQUIVARIANT_STATE_TOKENS
+    ):
+        raise RuntimeError(
+            "checkpoint contains real equivariant branch weights and cannot "
+            "be silently loaded into an invariant-only model"
+        )
+
+    legacy_keys = [
+        key for key in state_dict if _LEGACY_INVARIANT_SAB_TOKEN in key
+    ]
+    if not legacy_keys:
+        return state_dict, 0
+
+    original_keys = set(state_dict)
+    expected_keys = set(expected_keys)
+    migrated = state_dict.__class__()
+    for key, value in state_dict.items():
+        target = key.replace(_LEGACY_INVARIANT_SAB_TOKEN, ".sab.")
+        if target != key:
+            if target in original_keys:
+                raise RuntimeError(
+                    f"checkpoint contains both legacy and direct SAB key: {target}"
+                )
+            if target not in expected_keys:
+                raise RuntimeError(
+                    f"legacy SAB key has no invariant-model target: {target}"
+                )
+        if target in migrated:
+            raise RuntimeError(f"checkpoint key migration collision: {target}")
+        migrated[target] = value
+
+    metadata = getattr(state_dict, "_metadata", None)
+    if metadata is not None:
+        migrated._metadata = metadata.__class__(
+            (
+                key.replace(".sab.invariant_sab", ".sab"),
+                value,
+            )
+            for key, value in metadata.items()
+        )
+    return migrated, len(legacy_keys)
+
+
 class PretrainingESAModel(pl.LightningModule):
     """
     Universal pretraining ESA model for all molecular systems.
     Orchestrates the encoder, ESA backbone, and all pretraining task losses.
     """
 
-    def __init__(self, config: PretrainingConfig):
+    def __init__(
+        self,
+        config: Optional[PretrainingConfig] = None,
+        **legacy_hparams,
+    ):
         super().__init__()
+        if config is None:
+            if not legacy_hparams:
+                raise TypeError("PretrainingESAModel requires a config")
+            # Lightning checkpoints written before the nested-config format
+            # stored every config field as a top-level hyperparameter. Their
+            # equivariant=true setting produced no equivariant parameters in
+            # the supported training environment, so reconstruct the actual
+            # invariant architecture before loading those tensors.
+            config = create_pretraining_config(**legacy_hparams)
+            config.use_equivariant_features = False
+        elif isinstance(config, dict):
+            if legacy_hparams:
+                raise TypeError(
+                    "nested config cannot be combined with legacy hyperparameters"
+                )
+            config = create_pretraining_config(**config)
+        elif legacy_hparams:
+            raise TypeError(
+                "config object cannot be combined with legacy hyperparameters"
+            )
+
         self.config = config
-        self.save_hyperparameters(vars(config))
+        self.save_hyperparameters({"config": dict(vars(config))})
 
         # Universal molecular encoder
         self.encoder = UniversalMolecularEncoder(config)
@@ -93,10 +181,16 @@ class PretrainingESAModel(pl.LightningModule):
         # Pretraining tasks (all loss heads)
         self.pretraining_tasks = PretrainingTasks(config)
 
-        if config.use_equivariant_features:
-            print("✅ Pretraining equivariant: ENABLED | pos→ESA→EquivariantSAB | gradients flow through equivariant branch")
-        else:
-            print("⬜ Pretraining equivariant: DISABLED | ESA uses invariant-only SAB/MAB (no EquivariantSAB)")
+        self.equivariant_requested = bool(config.use_equivariant_features)
+        self.equivariant_effective = bool(
+            self.esa_backbone.use_equivariant
+        )
+        print(
+            "Pretraining geometry: "
+            f"invariant_3d={'ENABLED' if config.use_3d_coordinates else 'DISABLED'} | "
+            f"equivariant_requested={self.equivariant_requested} | "
+            f"equivariant_effective={self.equivariant_effective}"
+        )
 
         # Output projection for node-level tasks
         if config.apply_attention_on == "edge":
@@ -123,6 +217,20 @@ class PretrainingESAModel(pl.LightningModule):
 
         if self.config.apply_attention_on == "node":
             self.config.is_node_task = True
+
+    def on_load_checkpoint(self, checkpoint):
+        if self.equivariant_effective:
+            return
+        state_dict, migrated_count = _migrate_legacy_invariant_sab_state_dict(
+            checkpoint["state_dict"], self.state_dict().keys()
+        )
+        checkpoint["state_dict"] = state_dict
+        if migrated_count:
+            print(
+                "Migrated "
+                f"{migrated_count} legacy invariant SAB checkpoint keys "
+                "to the direct invariant layout."
+            )
 
     def forward(self, batch):
         """
