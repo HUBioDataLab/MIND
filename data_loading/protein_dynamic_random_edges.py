@@ -87,22 +87,49 @@ class ProteinDynamicRandomEdges:
         Apply dynamic random edges to a PyG Data object.
         
         Args:
-            data: PyTorch Geometric Data object with pos, edge_index, position_indices
+            data: PyTorch Geometric Data object with pos, edge_index, pos_code / template_anchor_order
         
         Returns:
             Data object with additional random edges (or original if not applicable)
         """
-        # Skip if not a protein (no position_indices) or no edges
-        if not hasattr(data, 'pos') or not hasattr(data, 'edge_index'):
+        # Determine dataset domain
+        dtype = getattr(data, 'dataset_type', None)
+        if isinstance(dtype, (list, tuple)):
+            dtype = dtype[0] if dtype else ''
+        dtype_str = str(dtype).lower() if dtype is not None else ''
+
+        # Non-protein domains (e.g., UniMol, RNA) do not have CA atoms; return unchanged
+        if dtype_str and dtype_str not in ('protein', 'pdb', 'unknown'):
             return data
-        
-        if not hasattr(data, 'position_indices'):
-            return data  # Not a protein with 14-atom uniform representation
-        
-        # Find CA atoms (position_idx == 1 in 14-atom uniform)
-        ca_mask = (data.position_indices == self.ca_atom_idx)
-        ca_indices = torch.where(ca_mask)[0]
-        
+
+        if not hasattr(data, 'pos') or data.pos is None or not hasattr(data, 'edge_index') or data.edge_index is None:
+            if dtype_str in ('protein', 'pdb'):
+                raise ValueError(
+                    f"Protein Data object missing required 'pos' or 'edge_index': mol_id={getattr(data, 'mol_id', '?')}"
+                )
+            return data
+
+        # Extract CA atom indices supporting production pos_code, template_anchor_order, or legacy position_indices
+        if hasattr(data, 'pos_code') and data.pos_code is not None:
+            pos_codes = data.pos_code
+            if isinstance(pos_codes, torch.Tensor):
+                pos_codes = pos_codes.tolist()
+            ca_indices = torch.tensor(
+                [i for i, code in enumerate(pos_codes) if str(code).strip() == 'CA'],
+                dtype=torch.long,
+                device=data.pos.device
+            )
+        elif hasattr(data, 'template_anchor_order') and data.template_anchor_order is not None:
+            ca_indices = torch.where(data.template_anchor_order == 1)[0]
+        elif hasattr(data, 'position_indices') and data.position_indices is not None:
+            ca_indices = torch.where(data.position_indices == self.ca_atom_idx)[0]
+        else:
+            if dtype_str in ('protein', 'pdb'):
+                raise ValueError(
+                    f"Protein Data object missing position metadata ('pos_code', 'template_anchor_order', or 'position_indices'): mol_id={getattr(data, 'mol_id', '?')}"
+                )
+            return data
+
         if len(ca_indices) < 2:
             return data  # Too few CA atoms for random edges
         
@@ -398,93 +425,3 @@ def add_protein_dynamic_random_edges(
     
     return transform(data)
 
-
-if __name__ == "__main__":
-    # Test the transform
-    print("Testing ProteinDynamicRandomEdges...")
-    print("=" * 60)
-    
-    # Create dummy protein data (14-atom uniform representation)
-    num_residues = 100
-    atoms_per_residue = 14
-    num_atoms = num_residues * atoms_per_residue
-    
-    # Random positions (spread out so CA atoms have valid long-range candidates)
-    pos = torch.randn(num_atoms, 3) * 20  # Increased spread
-    
-    # Position indices (0-13 for 14-atom uniform, CA is idx 1)
-    position_indices = torch.tensor([i % 14 for i in range(num_atoms)])
-    
-    # Random existing edges
-    edge_index = torch.randint(0, num_atoms, (2, 5000))
-    
-    data = Data(pos=pos, position_indices=position_indices, edge_index=edge_index)
-    
-    print(f"📊 Test Data:")
-    print(f"   Total atoms: {num_atoms:,}")
-    print(f"   CA atoms: {(position_indices == 1).sum().item()}")
-    print(f"   Original edges: {data.edge_index.size(1):,}")
-    
-    # Test 1: Additive mode (default)
-    print(f"\n{'=' * 60}")
-    print("🧪 Test 1: Additive Mode (keep existing, add dynamic)")
-    print("=" * 60)
-    
-    transform_additive = OptimizedProteinDynamicRandomEdges(
-        num_random_edges=8,
-        min_distance=10.0,
-        replace_existing_random_edges=False  # Additive
-    )
-    data_additive = transform_additive(data.clone())
-    edges_added = data_additive.edge_index.size(1) - data.edge_index.size(1)
-    
-    print(f"✅ Results:")
-    print(f"   After transform: {data_additive.edge_index.size(1):,} edges")
-    print(f"   Random edges added: {edges_added:,}")
-    print(f"   Expected: ~{num_residues * 8 * 2:,} edges (8 per CA, bidirectional)")
-    
-    # Test 2: Replacement mode
-    print(f"\n{'=' * 60}")
-    print("🧪 Test 2: Replacement Mode (remove existing random, add dynamic)")
-    print("=" * 60)
-    
-    transform_replace = OptimizedProteinDynamicRandomEdges(
-        num_random_edges=8,
-        min_distance=10.0,
-        replace_existing_random_edges=True  # Replacement
-    )
-    data_replace = transform_replace(data.clone())
-    
-    print(f"✅ Results:")
-    print(f"   After transform: {data_replace.edge_index.size(1):,} edges")
-    print(f"   Difference from original: {data_replace.edge_index.size(1) - data.edge_index.size(1):+,}")
-    
-    # Verify edge attributes
-    print(f"\n{'=' * 60}")
-    print("🔍 Verification:")
-    print("=" * 60)
-    
-    # Check that added edges connect CA atoms
-    if edges_added > 0:
-        ca_indices = torch.where(position_indices == 1)[0]
-        ca_set = set(ca_indices.cpu().numpy().tolist())
-        
-        # Get only the new edges
-        new_edges = data_additive.edge_index[:, -edges_added:]
-        src, dst = new_edges[0], new_edges[1]
-        
-        # Check all are CA-CA edges
-        all_ca = all(s.item() in ca_set and d.item() in ca_set 
-                     for s, d in zip(src[:100], dst[:100]))  # Check first 100
-        
-        print(f"   ✅ New edges connect CA atoms: {all_ca}")
-        
-        # Check distances
-        distances = [torch.norm(pos[s] - pos[d]).item() 
-                    for s, d in zip(src[:10], dst[:10])]  # Sample 10
-        min_dist = min(distances)
-        print(f"   ✅ Min distance in sample: {min_dist:.2f}Å (threshold: 10.0Å)")
-    
-    print(f"\n{'=' * 60}")
-    print("✅ All tests passed!")
-    print("=" * 60)
