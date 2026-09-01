@@ -498,7 +498,7 @@ def test_virtual_weighted_mlm_matches_other_group_formula_and_legacy_default():
     assert torch.allclose(weighted_tasks.mlm_loss(logits, data), expected)
 
 
-def test_element_balanced_mlm_changes_only_real_sidechain_internal_weighting():
+def test_standard_mlm_loss_with_virtual_atom_weighting():
     logits = torch.randn(6, 121, generator=torch.Generator().manual_seed(8_117))
     targets = torch.tensor([6, 6, 8, 16, 7, VIRTUAL_ATOMIC_NUMBER])
     # Protein ids 5..14 are sidechain slots; id 1 is backbone N.

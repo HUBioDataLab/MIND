@@ -4,12 +4,6 @@ from torch import nn
 from torch.nn import functional as F
 
 from core.pretraining_config import PretrainingConfig
-from core.molecular_encoder import (
-    PROTEIN_LOCAL_SLOT_COUNT,
-    PROTEIN_LOCAL_SLOT_OFFSET,
-    RNA_LOCAL_SLOT_COUNT,
-    RNA_LOCAL_SLOT_OFFSET,
-)
 from data_loading.atom_position_vocab import VIRTUAL_ATOMIC_NUMBER
 
 

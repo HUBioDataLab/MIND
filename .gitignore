@@ -77,3 +77,15 @@ template/
 
 #Related Papers
 papers/
+
+#Agents
+.codex
+
+#Personal notes
+CURRENT_TODOS.md
+
+# Local Codex instructions
+CODEX.md
+
+# Other codes
+repomix-output.xml

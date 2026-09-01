@@ -30,6 +30,9 @@ from core.pretraining_model import PretrainingESAModel, PretrainingConfig, creat
 from core.batch_statistics_callback import BatchStatisticsCallback
 from core.metrics.rna_per_atom_metrics_callback import PerAtomMetricsCallback
 from core.metrics.protein_per_atom_metrics_callback import ProteinPerAtomMetricsCallback
+from core.metrics.virtual_slot_diagnostics_callback import (
+    VirtualSlotDiagnosticsCallback,
+)
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes, AddRandomNoise
 from data_loading.chunk_sampler import ChunkAwareSampler
@@ -65,9 +68,11 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
         print(f"   - Replace existing: {replace_existing}")
         print(f"   - Different edges each epoch (prevents bias)")
 
+        sequence_neighbors_k = getattr(config, 'sequence_neighbors_k', 3)
         transforms.append(OptimizedProteinDynamicRandomEdges(
             num_random_edges=num_random_edges,
             min_distance=random_edge_min_distance,
+            sequence_neighbors_k=sequence_neighbors_k,
             replace_existing_random_edges=replace_existing,
             seed=None  # None = different edges each epoch
         ))
@@ -882,6 +887,16 @@ def train_universal_pretraining(
     callbacks.append(protein_metrics_callback)
     print("✅ Protein per-atom + per-AA (binary & block) metrics callback enabled")
 
+    virtual_slot_diagnostics = VirtualSlotDiagnosticsCallback(
+        enabled=bool(
+            (getattr(config, "geometry_neutral_virtual_slots", None) or {}).get(
+                "enabled", False
+            )
+        )
+    )
+    callbacks.append(virtual_slot_diagnostics)
+    print("✅ Virtual-slot prior/context diagnostics callback enabled")
+
     # Validation and logging frequency (from config)
     val_check_interval = getattr(config, 'val_check_interval', 0.25)
     log_every_n_steps = getattr(config, 'log_every_n_steps', 1)
@@ -1001,6 +1016,7 @@ def main():
     parser.add_argument("--config-yaml-path", type=str, required=True, help="Path to YAML config file")
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum number of samples to use")
     parser.add_argument("--max-epochs", type=int, default=None, help="Maximum number of epochs")
+    parser.add_argument("--seed", type=int, default=None, help="Override the config random seed")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
     parser.add_argument("--devices", type=str, default=None, help="Number of GPUs or device IDs (e.g. 2, '0,1,2', or 'auto')")
     parser.add_argument("--strategy", type=str, default=None, help="Multi-GPU strategy (e.g. 'ddp', 'ddp_spawn', 'auto')")
@@ -1022,6 +1038,10 @@ def main():
 
     if args.max_epochs is not None:
         config_dict['max_epochs'] = args.max_epochs
+
+    if args.seed is not None:
+        config_dict['seed'] = args.seed
+        print(f"🎲 Using random seed: {args.seed}")
 
     if args.batch_size is not None:
         config_dict['batch_size'] = args.batch_size
