@@ -58,9 +58,9 @@ multi_domain:
     
     rna:
       enabled: true
-      chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k"
-      chunk_range: [0, 4]  # Filtered dev set: source chunks 0..4, each graph <=5,000 atoms.
-      max_graph_atoms: 5000
+      chunk_dir: "/media/ubuntu/8TB/yusuf/mind_virtual_v1/rna/june_equivalent_23slot_v2/processed_23slot"
+      chunk_range: null  # All 67 June-equivalent 23-slot chunks (8,556 graphs <=5,000 real non-H atoms).
+      max_graph_atoms: 6000
     
     dna:
       enabled: false  # Future expansion
@@ -100,7 +100,7 @@ use_universal_cache: true
 # -------------------------
 # Eğitim Parametreleri
 # -------------------------
-max_epochs: 2
+max_epochs: 100
 batch_size: 32  # Used for validation/test (training uses dynamic batching)
 use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
 use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
@@ -216,9 +216,9 @@ replace_existing_random_edges: true    # If true, removes static Tier 3 from .pt
 # -------------------------
 pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
 task_weights:
-  long_range_distance: 1.5
+  long_range_distance: 1.0
   short_range_distance: 1.0
-  mlm: 0.3
+  mlm: 1.0
 mlm_mask_ratio: 0.15  # Ratio of atoms to mask for MLM task
 # Optional COCONUT/metabolite masking settings. Metabolite stays disabled in
 # this protein/RNA/UniMol comparison run.
@@ -241,14 +241,23 @@ use_domain_local_slot_embedding: true
 virtual_atom_loss_weight: 0.2
 protein_block_mlm_exclude_legacy_oxt: true
 
-# Runtime canonical-slot templates remain opt-in. When enabled against a new
-# cache whose visible V coordinates/edges were precomputed, set the final flag
-# true so each batch rebuilds only the selected masked-residue edges.
+# Deprecated synthetic-coordinate experiment. It is kept off; the
+# geometry-neutral view below replaces it.
 masked_slot_template:
+  enabled: false
+  protein: false
+  rna: false
+  visible_virtuals_prepositioned: false
+
+# Keep 14/23 MLM targets, but remove visible V and masked sidechain/base slots
+# from the encoder graph. Their prediction states are read from the encoded
+# residue/nucleotide backbone. Existing .pt chunks do not need regeneration.
+geometry_neutral_virtual_slots:
   enabled: true
   protein: true
   rna: true
-  visible_virtuals_prepositioned: true
+  context_audit_batches: 4
+  gradient_audit_batches: 1
 
 temperature: 0.2 #! Not used
 

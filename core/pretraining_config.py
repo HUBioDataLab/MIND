@@ -9,6 +9,72 @@ MASKED_SLOT_TEMPLATE_DEFAULTS = {
     "visible_virtuals_prepositioned": False,
 }
 
+GEOMETRY_NEUTRAL_VIRTUAL_SLOT_DEFAULTS = {
+    "enabled": False,
+    "protein": False,
+    "rna": False,
+    # Number of validation batches on which the same trained weights are
+    # evaluated with correct, removed, and residue-shuffled owner attention.
+    # Zero keeps the diagnostic completely off.
+    "context_audit_batches": 0,
+    # Optional first-N-training-batch audit of weighted shared-trunk gradient
+    # norms. It is diagnostic only and never changes the optimized objective.
+    "gradient_audit_batches": 0,
+}
+
+
+def normalize_geometry_neutral_virtual_slot_config(
+    value: Optional[Dict[str, object]],
+) -> Dict[str, object]:
+    """Validate the fixed-slot graph-view feature configuration."""
+    if value is None:
+        return dict(GEOMETRY_NEUTRAL_VIRTUAL_SLOT_DEFAULTS)
+    if not isinstance(value, dict):
+        raise TypeError("geometry_neutral_virtual_slots must be a mapping")
+    unknown = set(value) - set(GEOMETRY_NEUTRAL_VIRTUAL_SLOT_DEFAULTS)
+    if unknown:
+        raise ValueError(
+            "unknown geometry_neutral_virtual_slots keys: "
+            + ", ".join(sorted(unknown))
+        )
+    normalized = dict(GEOMETRY_NEUTRAL_VIRTUAL_SLOT_DEFAULTS)
+    for key in ("enabled", "protein", "rna"):
+        if key in value and type(value[key]) is not bool:
+            raise TypeError(
+                f"geometry_neutral_virtual_slots.{key} must be boolean"
+            )
+        if key in value:
+            normalized[key] = value[key]
+    if "context_audit_batches" in value:
+        batches = value["context_audit_batches"]
+        if type(batches) is not int or batches < 0:
+            raise ValueError(
+                "geometry_neutral_virtual_slots.context_audit_batches "
+                "must be a non-negative integer"
+            )
+        normalized["context_audit_batches"] = batches
+    if "gradient_audit_batches" in value:
+        batches = value["gradient_audit_batches"]
+        if type(batches) is not int or batches < 0:
+            raise ValueError(
+                "geometry_neutral_virtual_slots.gradient_audit_batches "
+                "must be a non-negative integer"
+            )
+        normalized["gradient_audit_batches"] = batches
+    if not normalized["enabled"] and (
+        normalized["protein"] or normalized["rna"]
+    ):
+        raise ValueError(
+            "geometry_neutral_virtual_slots domain flags require enabled=true"
+        )
+    if normalized["enabled"] and not (
+        normalized["protein"] or normalized["rna"]
+    ):
+        raise ValueError(
+            "geometry_neutral_virtual_slots.enabled=true requires protein and/or rna"
+        )
+    return normalized
+
 
 def normalize_masked_slot_template_config(
     value: Optional[Dict[str, bool]],
@@ -170,6 +236,10 @@ class PretrainingConfig:
     # Runtime virtual-slot template. Disabled by default.
     masked_slot_template: Optional[Dict[str, bool]] = None
 
+    # Runtime encoder view that keeps fixed-width MLM targets while removing
+    # virtual/hidden-slot geometry from protein and RNA message passing.
+    geometry_neutral_virtual_slots: Optional[Dict[str, object]] = None
+
     # Coordinate denoising (predict added noise from node embeddings; SE(3)-invariant loss)
     coordinate_denoising_noise_std: float = 0.1
     coordinate_denoising_mask_ratio: float = 0.15  # fraction of nodes to compute loss on
@@ -203,6 +273,11 @@ def create_pretraining_config(**kwargs) -> PretrainingConfig:
     config.masked_slot_template = normalize_masked_slot_template_config(
         getattr(config, "masked_slot_template", None), allow_enabled=True
     )
+    config.geometry_neutral_virtual_slots = (
+        normalize_geometry_neutral_virtual_slot_config(
+            getattr(config, "geometry_neutral_virtual_slots", None)
+        )
+    )
     virtual_atom_loss_weight = float(
         getattr(config, "virtual_atom_loss_weight", 1.0)
     )
@@ -218,5 +293,55 @@ def create_pretraining_config(**kwargs) -> PretrainingConfig:
         if "coordinate_denoising" in (getattr(config, "pretraining_tasks", None) or ()):
             raise ValueError(
                 "masked slot templates are incompatible with coordinate_denoising"
+            )
+    neutral_slots = config.geometry_neutral_virtual_slots
+    if neutral_slots["enabled"]:
+        if template["enabled"]:
+            raise ValueError(
+                "geometry-neutral virtual slots replace masked_slot_template; "
+                "the two features cannot be enabled together"
+            )
+        if neutral_slots["protein"] and not getattr(
+            config, "protein_block_mlm", False
+        ):
+            raise ValueError(
+                "geometry-neutral protein slots require protein_block_mlm=true"
+            )
+        if neutral_slots["rna"] and not getattr(config, "rna_block_mlm", False):
+            raise ValueError(
+                "geometry-neutral RNA slots require rna_block_mlm=true"
+            )
+        if getattr(config, "apply_attention_on", "node") != "node":
+            raise ValueError(
+                "geometry-neutral virtual slots currently require node attention"
+            )
+        if getattr(config, "use_distance_bias", False):
+            raise ValueError(
+                "geometry-neutral virtual slots are incompatible with pairwise "
+                "distance attention bias"
+            )
+        if getattr(config, "use_posenc", False):
+            raise ValueError(
+                "geometry-neutral virtual slots require use_posenc=false"
+            )
+        if not getattr(config, "use_domain_local_slot_embedding", False):
+            raise ValueError(
+                "geometry-neutral virtual slots require "
+                "use_domain_local_slot_embedding=true"
+            )
+        if (
+            not getattr(config, "hidden_dims", None)
+            or config.hidden_dims[0] != config.graph_dim
+        ):
+            raise ValueError(
+                "geometry-neutral latent readout requires hidden_dims[0] "
+                "to equal graph_dim"
+            )
+        if "coordinate_denoising" in (
+            getattr(config, "pretraining_tasks", None) or ()
+        ):
+            raise ValueError(
+                "geometry-neutral virtual slots are incompatible with "
+                "coordinate_denoising"
             )
     return config

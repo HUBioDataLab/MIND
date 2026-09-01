@@ -139,9 +139,9 @@ replace_existing_random_edges: true
 
 pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
 task_weights:
-  long_range_distance: 1.5
+  long_range_distance: 1.0
   short_range_distance: 1.0
-  mlm: 0.3
+  mlm: 1.0
 mlm_mask_ratio: 0.15
 
 # Protein-only block MLM (see multidomain config for details).
@@ -153,14 +153,20 @@ use_domain_local_slot_embedding: true
 virtual_atom_loss_weight: 0.2
 protein_block_mlm_exclude_legacy_oxt: true
 
-# Runtime canonical-slot templates remain opt-in. When enabled against a new
-# cache whose visible V coordinates/edges were precomputed, set the final flag
-# true so each batch rebuilds only the selected masked-residue edges.
+# Deprecated synthetic-coordinate experiment. It is kept off; the
+# geometry-neutral view below replaces it.
 masked_slot_template:
+  enabled: false
+  protein: false
+  rna: false
+  visible_virtuals_prepositioned: false
+
+geometry_neutral_virtual_slots:
   enabled: true
   protein: true
   rna: true
-  visible_virtuals_prepositioned: true
+  context_audit_batches: 4
+  gradient_audit_batches: 1
 
 temperature: 0.2
 

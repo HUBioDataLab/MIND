@@ -1,9 +1,11 @@
 import math
+from types import SimpleNamespace
 import torch
 import pytorch_lightning as pl
 import bitsandbytes as bnb
 
 from torch import nn
+from torch.nn import functional as F
 from torch_geometric.utils import to_dense_batch
 from collections import defaultdict
 from typing import Optional, List, Dict
@@ -16,8 +18,16 @@ from core.pretraining_config import PretrainingConfig, create_pretraining_config
 from core.block_masking import legacy_oxt_eligible_node_mask, select_whole_blocks
 from core.masked_coordinate_corruption import apply_masked_slot_template_
 from core.masked_slot_mapping import flatten_pos_codes
-from core.molecular_encoder import UniversalMolecularEncoder, nearest_multiple_of_8
+from core.molecular_encoder import (
+    UniversalMolecularEncoder,
+    build_domain_local_slot_ids,
+    nearest_multiple_of_8,
+)
 from core.pretraining_tasks import PretrainingTasks
+from core.virtual_slot_graph import (
+    build_geometry_neutral_graph_view,
+    build_slot_readout_edges_for_owner_mode,
+)
 from data_loading.masking_utils import (
     compute_coconut_masking_metrics,
     get_graph_dataset_type,
@@ -232,7 +242,77 @@ class PretrainingESAModel(pl.LightningModule):
                 "to the direct invariant layout."
             )
 
-    def forward(self, batch):
+    def _inject_latent_slot_readouts(
+        self,
+        batch,
+        graph_view,
+        full_node_embeddings: torch.Tensor,
+        full_slot_ids: torch.Tensor,
+        slot_readout_mode: str,
+    ) -> torch.Tensor:
+        """Create hidden side/base slot states from encoded backbone states.
+
+        The fixed-width slots stay available to MLM and masked-distance heads,
+        but they are not ESA nodes. Each state is the mean of its residue or
+        nucleotide backbone plus its existing domain-local slot embedding.
+        """
+        target_nodes = torch.where(graph_view.target_slot_mask)[0]
+        if target_nodes.numel() == 0:
+            return full_node_embeddings
+
+        slot_embedding = getattr(
+            self.encoder, "domain_local_slot_embedding", None
+        )
+        if slot_embedding is None:
+            raise RuntimeError(
+                "latent slot readout requires use_domain_local_slot_embedding=true"
+            )
+
+        readout_edges = build_slot_readout_edges_for_owner_mode(
+            batch, graph_view, slot_readout_mode
+        )
+        context_sum = full_node_embeddings.new_zeros(
+            full_node_embeddings.shape
+        )
+        context_count = full_node_embeddings.new_zeros(
+            (full_node_embeddings.size(0),)
+        )
+        if readout_edges.numel():
+            slots, anchors = readout_edges
+            context_sum.index_add_(
+                0, slots, full_node_embeddings.index_select(0, anchors)
+            )
+            context_count.index_add_(
+                0,
+                slots,
+                torch.ones(
+                    slots.numel(),
+                    dtype=full_node_embeddings.dtype,
+                    device=full_node_embeddings.device,
+                ),
+            )
+        if slot_readout_mode == "correct" and bool(
+            (context_count[target_nodes] == 0).any()
+        ):
+            raise RuntimeError("a latent slot has no owner-backbone readout")
+
+        context = context_sum[target_nodes] / context_count[
+            target_nodes
+        ].clamp_min(1).unsqueeze(-1)
+        slot_states = slot_embedding(full_slot_ids[target_nodes])
+        if slot_states.size(-1) != context.size(-1):
+            raise RuntimeError(
+                "latent slot/readout dimensions differ: "
+                f"slot={slot_states.size(-1)}, backbone={context.size(-1)}"
+            )
+        slot_states = F.layer_norm(
+            context + slot_states, (context.size(-1),)
+        )
+        result = full_node_embeddings.clone()
+        result.index_copy_(0, target_nodes, slot_states)
+        return result
+
+    def forward(self, batch, slot_readout_mode: str = "correct"):
         """
         Forward pass for pretraining.
 
@@ -241,6 +321,7 @@ class PretrainingESAModel(pl.LightningModule):
             node_embeddings (pre-PMA) for node-level losses.
         """
         edge_index, batch_mapping = batch.edge_index, batch.batch
+        attention_edge_index = edge_index
         pos = getattr(batch, 'pos', None)
 
         assert hasattr(batch, 'z') and batch.z is not None, \
@@ -249,18 +330,87 @@ class PretrainingESAModel(pl.LightningModule):
 
         assert pos is not None, "Coordinates (pos) are required for pretraining tasks"
 
-        # Center positions for translation invariance (per-graph)
-        pos_centered = pos.clone()
-        for graph_id in torch.unique(batch_mapping):
-            mask = batch_mapping == graph_id
-            if mask.sum() > 0:
-                com = pos[mask].mean(dim=0, keepdim=True)
-                pos_centered[mask] = pos[mask] - com
-        pos = pos_centered
-        batch.pos = pos_centered
+        full_num_nodes = int(x.size(0))
+        graph_view = build_geometry_neutral_graph_view(batch, self.config)
+        if graph_view is not None:
+            full_slot_ids = build_domain_local_slot_ids(
+                batch, full_num_nodes, x.device
+            )
+            active = graph_view.compact_to_full
+            x = x[active]
+            pos = graph_view.compact_pos
+            batch_mapping = batch.batch[active]
+            edge_index = graph_view.compact_edge_index
+            # ESA sees only the physical graph. Owner routing is a post-ESA
+            # latent readout and therefore cannot affect attention geometry.
+            attention_edge_index = graph_view.compact_attention_edge_index
+            encoder_batch = SimpleNamespace(
+                batch=batch_mapping,
+                block_idx=batch.block_idx[active],
+                edge_index=edge_index,
+                geometry_valid_mask=graph_view.geometry_valid_mask[active],
+                domain_local_slot_ids=full_slot_ids[active],
+                dataset_type=getattr(batch, 'dataset_type', None),
+                num_graphs=getattr(batch, 'num_graphs', 1),
+            )
+
+            # Full-index diagnostics and loss routing remain on the original
+            # batch. Clean target coordinates are never copied into encoder_batch.
+            batch.active_node_mask = graph_view.active_node_mask
+            batch.geometry_valid_mask = graph_view.geometry_valid_mask
+            batch.target_slot_mask = graph_view.target_slot_mask
+            batch.target_real_slot_mask = graph_view.target_real_slot_mask
+            batch.domain_local_slot_ids = full_slot_ids
+            batch.slot_readout_edge_index = (
+                graph_view.slot_readout_edge_index
+            )
+            batch.physical_edge_index = graph_view.physical_edge_index
+            raw_edges = batch.edge_index
+            valid_cached_edges = (
+                graph_view.geometry_valid_mask[raw_edges[0]]
+                & graph_view.geometry_valid_mask[raw_edges[1]]
+            )
+            batch.virtual_slot_graph_stats = {
+                'visible_virtual_nodes_removed': int(
+                    (
+                        ~graph_view.active_node_mask
+                        & ~graph_view.target_slot_mask
+                    ).sum().item()
+                ),
+                'latent_slot_nodes': int(
+                    graph_view.target_slot_mask.sum().item()
+                ),
+                'latent_real_slot_nodes': int(
+                    graph_view.target_real_slot_mask.sum().item()
+                ),
+                'invalid_cached_edges_removed': int(
+                    (~valid_cached_edges).sum().item()
+                ),
+                'physical_edges': int(
+                    graph_view.physical_edge_index.size(1)
+                ),
+                'slot_readout_links': int(
+                    graph_view.slot_readout_edge_index.size(1)
+                ),
+            }
+            # Keep existing downstream loss code in the same centered frame,
+            # but compute the center from physical atoms only. Invalid slot
+            # coordinates remain unavailable to the encoder view above.
+            batch.pos = graph_view.centered_full_pos_for_losses
+        else:
+            # Preserve the legacy path exactly when the feature is disabled.
+            pos_centered = pos.clone()
+            for graph_id in torch.unique(batch_mapping):
+                mask = batch_mapping == graph_id
+                if mask.sum() > 0:
+                    com = pos[mask].mean(dim=0, keepdim=True)
+                    pos_centered[mask] = pos[mask] - com
+            pos = pos_centered
+            batch.pos = pos_centered
+            encoder_batch = batch
 
         # Encode nodes
-        node_embeddings = self.encoder(x, pos, batch)
+        node_embeddings = self.encoder(x, pos, encoder_batch)
         if node_embeddings is None:
             raise ValueError("Encoder returned None embeddings")
 
@@ -362,7 +512,11 @@ class PretrainingESAModel(pl.LightningModule):
             )
 
             esa_output = self.esa_backbone(
-                h, edge_index, batch_mapping=batch_mapping, num_max_items=num_max_items, pos=pos
+                h,
+                attention_edge_index,
+                batch_mapping=batch_mapping,
+                num_max_items=num_max_items,
+                pos=pos,
             )
             graph_emb, node_emb_before_pma = esa_output
 
@@ -372,6 +526,23 @@ class PretrainingESAModel(pl.LightningModule):
                 h_node_level = node_emb_before_pma
 
             h = graph_emb
+
+        if graph_view is not None:
+            compact_node_embeddings = h_node_level
+            h_node_level = compact_node_embeddings.new_zeros(
+                (full_num_nodes, compact_node_embeddings.size(-1))
+            )
+            h_node_level.index_copy_(
+                0, graph_view.compact_to_full, compact_node_embeddings
+            )
+            h_node_level = PretrainingESAModel._inject_latent_slot_readouts(
+                self,
+                batch,
+                graph_view,
+                h_node_level,
+                full_slot_ids,
+                slot_readout_mode,
+            )
 
         return h, h_node_level
 
@@ -472,6 +643,9 @@ class PretrainingESAModel(pl.LightningModule):
         protein_keys = {'pdb', 'protein'}
         rna_keys = {'rna'}
         template_settings = getattr(self.config, 'masked_slot_template', None) or {}
+        neutral_slot_settings = getattr(
+            self.config, 'geometry_neutral_virtual_slots', None
+        ) or {}
         exclude_legacy_oxt = bool(
             getattr(
                 self.config,
@@ -487,11 +661,12 @@ class PretrainingESAModel(pl.LightningModule):
         if exclude_legacy_oxt:
             pos_codes = flatten_pos_codes(batch.pos_code, num_nodes)
 
-        # Deterministic generator for val/test so the mask is stable across
-        # validation cycles. Training stays stochastic.
+        # Deterministic generator for val/test so each validation batch keeps
+        # exactly the same masked blocks across every validation cycle and
+        # epoch. Training stays stochastic.
         gen = None
         if is_validation:
-            seed = int(batch_idx) * 100003 + int(getattr(self, 'current_epoch', 0))
+            seed = int(getattr(self.config, 'seed', 0)) + int(batch_idx) * 100003
             gen = torch.Generator(device='cpu')
             gen.manual_seed(seed)
 
@@ -534,6 +709,28 @@ class PretrainingESAModel(pl.LightningModule):
                         )
                         eligible_node_mask = legacy_oxt_eligible_node_mask(
                             batch.block_idx[indices], graph_pos_codes
+                        )
+                    needs_exact_slot_block = (
+                        neutral_slot_settings.get('enabled', False)
+                        and (
+                            (is_protein and neutral_slot_settings.get('protein', False))
+                            or (is_rna and neutral_slot_settings.get('rna', False))
+                        )
+                    )
+                    if needs_exact_slot_block:
+                        reason_bits = getattr(
+                            batch, 'template_reason_bits', None
+                        )
+                        if reason_bits is None or reason_bits.numel() != num_nodes:
+                            raise ValueError(
+                                "geometry-neutral block masking requires "
+                                "template_reason_bits runtime metadata"
+                            )
+                        exact_block_nodes = reason_bits[indices] == 0
+                        eligible_node_mask = (
+                            exact_block_nodes
+                            if eligible_node_mask is None
+                            else eligible_node_mask & exact_block_nodes
                         )
                     selection = select_whole_blocks(
                         batch.block_idx[indices],
@@ -690,7 +887,9 @@ class PretrainingESAModel(pl.LightningModule):
 
         if "short_range_distance" in self.config.pretraining_tasks:
             if hasattr(batch, 'edge_index') and hasattr(batch, 'pos'):
-                edge_index = batch.edge_index
+                edge_index = getattr(
+                    batch, 'physical_edge_index', batch.edge_index
+                )
                 pos = batch.pos
                 distances = torch.norm(pos[edge_index[1]] - pos[edge_index[0]], dim=1)
                 if is_training:
@@ -751,9 +950,12 @@ class PretrainingESAModel(pl.LightningModule):
 
             if "short_range_distance" in self.config.pretraining_tasks:
                 if hasattr(batch, 'edge_index') and batch.edge_index is not None and hasattr(batch, 'pos') and batch.pos is not None:
-                    edge_mask = node_mask[batch.edge_index[0]] & node_mask[batch.edge_index[1]]
+                    source_edge_index = getattr(
+                        batch, 'physical_edge_index', batch.edge_index
+                    )
+                    edge_mask = node_mask[source_edge_index[0]] & node_mask[source_edge_index[1]]
                     if edge_mask.sum() > 0:
-                        masked_edge_index = batch.edge_index[:, edge_mask]
+                        masked_edge_index = source_edge_index[:, edge_mask]
                         masked_pos = batch.pos[node_mask]
                         node_mapping = torch.zeros(batch.num_nodes, dtype=torch.long, device=device)
                         node_mapping[node_mask] = torch.arange(node_mask.sum(), device=device)
@@ -794,6 +996,8 @@ class PretrainingESAModel(pl.LightningModule):
                     ) + 1
                     if getattr(batch, 'template_node_mask', None) is not None:
                         masked_batch.template_node_mask = batch.template_node_mask[node_mask]
+                    if getattr(batch, 'geometry_valid_mask', None) is not None:
+                        masked_batch.geometry_valid_mask = batch.geometry_valid_mask[node_mask]
                     masked_node_emb = node_embeddings[node_mask]
                     long_range_loss = self.pretraining_tasks.long_range_distance_loss(masked_node_emb, masked_batch)
                     dtype_losses['long_range_distance'] = long_range_loss
@@ -819,6 +1023,13 @@ class PretrainingESAModel(pl.LightningModule):
                             masked_batch.original_types = batch.original_types[node_mask]
                         if hasattr(batch, 'masked_types') and batch.masked_types is not None:
                             masked_batch.masked_types = batch.masked_types[node_mask]
+                        if (
+                            hasattr(batch, 'domain_local_slot_ids')
+                            and batch.domain_local_slot_ids is not None
+                        ):
+                            masked_batch.domain_local_slot_ids = (
+                                batch.domain_local_slot_ids[node_mask]
+                            )
                         masked_node_emb = node_embeddings[node_mask]
                         try:
                             mlm_loss = self.pretraining_tasks.mlm_loss(masked_node_emb, masked_batch)
@@ -858,6 +1069,69 @@ class PretrainingESAModel(pl.LightningModule):
             type_losses[dtype] = dtype_losses
 
         return type_losses
+
+    def _audit_representation_gradient_norms(
+        self,
+        losses: dict,
+        node_embeddings: torch.Tensor,
+        batch_idx: int,
+    ) -> None:
+        """Measure each weighted task's gradient at the shared node states.
+
+        This is a diagnostic, not a loss term. Measuring at the shared ESA
+        output avoids extra backward passes through the FlashAttention kernel
+        while still showing the signal each task sends into the backbone.
+        """
+        settings = getattr(
+            self.config, "geometry_neutral_virtual_slots", None
+        ) or {}
+        max_batches = int(settings.get("gradient_audit_batches", 0))
+        if max_batches <= 0 or batch_idx >= max_batches:
+            return
+
+        weighted = {}
+        for name, loss in losses.items():
+            if not isinstance(loss, torch.Tensor) or not loss.requires_grad:
+                continue
+            if name in self.config.task_weights:
+                weight = self.config.task_weights[name]
+            elif name == "coordinate_denoising":
+                weight = self.config.task_weights.get(name, 1.0)
+            else:
+                continue
+            weighted[name] = float(weight) * loss
+
+        norms = {}
+        for name, weighted_loss in weighted.items():
+            gradient = torch.autograd.grad(
+                weighted_loss,
+                node_embeddings,
+                retain_graph=True,
+                allow_unused=True,
+            )[0]
+            norm = 0.0 if gradient is None else float(
+                torch.linalg.vector_norm(gradient.detach().float()).item()
+            )
+            norms[name] = norm
+            self.log(
+                f"gradient_audit_{name}_representation_l2",
+                norm,
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+            )
+
+        if norms and int(getattr(self, "global_rank", 0)) == 0:
+            total = sum(norms.values())
+            details = " | ".join(
+                f"{name}={value:.6f} ({value / total:.1%})"
+                if total > 0.0 else f"{name}={value:.6f}"
+                for name, value in norms.items()
+            )
+            print(
+                "GRADIENT AUDIT (weighted task L2 at shared node states; "
+                f"ratios are descriptive, not additive shares): {details}"
+            )
 
     # ------------------------------------------------------------------
     # Lightning hooks
@@ -918,7 +1192,20 @@ class PretrainingESAModel(pl.LightningModule):
             print(f"{'='*80}")
 
         graph_embeddings, node_embeddings = self.forward(batch)
+        for name, value in getattr(
+            batch, 'virtual_slot_graph_stats', {}
+        ).items():
+            self.log(
+                f"virtual_slot_graph_{name}",
+                float(value),
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+            )
         losses, total_loss = self._compute_pretraining_losses(batch, graph_embeddings, node_embeddings)
+        self._audit_representation_gradient_norms(
+            losses, node_embeddings, batch_idx
+        )
 
         for task_name, loss_value in losses.items():
             self.log(f"train_{task_name}_loss", loss_value, prog_bar=True, on_step=True, on_epoch=True, logger=True)
@@ -955,6 +1242,161 @@ class PretrainingESAModel(pl.LightningModule):
 
         return total_loss
 
+    @staticmethod
+    def _exact_masked_block_accuracy(
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        node_mask: torch.Tensor,
+        batch: object,
+    ) -> tuple[torch.Tensor, int]:
+        """All-real-slot accuracy over masked residue/nucleotide blocks."""
+        selected = torch.where(node_mask)[0]
+        if selected.numel() == 0:
+            return predictions.new_tensor(0.0, dtype=torch.float32), 0
+        ownership = torch.stack(
+            (batch.batch[selected].long(), batch.block_idx[selected].long()),
+            dim=1,
+        )
+        unique_owners = torch.unique(ownership, dim=0, sorted=True)
+        exact = []
+        for owner in unique_owners:
+            owner_nodes = selected[
+                (ownership[:, 0] == owner[0])
+                & (ownership[:, 1] == owner[1])
+            ]
+            exact.append(
+                (predictions[owner_nodes] == targets[owner_nodes]).all()
+            )
+        values = torch.stack(exact).float()
+        return values.mean(), int(values.numel())
+
+    def _virtual_slot_context_audit(
+        self,
+        batch: object,
+        batch_idx: int,
+        correct_node_embeddings: torch.Tensor,
+        correct_logits: torch.Tensor,
+    ) -> dict:
+        """Evaluate owner-context counterfactuals with identical weights/data.
+
+        This is validation-only and intentionally changes only the post-ESA
+        backbone readout relation. It answers two distinct questions:
+
+        * nonzero logit delta: does owner routing reach the prediction head?
+        * positive shuffled/removed CE increase: did training learn to use it?
+        """
+        settings = getattr(
+            self.config, "geometry_neutral_virtual_slots", None
+        ) or {}
+        max_batches = int(settings.get("context_audit_batches", 0))
+        if (
+            max_batches <= 0
+            or batch_idx >= max_batches
+            or getattr(batch, "target_slot_mask", None) is None
+        ):
+            return {}
+
+        target_slot_mask = batch.target_slot_mask.bool()
+        target_real_mask = batch.target_real_slot_mask.bool()
+        targets = batch.original_types.long()
+        correct_logits = correct_logits.detach()
+        correct_predictions = correct_logits.argmax(dim=-1)
+
+        graph_types = self._graph_dtype_list(batch) or []
+        domain_masks = {}
+        for domain, accepted in (
+            ("protein", {"pdb", "protein"}),
+            ("rna", {"rna"}),
+        ):
+            graph_flags = torch.tensor(
+                [str(value).lower() in accepted for value in graph_types],
+                dtype=torch.bool,
+                device=targets.device,
+            )
+            if graph_flags.numel():
+                domain_masks[domain] = graph_flags[batch.batch.long()]
+
+        audit = {}
+        readout_view = SimpleNamespace(
+            target_slot_mask=batch.target_slot_mask,
+            slot_readout_edge_index=batch.slot_readout_edge_index,
+        )
+        for mode in ("shuffled", "removed"):
+            alternate_nodes = PretrainingESAModel._inject_latent_slot_readouts(
+                self,
+                batch,
+                readout_view,
+                correct_node_embeddings,
+                batch.domain_local_slot_ids,
+                mode,
+            )
+            alternate_logits = self.pretraining_tasks.mlm_head(
+                alternate_nodes
+            ).detach()
+            alternate_predictions = alternate_logits.argmax(dim=-1)
+
+            all_support = int(target_slot_mask.sum().item())
+            if all_support:
+                audit[f"{mode}_all_slot_logit_delta"] = (
+                    float(
+                        (correct_logits[target_slot_mask]
+                         - alternate_logits[target_slot_mask])
+                        .abs()
+                        .mean()
+                        .item()
+                    ),
+                    all_support,
+                )
+
+            for domain, domain_mask in domain_masks.items():
+                real_mask = target_real_mask & domain_mask
+                real_support = int(real_mask.sum().item())
+                if real_support == 0:
+                    continue
+                correct_ce = F.cross_entropy(
+                    correct_logits[real_mask], targets[real_mask]
+                )
+                alternate_ce = F.cross_entropy(
+                    alternate_logits[real_mask], targets[real_mask]
+                )
+                correct_accuracy = (
+                    correct_predictions[real_mask] == targets[real_mask]
+                ).float().mean()
+                alternate_accuracy = (
+                    alternate_predictions[real_mask] == targets[real_mask]
+                ).float().mean()
+                correct_exact, block_support = self._exact_masked_block_accuracy(
+                    correct_predictions, targets, real_mask, batch
+                )
+                alternate_exact, _ = self._exact_masked_block_accuracy(
+                    alternate_predictions, targets, real_mask, batch
+                )
+
+                audit[f"{domain}_{mode}_real_ce_increase"] = (
+                    float((alternate_ce - correct_ce).item()),
+                    real_support,
+                )
+                audit[f"{domain}_{mode}_real_accuracy_drop"] = (
+                    float((correct_accuracy - alternate_accuracy).item()),
+                    real_support,
+                )
+                audit[f"{domain}_{mode}_real_exact_block_drop"] = (
+                    float((correct_exact - alternate_exact).item()),
+                    block_support,
+                )
+
+        for name, (value, support) in audit.items():
+            self.log(
+                f"val_context_audit/{name}",
+                value,
+                on_step=False,
+                on_epoch=True,
+                logger=True,
+                sync_dist=True,
+                batch_size=max(support, 1),
+            )
+        return audit
+
     def validation_step(self, batch, batch_idx):
         self._ensure_mlm_attributes(batch, batch_idx=batch_idx, is_validation=True)
         self._ensure_masked_slot_template(batch)
@@ -981,11 +1423,17 @@ class PretrainingESAModel(pl.LightningModule):
             # Domain metric callbacks consume these predictions immediately.
             # Reusing this forward avoids running the ESA backbone again in
             # each callback.
+            mlm_logits = self.pretraining_tasks.mlm_head(node_embeddings)
             outputs['mlm_preds_atomic_num'] = (
-                self.pretraining_tasks.mlm_head(node_embeddings)
-                .argmax(dim=1)
-                .detach()
-                .cpu()
+                mlm_logits.argmax(dim=1).detach().cpu()
+            )
+            outputs['virtual_slot_context_audit'] = (
+                self._virtual_slot_context_audit(
+                    batch,
+                    batch_idx,
+                    correct_node_embeddings=node_embeddings,
+                    correct_logits=mlm_logits,
+                )
             )
         return outputs
 

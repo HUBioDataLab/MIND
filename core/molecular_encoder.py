@@ -215,15 +215,16 @@ class UniversalMolecularEncoder(nn.Module):
         bond_edge_index = getattr(batch, 'bond_edge_index', None)
         if bond_edge_index is not None and bond_edge_index.numel() > 0:
             active_edges = bond_edge_index
-        else:
+        elif edge_distances is not None:
             assert hasattr(batch, 'edge_index') and batch.edge_index is not None, (
                 "Edge index is required for chemical coordination computation"
             )
-            if edge_distances is not None:
-                covalent_mask = (edge_distances <= 1.85) & (edge_distances > 0.5)
-                active_edges = batch.edge_index[:, covalent_mask]
-            else:
-                active_edges = batch.edge_index
+            covalent_mask = (edge_distances <= 1.85) & (edge_distances > 0.5)
+            active_edges = batch.edge_index[:, covalent_mask]
+        else:
+            raise ValueError(
+                "Chemical coordination computation requires either 'bond_edge_index' or 'edge_distances'"
+            )
 
         batch_idx = getattr(batch, 'batch', None)
         if batch_idx is not None:
@@ -315,17 +316,25 @@ class UniversalMolecularEncoder(nn.Module):
             mean_distances,               # Average close neighbor distance
         ], dim=-1)  # [n_graph, n_node, 5]
 
-        edge_types = x[edge_src] * self.config.atom_types + x[edge_dst]
+        # Only local spatial edges (<= cutoff_distance) contribute to node Gaussian RBF features
+        local_mask = (edge_distances <= self.config.cutoff_distance) & (edge_distances > 0.5)
+        if local_mask.any():
+            local_src = edge_src[local_mask]
+            local_dst = edge_dst[local_mask]
+            local_dists = edge_distances[local_mask]
+            local_types = x[local_src] * self.config.atom_types + x[local_dst]
 
-        edge_dist_3d = edge_distances.unsqueeze(0).unsqueeze(0)  # [1, 1, num_edges]
-        edge_type_3d = edge_types.unsqueeze(0).unsqueeze(0)      # [1, 1, num_edges]
+            local_dist_3d = local_dists.unsqueeze(0).unsqueeze(0)  # [1, 1, num_local_edges]
+            local_type_3d = local_types.unsqueeze(0).unsqueeze(0)  # [1, 1, num_local_edges]
 
-        edge_rbf_4d = self.gaussian_layer(edge_dist_3d, edge_type_3d)  # [1, 1, num_edges, gaussian_kernels]
-        edge_rbf = edge_rbf_4d.squeeze(0).squeeze(0)  # [num_edges, gaussian_kernels]
+            edge_rbf_4d = self.gaussian_layer(local_dist_3d, local_type_3d)
+            edge_rbf = edge_rbf_4d.squeeze(0).squeeze(0)
 
-        node_rbf_src = scatter_add(edge_rbf, edge_src, dim=0, dim_size=num_nodes)
-        node_rbf_dst = scatter_add(edge_rbf, edge_dst, dim=0, dim_size=num_nodes)
-        node_rbf_combined = node_rbf_src + node_rbf_dst
+            node_rbf_src = scatter_add(edge_rbf, local_src, dim=0, dim_size=num_nodes)
+            node_rbf_dst = scatter_add(edge_rbf, local_dst, dim=0, dim_size=num_nodes)
+            node_rbf_combined = node_rbf_src + node_rbf_dst
+        else:
+            node_rbf_combined = torch.zeros(num_nodes, self.config.gaussian_kernels, device=pos.device)
 
         gbf_feature, _ = to_dense_batch(node_rbf_combined, batch, fill_value=0)
 

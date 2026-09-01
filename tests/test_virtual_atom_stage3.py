@@ -498,7 +498,43 @@ def test_virtual_weighted_mlm_matches_other_group_formula_and_legacy_default():
     assert torch.allclose(weighted_tasks.mlm_loss(logits, data), expected)
 
 
-def _run_rna_block_masking(*, is_validation):
+def test_element_balanced_mlm_changes_only_real_sidechain_internal_weighting():
+    logits = torch.randn(6, 121, generator=torch.Generator().manual_seed(8_117))
+    targets = torch.tensor([6, 6, 8, 16, 7, VIRTUAL_ATOMIC_NUMBER])
+    # Protein ids 5..14 are sidechain slots; id 1 is backbone N.
+    slot_ids = torch.tensor([5, 6, 7, 8, 1, 9])
+    data = SimpleNamespace(
+        mlm_mask=torch.ones(6, dtype=torch.bool),
+        original_types=targets,
+        masked_types=torch.zeros(6, dtype=torch.long),
+        domain_local_slot_ids=slot_ids,
+    )
+    tasks = PretrainingTasks(
+        create_pretraining_config(
+            graph_dim=121,
+            hidden_dims=[121],
+            protein_block_mlm=True,
+            use_domain_local_slot_embedding=True,
+            virtual_atom_loss_weight=0.2,
+            geometry_neutral_virtual_slots={
+                "enabled": True,
+                "protein": True,
+                "rna": False,
+            },
+        )
+    )
+    tasks.mlm_head = torch.nn.Identity()
+
+    per_node = torch.nn.functional.cross_entropy(
+        logits, targets, reduction="none"
+    )
+    expected_real = per_node[:5].mean()
+    expected = expected_real + 0.2 * per_node[5]
+
+    assert torch.allclose(tasks.mlm_loss(logits, data), expected)
+
+
+def _run_rna_block_masking(*, is_validation, current_epoch=4):
     config = SimpleNamespace(
         pretraining_tasks=["mlm"],
         protein_block_mlm=True,
@@ -508,6 +544,7 @@ def _run_rna_block_masking(*, is_validation):
         mlm_mask_ratio=0.15,
     )
     harness = _MaskingHarness(config)
+    harness.current_epoch = current_epoch
     batch = _mixed_protein_rna_unimol_block_batch()
     before = copy.deepcopy(batch)
     torch.manual_seed(72_019)
@@ -553,6 +590,16 @@ def test_rna_block_mlm_training_masks_whole_nucleotides_reproducibly():
 
 def test_rna_block_mlm_validation_masks_whole_nucleotides_deterministically():
     _assert_rna_block_contract(is_validation=True)
+
+
+def test_validation_mask_is_stable_across_epochs():
+    first, _ = _run_rna_block_masking(
+        is_validation=True, current_epoch=0
+    )
+    later, _ = _run_rna_block_masking(
+        is_validation=True, current_epoch=37
+    )
+    assert torch.equal(first.mlm_mask, later.mlm_mask)
 
 
 def test_rna_block_mode_defers_sample_masking_to_batch_time():

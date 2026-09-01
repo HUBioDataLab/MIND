@@ -90,3 +90,23 @@ def test_chemical_coordination_with_explicit_bond_edge_index():
     assert coord_dense[0, 0].item() == 1.0
     assert coord_dense[0, 1].item() == 1.0
     assert coord_dense[0, 2].item() == 0.0
+
+
+def test_chemical_coordination_missing_distances_fails_loud():
+    config = PretrainingConfig(
+        hidden_dims=[256],
+        atom_types=121,
+        use_posenc=False,
+    )
+    encoder = UniversalMolecularEncoder(config)
+
+    x_dense = torch.tensor([[6, 6, 6]], dtype=torch.long)
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    batch_obj = SimpleNamespace(
+        edge_index=edge_index,
+        batch=torch.tensor([0, 0, 0], dtype=torch.long),
+        bond_edge_index=None,
+    )
+
+    with pytest.raises(ValueError, match="requires either 'bond_edge_index' or 'edge_distances'"):
+        encoder._compute_chemical_coordination(x_dense, batch_obj, pos=None, edge_distances=None)
