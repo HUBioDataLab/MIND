@@ -7,6 +7,7 @@ It adds random long-range edges at runtime, ensuring different edges each epoch.
 
 Key Features:
 - Protein-specific: Uses CA (alpha carbon) atoms only
+- Preserves all Tier-1 sequence neighbor edges (|block_i - block_j| <= sequence_neighbors_k)
 - Inverse distance³ weighting (matches preprocessing logic)
 - GPU-optimized: Vectorized operations
 - Synchronized edge_attr and deduplication/coalesce support
@@ -33,6 +34,7 @@ class ProteinDynamicRandomEdges:
         self,
         num_random_edges: int = 8,
         min_distance: float = 10.0,
+        sequence_neighbors_k: int = 3,
         seed: Optional[int] = None,
         ca_atom_idx: int = 1,
         use_inverse_distance_weighting: bool = True,
@@ -40,6 +42,7 @@ class ProteinDynamicRandomEdges:
     ):
         self.num_random_edges = num_random_edges
         self.min_distance = min_distance
+        self.sequence_neighbors_k = sequence_neighbors_k
         self.seed = seed
         self.ca_atom_idx = ca_atom_idx
         self.use_inverse_distance_weighting = use_inverse_distance_weighting
@@ -65,7 +68,44 @@ class ProteinDynamicRandomEdges:
         if dtype_str and dtype_str not in ('protein', 'pdb'):
             return data
 
-        # Extract CA atom indices supporting production pos_code, template_anchor_order, or legacy position_indices
+        # Fail-loud validation on protein production contracts
+        if dtype_str in ('protein', 'pdb'):
+            if not hasattr(data, 'pos') or data.pos is None or data.pos.numel() == 0:
+                raise ValueError(
+                    f"Protein Data object missing 'pos' coordinates: mol_id={getattr(data, 'mol_id', '?')}"
+                )
+            num_nodes = data.pos.size(0)
+
+            if not hasattr(data, 'edge_index') or data.edge_index is None:
+                raise ValueError(
+                    f"Protein Data object missing 'edge_index': mol_id={getattr(data, 'mol_id', '?')}"
+                )
+            if not hasattr(data, 'pos_code') or data.pos_code is None:
+                raise ValueError(
+                    f"Protein Data object missing 'pos_code' contract: mol_id={getattr(data, 'mol_id', '?')}"
+                )
+            if len(data.pos_code) != num_nodes:
+                raise ValueError(
+                    f"Protein 'pos_code' length ({len(data.pos_code)}) does not match atom count ({num_nodes}): mol_id={getattr(data, 'mol_id', '?')}"
+                )
+            if not hasattr(data, 'block_idx') or data.block_idx is None:
+                raise ValueError(
+                    f"Protein Data object missing 'block_idx' contract: mol_id={getattr(data, 'mol_id', '?')}"
+                )
+            if data.block_idx.numel() != num_nodes:
+                raise ValueError(
+                    f"Protein 'block_idx' length ({data.block_idx.numel()}) does not match atom count ({num_nodes}): mol_id={getattr(data, 'mol_id', '?')}"
+                )
+            if not hasattr(data, 'entity_idx') or data.entity_idx is None:
+                raise ValueError(
+                    f"Protein Data object missing 'entity_idx' contract: mol_id={getattr(data, 'mol_id', '?')}"
+                )
+            if data.entity_idx.numel() != num_nodes:
+                raise ValueError(
+                    f"Protein 'entity_idx' length ({data.entity_idx.numel()}) does not match atom count ({num_nodes}): mol_id={getattr(data, 'mol_id', '?')}"
+                )
+
+        # Extract CA atom indices supporting production pos_code or template_anchor_order
         if hasattr(data, 'pos_code') and data.pos_code is not None:
             pos_codes = data.pos_code
             if isinstance(pos_codes, torch.Tensor):
@@ -77,33 +117,38 @@ class ProteinDynamicRandomEdges:
             )
         elif hasattr(data, 'template_anchor_order') and data.template_anchor_order is not None:
             ca_indices = torch.where(data.template_anchor_order == 1)[0]
-        elif hasattr(data, 'position_indices') and data.position_indices is not None:
-            ca_indices = torch.where(data.position_indices == self.ca_atom_idx)[0]
         else:
             if dtype_str in ('protein', 'pdb'):
                 raise ValueError(
-                    f"Protein Data object missing position metadata ('pos_code', 'template_anchor_order', or 'position_indices'): mol_id={getattr(data, 'mol_id', '?')}"
+                    f"Protein Data object missing position metadata ('pos_code' or 'template_anchor_order'): mol_id={getattr(data, 'mol_id', '?')}"
                 )
             return data
 
         if len(ca_indices) < 2:
             return data  # Too few CA atoms for random edges
 
-        # Remove existing random edges (Tier 3) keeping edge_index and edge_attr in exact sync
+        block_idx = getattr(data, 'block_idx', None)
+        entity_idx = getattr(data, 'entity_idx', None)
+
+        # Remove existing random edges (Tier 3) keeping edge_index and edge_attr in exact sync and preserving Tier 1
         if self.replace_existing_random_edges:
             data.edge_index, data.edge_attr = self._filter_existing_edges(
                 data.edge_index,
                 getattr(data, 'edge_attr', None),
                 data.pos,
                 ca_indices,
-                self.min_distance
+                self.min_distance,
+                block_idx=block_idx,
+                entity_idx=entity_idx,
             )
 
         # Generate random edges
         random_edges = self._generate_random_edges(
             positions=data.pos,
             ca_indices=ca_indices,
-            existing_edges=data.edge_index
+            existing_edges=data.edge_index,
+            block_idx=block_idx,
+            entity_idx=entity_idx,
         )
 
         if random_edges.size(1) > 0:
@@ -131,7 +176,9 @@ class ProteinDynamicRandomEdges:
         self,
         positions: torch.Tensor,
         ca_indices: torch.Tensor,
-        existing_edges: torch.Tensor
+        existing_edges: torch.Tensor,
+        block_idx: Optional[torch.Tensor] = None,
+        entity_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Generate random long-range edges between CA atoms."""
         device = positions.device
@@ -144,6 +191,9 @@ class ProteinDynamicRandomEdges:
             for i in range(len(src_edges)):
                 existing_edge_set.add((src_edges[i], dst_edges[i]))
 
+        ca_blocks = block_idx[ca_indices] if block_idx is not None else None
+        ca_entities = entity_idx[ca_indices] if entity_idx is not None else None
+
         edges = []
         for i in range(num_ca):
             ca_idx = ca_indices[i].item()
@@ -151,6 +201,11 @@ class ProteinDynamicRandomEdges:
             distances = torch.norm(ca_positions - current_pos, dim=1)
 
             valid_mask = (distances >= self.min_distance) & (torch.arange(num_ca, device=device) != i)
+            if ca_blocks is not None:
+                same_entity = (ca_entities == ca_entities[i]) if ca_entities is not None else torch.ones_like(valid_mask)
+                is_seq = same_entity & ((ca_blocks - ca_blocks[i]).abs() <= self.sequence_neighbors_k)
+                valid_mask &= ~is_seq
+
             valid_indices = torch.where(valid_mask)[0]
             if len(valid_indices) == 0:
                 continue
@@ -185,9 +240,11 @@ class ProteinDynamicRandomEdges:
         edge_attr: Optional[torch.Tensor],
         positions: torch.Tensor,
         ca_indices: torch.Tensor,
-        min_distance: float
+        min_distance: float,
+        block_idx: Optional[torch.Tensor] = None,
+        entity_idx: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Remove existing long-range CA-CA edges from both edge_index and edge_attr."""
+        """Remove existing long-range CA-CA edges while strictly preserving Tier-1 sequence edges."""
         if edge_index.size(1) == 0:
             return edge_index, edge_attr
 
@@ -199,8 +256,18 @@ class ProteinDynamicRandomEdges:
         src, dst = edge_index[0], edge_index[1]
         both_ca = is_ca[src] & is_ca[dst]
 
+        # Check sequence neighbor status (Tier 1)
+        if block_idx is not None:
+            same_entity = (entity_idx[src] == entity_idx[dst]) if entity_idx is not None else torch.ones_like(both_ca)
+            block_diff = (block_idx[src] - block_idx[dst]).abs()
+            is_seq_neighbor = same_entity & (block_diff <= self.sequence_neighbors_k)
+        else:
+            is_seq_neighbor = torch.zeros_like(both_ca)
+
         dists = torch.norm(positions[src] - positions[dst], dim=-1)
-        keep_mask = ~(both_ca & (dists >= min_distance))
+        # An edge is Tier 3 (and thus subject to removal) ONLY if both are CA, dist >= min_distance, AND NOT a Tier-1 sequence neighbor!
+        is_tier3 = both_ca & (dists >= min_distance) & (~is_seq_neighbor)
+        keep_mask = ~is_tier3
 
         filtered_edge_index = edge_index[:, keep_mask]
         filtered_edge_attr = edge_attr[keep_mask] if edge_attr is not None else None
@@ -211,6 +278,7 @@ class ProteinDynamicRandomEdges:
             f"{self.__class__.__name__}("
             f"num_random_edges={self.num_random_edges}, "
             f"min_distance={self.min_distance}, "
+            f"sequence_neighbors_k={self.sequence_neighbors_k}, "
             f"seed={self.seed}, "
             f"ca_atom_idx={self.ca_atom_idx}, "
             f"use_inverse_distance_weighting={self.use_inverse_distance_weighting}, "
@@ -227,7 +295,9 @@ class OptimizedProteinDynamicRandomEdges(ProteinDynamicRandomEdges):
         self,
         positions: torch.Tensor,
         ca_indices: torch.Tensor,
-        existing_edges: torch.Tensor
+        existing_edges: torch.Tensor,
+        block_idx: Optional[torch.Tensor] = None,
+        entity_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """GPU-optimized random edge generation using vectorized operations."""
         device = positions.device
@@ -240,6 +310,14 @@ class OptimizedProteinDynamicRandomEdges(ProteinDynamicRandomEdges):
         candidate_mask = torch.ones_like(dist_matrix, dtype=torch.bool)
         candidate_mask.fill_diagonal_(False)
         candidate_mask &= (dist_matrix >= self.min_distance)
+
+        if block_idx is not None:
+            ca_blocks = block_idx[ca_indices]
+            ca_entities = entity_idx[ca_indices] if entity_idx is not None else None
+            same_entity = (ca_entities.unsqueeze(0) == ca_entities.unsqueeze(1)) if ca_entities is not None else torch.ones_like(candidate_mask)
+            block_diff = (ca_blocks.unsqueeze(0) - ca_blocks.unsqueeze(1)).abs()
+            is_seq = same_entity & (block_diff <= self.sequence_neighbors_k)
+            candidate_mask &= ~is_seq
 
         edges = []
         for i in range(num_ca):
@@ -274,17 +352,20 @@ def add_protein_dynamic_random_edges(
     data: Data,
     num_random_edges: int = 8,
     min_distance: float = 10.0,
+    sequence_neighbors_k: int = 3,
     use_gpu_optimized: bool = True
 ) -> Data:
     """Convenience function to add dynamic random edges to a protein Data object."""
     if use_gpu_optimized:
         transform = OptimizedProteinDynamicRandomEdges(
             num_random_edges=num_random_edges,
-            min_distance=min_distance
+            min_distance=min_distance,
+            sequence_neighbors_k=sequence_neighbors_k,
         )
     else:
         transform = ProteinDynamicRandomEdges(
             num_random_edges=num_random_edges,
-            min_distance=min_distance
+            min_distance=min_distance,
+            sequence_neighbors_k=sequence_neighbors_k,
         )
     return transform(data)
