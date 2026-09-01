@@ -154,7 +154,15 @@ class UniversalMolecularEncoder(nn.Module):
         encoded = self._encode_molecule_features(x)
 
         if self.domain_local_slot_embedding is not None:
-            slot_ids = build_domain_local_slot_ids(batch, x.size(0), x.device)
+            slot_ids = getattr(batch, "domain_local_slot_ids", None)
+            if slot_ids is None:
+                slot_ids = build_domain_local_slot_ids(batch, x.size(0), x.device)
+            else:
+                slot_ids = slot_ids.to(device=x.device, dtype=torch.long)
+                if slot_ids.numel() != x.size(0):
+                    raise ValueError(
+                        "domain_local_slot_ids must contain one id per encoder node"
+                    )
             encoded = encoded + self.domain_local_slot_embedding(slot_ids)
 
         # Add 3D geometric features if available
@@ -198,55 +206,46 @@ class UniversalMolecularEncoder(nn.Module):
 
         return self.molecule_encoder(combined_features)
 
-    def _compute_chemical_coordination(self, x_dense, batch):
-        """Compute true chemical coordination numbers from molecular graph topology"""
+    def _compute_chemical_coordination(self, x_dense, batch, pos=None, edge_distances=None):
+        """Compute true chemical coordination numbers from molecular graph topology or covalent bond distance."""
         batch_size = x_dense.size(0)
         max_nodes = x_dense.size(1)
         device = x_dense.device
 
-        assert hasattr(batch, 'edge_index') and batch.edge_index is not None, "Edge index is required for chemical coordination computation"
-        edge_index = batch.edge_index
+        bond_edge_index = getattr(batch, 'bond_edge_index', None)
+        if bond_edge_index is not None and bond_edge_index.numel() > 0:
+            active_edges = bond_edge_index
+        else:
+            assert hasattr(batch, 'edge_index') and batch.edge_index is not None, (
+                "Edge index is required for chemical coordination computation"
+            )
+            if edge_distances is not None:
+                covalent_mask = (edge_distances <= 1.85) & (edge_distances > 0.5)
+                active_edges = batch.edge_index[:, covalent_mask]
+            else:
+                active_edges = batch.edge_index
+
         batch_idx = getattr(batch, 'batch', None)
-
         if batch_idx is not None:
-            src, dst = edge_index[0], edge_index[1]
+            if active_edges.numel() > 0:
+                src, dst = active_edges[0], active_edges[1]
+                num_nodes = len(batch_idx)
+                coordination_sparse = torch.zeros(num_nodes, device=device, dtype=torch.float)
+                coordination_sparse.scatter_add_(0, src, torch.ones_like(src, dtype=torch.float))
+            else:
+                coordination_sparse = torch.zeros(len(batch_idx), device=device, dtype=torch.float)
 
-            unique_edge_mask = src < dst
-            if unique_edge_mask.sum() == 0:
-                unique_edge_mask = torch.ones_like(src, dtype=torch.bool)
-
-            unique_src = src[unique_edge_mask]
-            unique_dst = dst[unique_edge_mask]
-
-            num_nodes = len(batch_idx)
-            coordination_sparse = torch.zeros(num_nodes, device=device, dtype=torch.float)
-            coordination_sparse.scatter_add_(0, unique_src, torch.ones_like(unique_src, dtype=torch.float))
-            coordination_sparse.scatter_add_(0, unique_dst, torch.ones_like(unique_dst, dtype=torch.float))
-
-            coordination_dense = torch.zeros(batch_size, max_nodes, device=device)
-            node_idx = 0
-            for graph_idx in range(batch_size):
-                nodes_in_graph = (batch_idx == graph_idx).sum().item()
-                if nodes_in_graph > 0:
-                    end_idx = node_idx + nodes_in_graph
-                    actual_nodes = min(nodes_in_graph, max_nodes)
-                    coordination_dense[graph_idx, :actual_nodes] = coordination_sparse[node_idx:node_idx + actual_nodes]
-                node_idx += nodes_in_graph
-
+            coordination_dense, _ = to_dense_batch(
+                coordination_sparse, batch_idx, fill_value=0, max_num_nodes=max_nodes
+            )
             return coordination_dense
         else:
-            src, dst = edge_index[0], edge_index[1]
-            unique_edge_mask = src < dst
-            if unique_edge_mask.sum() == 0:
-                unique_edge_mask = torch.ones_like(src, dtype=torch.bool)
-
-            unique_src = src[unique_edge_mask]
-            unique_dst = dst[unique_edge_mask]
-
-            coordination = torch.zeros(max_nodes, device=device, dtype=torch.float)
-            coordination.scatter_add_(0, unique_src, torch.ones_like(unique_src, dtype=torch.float))
-            coordination.scatter_add_(0, unique_dst, torch.ones_like(unique_dst, dtype=torch.float))
-
+            if active_edges.numel() > 0:
+                src, dst = active_edges[0], active_edges[1]
+                coordination = torch.zeros(max_nodes, device=device, dtype=torch.float)
+                coordination.scatter_add_(0, src, torch.ones_like(src, dtype=torch.float))
+            else:
+                coordination = torch.zeros(max_nodes, device=device, dtype=torch.float)
             return coordination.unsqueeze(0).expand(batch_size, -1)
 
     def _compute_geometric_features(self, x, pos, batch, batch_obj=None):
@@ -268,7 +267,9 @@ class UniversalMolecularEncoder(nn.Module):
         edge_src, edge_dst = edge_index[0], edge_index[1]
         edge_distances = torch.norm(pos[edge_src] - pos[edge_dst], dim=1)  # [num_edges]
 
-        chemical_coordination = self._compute_chemical_coordination(x_dense, batch_obj)
+        chemical_coordination = self._compute_chemical_coordination(
+            x_dense, batch_obj, pos=pos, edge_distances=edge_distances
+        )
 
         close_cutoff = getattr(self.config, 'close_cutoff', 3.0)
         close_mask = (edge_distances < close_cutoff) & (edge_distances > 0.5)
@@ -340,5 +341,21 @@ class UniversalMolecularEncoder(nn.Module):
 
         # Convert back to sparse format
         geometric_features = geometric_features[batch_mask]
+
+        # A zero-valued raw feature vector still produces the learned bias of
+        # coordinate_projection. Explicitly remove that bias from masked query
+        # slots, which are active attention nodes but have no input geometry.
+        geometry_valid_mask = getattr(batch_obj, "geometry_valid_mask", None)
+        if geometry_valid_mask is not None:
+            geometry_valid_mask = geometry_valid_mask.to(
+                device=geometric_features.device, dtype=torch.bool
+            )
+            if geometry_valid_mask.numel() != geometric_features.size(0):
+                raise ValueError(
+                    "geometry_valid_mask must contain one value per encoder node"
+                )
+            geometric_features = geometric_features.masked_fill(
+                ~geometry_valid_mask.unsqueeze(1), 0.0
+            )
 
         return geometric_features
