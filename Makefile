@@ -22,10 +22,14 @@ GPU ?= auto
 CONFIG ?= m
 LOG ?=
 EPOCHS ?=
+SEED ?=
 PYTEST_ARGS ?= tests --ignore=tests/test_multigpu_training.py
 
 ifneq ($(strip $(EPOCHS)),)
   TRAIN_EPOCH_ARGS := --max-epochs $(EPOCHS)
+endif
+ifneq ($(strip $(SEED)),)
+  TRAIN_SEED_ARGS := --seed $(SEED)
 endif
 
 # Map single-letter shortcuts to full config names
@@ -58,6 +62,11 @@ ifeq ($(CONFIG_IS_FAST),1)
 else
   LOG_FILE := $(LOG_MONTH_DIR)/$(_LOG_BASE)_$(_LOG_DATETIME).log
 endif
+
+# A unique checkpoint directory is essential when independent validation runs
+# share the machine. The old single default directory allowed concurrent jobs
+# to overwrite each other's last.ckpt.
+OUTPUT_DIR ?= outputs/$(_LOG_BASE)_$(_LOG_DATETIME)
 
 MIN_VRAM_MB ?= 15000
 
@@ -104,12 +113,16 @@ train:
 	@echo "  GPU:    $(RESOLVED_GPU) $(if $(filter auto,$(GPU)),(auto-selected))"
 	@echo "  Config: $(CONFIG_FILE)"
 	@echo "  Epochs: $(if $(strip $(EPOCHS)),$(EPOCHS),config default)"
+	@echo "  Seed:   $(if $(strip $(SEED)),$(SEED),config default)"
 	@echo "  Log:    $(LOG_FILE)"
+	@echo "  Output: $(OUTPUT_DIR)"
 	@echo "====================="
 	@mkdir -p $(LOG_MONTH_DIR)
 	$(CONDA_RUN) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -m core.train_pretrain \
 		--config-yaml-path $(CONFIG_FILE) \
 		$(TRAIN_EPOCH_ARGS) \
+		$(TRAIN_SEED_ARGS) \
+		--output-dir $(OUTPUT_DIR) \
 		> $(LOG_FILE) 2>&1 &
 	@echo "PID: $$!"
 	@echo "Follow: tail -f $(LOG_FILE)"
@@ -176,6 +189,7 @@ help:
 	@echo "    make train CONFIG=m LOG=run1         Full multidomain training"
 	@echo "    make train CONFIG=f                  Fast sanity check (~10 min)"
 	@echo "    make train CONFIG=f EPOCHS=1         Override config epoch count"
+	@echo "    make train CONFIG=f SEED=43          Independent seeded run"
 	@echo "    make test-unit                       Run the complete unit-test suite"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"

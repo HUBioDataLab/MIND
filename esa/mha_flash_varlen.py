@@ -19,6 +19,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.init import xavier_normal_
+from torch_geometric.utils import coalesce, softmax
 from flash_attn.flash_attn_interface import flash_attn_varlen_func
 from flash_attn.bert_padding import unpad_input, pad_input
 
@@ -124,6 +125,84 @@ class MABFlashVarlen(nn.Module):
             out = out.to(input_dtype)
         
         return out
+
+    def forward_graph(self, X, edge_index, batch_mapping):
+        """Sparse graph-local self-attention over directed ``edge_index``.
+
+        This is the arbitrary-adjacency counterpart to FlashAttention varlen.
+        It reuses the exact Q/K/V/O projections and only materializes one
+        attention score per graph edge, avoiding dense padded masks.
+        """
+        if X.ndim != 3:
+            raise ValueError("graph attention expects dense X shaped [B, L, D]")
+        if edge_index.ndim != 2 or edge_index.size(0) != 2:
+            raise ValueError("edge_index must have shape [2, E]")
+
+        batch_size, max_seq_len, _ = X.shape
+        num_nodes = int(batch_mapping.numel())
+        if num_nodes == 0:
+            return torch.zeros_like(X)
+        batch_mapping = batch_mapping.to(device=X.device, dtype=torch.long)
+        edge_index = edge_index.to(device=X.device, dtype=torch.long)
+        if int(batch_mapping.min().item()) < 0 or int(batch_mapping.max().item()) >= batch_size:
+            raise ValueError("batch_mapping contains a graph id outside dense X")
+        if batch_mapping.numel() > 1 and bool(
+            (batch_mapping[1:] < batch_mapping[:-1]).any()
+        ):
+            raise ValueError("batch_mapping must be grouped by graph")
+        if edge_index.numel() and (
+            int(edge_index.min().item()) < 0
+            or int(edge_index.max().item()) >= num_nodes
+        ):
+            raise ValueError("edge_index contains a node outside batch_mapping")
+
+        counts = torch.bincount(batch_mapping, minlength=batch_size)
+        graph_offsets = torch.zeros(
+            batch_size + 1, dtype=torch.long, device=X.device
+        )
+        torch.cumsum(counts, dim=0, out=graph_offsets[1:])
+        local_indices = (
+            torch.arange(num_nodes, device=X.device)
+            - graph_offsets[batch_mapping]
+        )
+        if int(local_indices.max().item()) >= max_seq_len:
+            raise ValueError("dense X is shorter than a graph in batch_mapping")
+
+        sparse_x = X[batch_mapping, local_indices]
+        head_dim = self.dim_V // self.num_heads
+        if self.dim_V % self.num_heads != 0:
+            raise ValueError("Embedding dim is not divisible by nheads")
+        query = self.fc_q(sparse_x).view(num_nodes, self.num_heads, head_dim)
+        key = self.fc_k(sparse_x).view(num_nodes, self.num_heads, head_dim)
+        value = self.fc_v(sparse_x).view(num_nodes, self.num_heads, head_dim)
+
+        attended = torch.zeros_like(value)
+        if edge_index.numel():
+            # A dense binary adjacency mask ignores duplicate COO entries, so
+            # coalesce them here to preserve exactly the same semantics.
+            edge_index = coalesce(edge_index, num_nodes=num_nodes)
+            source, target = edge_index
+            if bool(
+                (batch_mapping[source] != batch_mapping[target]).any()
+            ):
+                raise ValueError("graph attention received a cross-graph edge")
+            scores = (query[source] * key[target]).sum(dim=-1)
+            scores = scores * (head_dim ** -0.5)
+            weights = softmax(scores, source, num_nodes=num_nodes)
+            weights = F.dropout(
+                weights,
+                p=self.dropout_p,
+                training=self.training,
+            )
+            weights = weights.to(dtype=value.dtype)
+            messages = weights.unsqueeze(-1) * value[target]
+            attended.index_add_(0, source, messages)
+
+        out_sparse = attended.reshape(num_nodes, self.dim_V)
+        out_sparse = out_sparse + F.mish(self.fc_o(out_sparse))
+        out = X.new_zeros((batch_size, max_seq_len, self.dim_V))
+        out[batch_mapping, local_indices] = out_sparse.to(dtype=out.dtype)
+        return out
     
     
     def _forward_varlen(self, Q, K, seq_lens, adj_mask=None):
@@ -136,6 +215,12 @@ class MABFlashVarlen(nn.Module):
             seq_lens: tensor of shape [batch_size] containing actual lengths
             adj_mask: Not fully supported yet in varlen mode (TODO)
         """
+        if adj_mask is not None:
+            raise ValueError(
+                "flash-varlen attention does not support arbitrary adjacency "
+                "masks; route graph-local attention through forward_graph"
+            )
+
         E_total = self.dim_V
         assert E_total % self.num_heads == 0, "Embedding dim is not divisible by nheads"
         head_dim = E_total // self.num_heads
@@ -152,8 +237,8 @@ class MABFlashVarlen(nn.Module):
         
         # Project to Q, K, V
         Q = self.fc_q(Q)  # [batch_size, max_seq_len, dim_V]
+        V = self.fc_v(K)  # [batch_size, max_seq_len, dim_V]
         K = self.fc_k(K)  # [batch_size, max_seq_len, dim_V]
-        V = self.fc_v(K)  # Note: V comes from K in your original implementation
         
         # Reshape for multi-head attention
         Q = Q.view(batch_size, max_seq_len, self.num_heads, head_dim)
@@ -212,6 +297,9 @@ class SABFlashVarlen(nn.Module):
     
     def forward(self, X, seq_lens=None, adj_mask=None):
         return self.mab(X, X, seq_lens=seq_lens, adj_mask=adj_mask)
+
+    def forward_graph(self, X, edge_index, batch_mapping):
+        return self.mab.forward_graph(X, edge_index, batch_mapping)
 
 
 class PMAFlashVarlen(nn.Module):

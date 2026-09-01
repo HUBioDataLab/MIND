@@ -434,13 +434,20 @@ class SABComplete(nn.Module):
             counts = torch.bincount(batch_mapping, minlength=batch_size)
             seq_lens = counts.to(torch.int32)
             
-            # Note: adj_mask is not fully supported in flash_varlen mode yet
-            # So we pass None to avoid issues
             if self.idx == 1:
-                # For MAB (idx=1), we might want adj_mask, but flash_varlen doesn't support it yet
-                # TODO: Implement adj_mask support in flash_varlen or fall back to padded mode
-                out_attn = self.sab(X, seq_lens=seq_lens, adj_mask=None)
+                # M layers are the graph-local message-passing stages. The
+                # sparse path respects physical edges plus the directed
+                # query->own-backbone owner relation without materializing a
+                # padded [B,N,N] mask.
+                out_attn = self.sab.forward_graph(
+                    X,
+                    edge_index=edge_index,
+                    batch_mapping=batch_mapping,
+                )
             else:
+                # S layers deliberately remain global within each molecule.
+                # By this point M has attached each geometry-free query to its
+                # own residue/nucleotide context.
                 out_attn = self.sab(X, seq_lens=seq_lens, adj_mask=None)
         elif self.use_equivariant:
             # EquivariantSAB: pass geometric information
