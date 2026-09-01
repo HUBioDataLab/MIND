@@ -7,6 +7,7 @@ from torch import nn
 from torch_geometric.data import Batch, Data
 
 from core.masked_slot_mapping import attach_runtime_template_metadata
+from core.molecular_encoder import UniversalMolecularEncoder
 from core.pretraining_config import create_pretraining_config
 from core.pretraining_model import PretrainingESAModel
 from core.pretraining_tasks import PretrainingTasks
@@ -553,6 +554,80 @@ class GeometryNeutralVirtualSlotTest(unittest.TestCase):
             tuple(edge) in physical_pairs
             for edge in expected_unimol_edges.t().tolist()
         ))
+
+    def test_model_forward_mixed_batch_preserves_unimol_compact_bonds(self):
+        protein = _two_alanine_batch()
+        protein_data = Data(**{
+            key: value
+            for key, value in vars(protein).items()
+            if key not in ("batch", "num_graphs", "num_nodes")
+        })
+        protein_data.bond_edge_index = torch.empty((2, 0), dtype=torch.long)
+        # UniMol small molecule with 3 atoms and explicit chemical bond between atom 0 and 1
+        unimol_bond = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+        unimol_data = Data(
+            z=torch.tensor([6, 6, 8]),
+            x=torch.tensor([6, 6, 8]),
+            original_types=torch.tensor([6, 6, 8]),
+            masked_types=torch.tensor([6, 6, 8]),
+            pos=torch.tensor(
+                [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [0.0, 3.0, 0.0]]
+            ),
+            edge_index=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]]),
+            bond_edge_index=unimol_bond,
+            block_idx=torch.arange(3),
+            entity_idx=torch.zeros(3, dtype=torch.long),
+            mlm_mask=torch.tensor([False, False, False]),
+            pos_code=["C", "C", "O"],
+            dataset_type="unimol",
+        )
+        unimol_data = attach_runtime_template_metadata(unimol_data)
+        batch = Batch.from_data_list([protein_data, unimol_data])
+
+        config = create_pretraining_config(
+            pretraining_tasks=["mlm"],
+            protein_block_mlm=True,
+            graph_dim=64,
+            hidden_dims=[64],
+            atom_types=121,
+            cutoff_distance=5.0,
+            use_posenc=False,
+            use_domain_local_slot_embedding=True,
+            geometry_neutral_virtual_slots={
+                "enabled": True,
+                "protein": True,
+                "rna": False,
+            },
+        )
+
+        view = build_geometry_neutral_graph_view(batch, config)
+        active_unimol_nodes = view.compact_to_full[view.compact_to_full >= protein_data.num_nodes]
+        self.assertEqual(len(active_unimol_nodes), 3)
+
+        # Full UniMol bonds (28 <-> 29) must map to compact bonds
+        compact_bond = view.full_to_compact[batch.bond_edge_index]
+        valid_bond_mask = (compact_bond[0] >= 0) & (compact_bond[1] >= 0)
+        compact_bond_edges = compact_bond[:, valid_bond_mask]
+        self.assertEqual(compact_bond_edges.size(1), 2)
+
+        # Test encoder coordination calculation on compact batch
+        encoder = UniversalMolecularEncoder(config)
+        x_dense = batch.z[view.compact_to_full].unsqueeze(0)
+        encoder_batch = SimpleNamespace(
+            batch=batch.batch[view.compact_to_full],
+            block_idx=batch.block_idx[view.compact_to_full],
+            edge_index=view.compact_edge_index,
+            bond_edge_index=compact_bond_edges,
+            geometry_valid_mask=view.geometry_valid_mask[view.compact_to_full],
+            domain_local_slot_ids=torch.zeros(view.compact_to_full.numel(), dtype=torch.long),
+            dataset_type=getattr(batch, 'dataset_type', None),
+            num_graphs=getattr(batch, 'num_graphs', 2),
+        )
+        coord = encoder._compute_chemical_coordination(x_dense, encoder_batch)
+        # UniMol is graph 1 in the batch: Atom 0 and 1 have bond -> coord = 1.0; Atom 2 has no bond -> coord = 0.0
+        self.assertEqual(coord[1, 0].item(), 1.0)
+        self.assertEqual(coord[1, 1].item(), 1.0)
+        self.assertEqual(coord[1, 2].item(), 0.0)
 
     def test_config_rejects_old_and_new_coordinate_schemes_together(self):
         with self.assertRaisesRegex(ValueError, "cannot be enabled together"):

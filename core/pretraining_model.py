@@ -344,10 +344,19 @@ class PretrainingESAModel(pl.LightningModule):
             # ESA sees only the physical graph. Owner routing is a post-ESA
             # latent readout and therefore cannot affect attention geometry.
             attention_edge_index = graph_view.compact_attention_edge_index
+            bond_edge_index = getattr(batch, 'bond_edge_index', None)
+            if bond_edge_index is not None and bond_edge_index.numel() > 0:
+                compact_bond = graph_view.full_to_compact[bond_edge_index]
+                valid_bond_mask = (compact_bond[0] >= 0) & (compact_bond[1] >= 0)
+                compact_bond_edge_index = compact_bond[:, valid_bond_mask]
+            else:
+                compact_bond_edge_index = None
+
             encoder_batch = SimpleNamespace(
                 batch=batch_mapping,
                 block_idx=batch.block_idx[active],
                 edge_index=edge_index,
+                bond_edge_index=compact_bond_edge_index,
                 geometry_valid_mask=graph_view.geometry_valid_mask[active],
                 domain_local_slot_ids=full_slot_ids[active],
                 dataset_type=getattr(batch, 'dataset_type', None),
