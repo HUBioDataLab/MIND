@@ -1,3 +1,4 @@
+
 import sys
 import os
 import warnings
@@ -1070,8 +1071,8 @@ def main():
         dataset_name=config.dataset,
         dataset_dir=config.dataset_download_dir,
         output_dir=args.output_dir,
-        wandb_project=config.wandb_project_name,
-        wandb_run_name=config.wandb_run_name
+        wandb_project=getattr(config, 'wandb_project_name', 'MIND-Project-Pretraining'),
+        wandb_run_name=getattr(config, 'wandb_run_name', 'multidomain-pretrain')
     )
 
     print("🎉 Training completed successfully!")

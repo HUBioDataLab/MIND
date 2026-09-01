@@ -81,10 +81,12 @@ papers/
 #Agents
 .codex
 
-#Personal notes
+# Local documentation & notes
+Docs/
+MIGRATION.md
+RNA_VIRTUAL_FAST_EXPERIMENT_HANDOFF.md
+VIRTUAL_ATOM_IMPLEMENTATION_PLAN.md
 CURRENT_TODOS.md
-
-# Local Codex instructions
 CODEX.md
 
 # Other codes

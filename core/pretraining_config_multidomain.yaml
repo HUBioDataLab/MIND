@@ -19,8 +19,7 @@
 # -------------------------
 seed: 42
 out_path: "outputs/multidomain_pretrain"
-wandb_project_name: "MIND-Project-Pretraining"
-wandb_run_name: "multidomain-100ep-pdb-unimol-rna"
+wandb_run_name: "multidomain-full-geometry-neutral-v1"
 use_wandb: true
 
 # -------------------------

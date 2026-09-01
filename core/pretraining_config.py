@@ -256,6 +256,8 @@ class PretrainingConfig:
 
     # Experiment logger is explicit so a config cannot silently lose W&B visibility.
     use_wandb: bool = False
+    wandb_project_name: Optional[str] = "MIND-Project-Pretraining"
+    wandb_run_name: Optional[str] = None
 
     # Equivariant features (experimental)
     use_equivariant_features: bool = False  # Set to true to enable equivariant branch
