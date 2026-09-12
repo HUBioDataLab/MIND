@@ -29,8 +29,7 @@ MIND/
 │   │   └── unimol_adapter.py
 │   ├── cache_to_pyg.py            # UniversalMolecule → PyG graph (.pt chunks)
 │   ├── process_chunked_dataset.py # Orchestrates chunked processing
-│   ├── create_chunk_metadata.py   # Generates metadata.json for each chunk dir
-│   └── validate_adapters.py       # Quick smoke-test for adapters
+│   └── create_chunk_metadata.py   # Generates metadata.json for each chunk dir
 │
 ├── esa/                           # ESA graph transformer backbone + layers
 ├── GET/                           # Imported GET model tree + conda env file
@@ -124,7 +123,7 @@ These rules are mandatory for every Codex session in this repository:
 Developer references:
 ```bash
 python -m core.train_pretrain --config-yaml-path core/pretraining_config_fast.yaml
-python data_loading/validate_adapters.py --adapter protein --max_samples 5
+pytest -v tests/test_adapters.py
 ```
 
 Training commands above remain developer references only and must be exposed through
@@ -147,7 +146,7 @@ Use Python 3 with 4-space indentation and descriptive `snake_case` names for mod
 
 There is no dedicated checked-in unit test suite. Validate changes with:
 
-1. **Adapter changes**: `python data_loading/validate_adapters.py --adapter <name> --max_samples 5`
+1. **Adapter changes**: `pytest -v tests/test_adapters.py`
 2. **Training changes**: `make train CONFIG=f LOG=<feature_name>` — check log metrics (see `.claude/commands/validate_feature.md` or `.codex/validate_feature.md` for the full checklist)
 3. **Pipeline changes**: `make process-protein NUM_CHUNKS=1` then spot-check the `.pt` output
 
