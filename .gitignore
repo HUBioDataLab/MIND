@@ -81,13 +81,8 @@ papers/
 #Agents
 .codex
 
-# Local documentation & notes
-Docs/
-MIGRATION.md
-RNA_VIRTUAL_FAST_EXPERIMENT_HANDOFF.md
-VIRTUAL_ATOM_IMPLEMENTATION_PLAN.md
-CURRENT_TODOS.md
-CODEX.md
+# Project documentation and .agents/skills are versioned.
+# Private user-tool state, datasets, logs and checkpoints remain outside Git.
 
 # Other codes
 repomix-output.xml

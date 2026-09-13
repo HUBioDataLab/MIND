@@ -2,93 +2,79 @@
 
 ## Project Overview
 
-MIND (Molecular INtelligence through Domains) is a multi-domain molecular foundation model pre-trained on proteins, RNA, and small molecules simultaneously. It uses a shared graph transformer (ESA backbone) with Masked Language Modeling (MLM) and distance prediction tasks. Think of it like BERT but for 3D molecular graphs — each atom is a token, and the model learns chemistry by predicting masked atoms in their 3D context.
+MIND (Molecular INtelligence through Domains) is a multi-domain molecular
+foundation-model project. A shared ESA graph transformer learns masked atom
+types and distance bins from protein, RNA, and UniMol graphs.
 
-Key design choices:
-- **14-atom uniform protein representation**: Every residue gets exactly 4 backbone + 10 sidechain slots. Empty sidechain slots are filled with virtual 'V' atoms placed at CB position (prevents sequence leakage from atom count).
-- **Block-MLM for proteins**: Entire residues (all 14 atoms) are masked together, not random atoms.
-- **Cross-modal batching**: Proteins, RNA, and small molecules appear in the same batch, with atom-aware sampling to balance domain contributions.
-- **Hybrid edges (3-tier)**: Tier 1 = sequence neighbors (i±k), Tier 2 = spatial within 5Å, Tier 3 = random long-range.
+Current contracts:
+
+- Protein caches have 4 backbone + 10 sidechain slots; RNA has 12 backbone +
+  11 base slots. V is padding target id 120, not a physical runtime atom.
+- Geometry-neutral encoding removes visible V and all masked sidechain/base
+  nodes from ESA; post-ESA latent slots read their own backbone context.
+- Protein/RNA MLM masks complete blocks; UniMol uses atom-level masking.
+- Invariant features are enabled; the optional equivariant branch is disabled.
+  M layers are graph-local and S layers are molecule-global.
+- Protein hybrid edges combine CA sequence, real spatial, and dynamic random
+  long-range connections; they are not a complete chemical-bond graph.
+- Full-pass sampling is requested, but the current Lightning epoch limit can
+  truncate longer rebuilt plans. See the current handoff before claiming full
+  data coverage.
 
 ## Project Structure & Module Organization
 
-```
-MIND/
-├── core/                          # Training code
-│   ├── train_pretrain.py          # Main training entry point
-│   ├── metrics/                   # Per-atom metric callbacks
-│   │   ├── protein_per_atom_metrics_callback.py
-│   │   └── rna_per_atom_metrics_callback.py
-│   ├── pretraining_config_fast.yaml       # Fast sanity-check config (~10 min)
-│   └── pretraining_config_multidomain.yaml  # Main training config
-│
-├── data_loading/                  # Data pipeline
-│   ├── adapters/                  # Per-domain raw→UniversalMolecule converters
-│   │   ├── protein_adapter.py     # PDB/CIF → 14-atom uniform repr
-│   │   ├── rna_adapter.py
-│   │   └── unimol_adapter.py
-│   ├── cache_to_pyg.py            # UniversalMolecule → PyG graph (.pt chunks)
-│   ├── process_chunked_dataset.py # Orchestrates chunked processing
-│   └── create_chunk_metadata.py   # Generates metadata.json for each chunk dir
-│
-├── esa/                           # ESA graph transformer backbone + layers
-├── GET/                           # Imported GET model tree + conda env file
-├── data/                          # Data acquisition scripts (not raw data)
-├── Docs/                          # Design notes and pipeline docs
-│   ├── CB_DUSUKLUGU_ACIKLAMA.md   # CB recall collapse explanation (Turkish)
-│   ├── MIND_OVERVIEW.md           # Interview-ready project overview
-│   ├── features/                  # Feature-specific design docs
-│   │   ├── HYBRID_EDGE_CONSTRUCTION.md
-│   │   ├── DYNAMIC_RANDOM_EDGES.md
-│   │   └── ATOM_TYPES.md
-│   └── proteins/
-│       └── PROTEIN_REPRESENTATION_PIPELINE.md
-│
-├── logs/                          # Training logs (organized by month)
-│   ├── June2026/
-│   ├── May2026/
-│   └── April2026/
-│
-├── Makefile                       # Primary interface for training + processing
-└── AGENTS.md                      # This file
-```
+- `core/`: training entrypoint, model/encoder/tasks, configs and metrics.
+- `data_loading/`: adapters, fixed-slot conversion, chunk metadata, loading and sampling.
+- `esa/`: ESA backbone and attention kernels.
+- `tests/`: production-contract, geometry, attention and sampler regression tests.
+- `Docs/`: canonical English documentation; start at [Docs/README.md](Docs/README.md).
+- `.agents/skills/`: the shared source for MIND skills; `.claude/skills/` links
+  to these folders. `CLAUDE.md` imports this file for Claude Code.
+- `GET/`, `papers/`, `template/`: vendor/reference material, not current operating instructions.
+- `logs/`, `outputs/`: local run evidence and checkpoints, outside Git.
+- `Makefile`: user interface for training and supported local workflows.
 
 ## Data Locations
 
-All raw and processed data lives **outside** the repo:
+Datasets live outside Git. `chunk_dir` is often a prefix whose sibling
+`_chunk_*` directories exist; it need not be a literal directory.
 
-| Dataset | Path | Notes |
-|---------|------|-------|
-| Proteins (processed .pt chunks) | `/home/yusuf/data/proteins/processed_14atom/` | 10 chunks, 14-atom uniform repr |
-| Proteins (raw PDB/CIF) | `/home/yusuf/data/proteins/raw_structures_hq_40k/` | ~40k HQ structures |
-| Proteins (manifest) | `/home/yusuf/data/proteins/afdb_clusters/manifest_hq_40k_len512.csv` | Filters to ≤512 residue chains |
-| RNA (processed .pt chunks) | `/home/yusuf/data/rna/processed_graphs/` | Ready to use |
-| UniMol small molecules | `/home/arin/8TB_arin/unimol_pyg_full/universal_unimol/` | 10+ chunks, on Arin's disk |
-| Metabolites | `/media/ubuntu/8TB/ege/processed/` | 497 chunks; currently disabled (bond_edge_index collision in PyG collate) |
+| Dataset | Current Anzu base / source |
+|---|---|
+| Protein PT prefix | `/home/yusuf/data/proteins/processed_14atom`, chunks 0–9 |
+| Raw 40k proteins | `/home/yusuf/data/proteins/raw_structures_hq_40k/` |
+| Protein manifests | `/home/yusuf/data/proteins/afdb_clusters/` |
+| Full-run RNA prefix | `/media/ubuntu/8TB/yusuf/mind_virtual_v1/rna/june_equivalent_23slot_v2/processed_23slot` |
+| Fast RNA prefix | `/home/yusuf/data/rna_small/processed_23slot_5k` |
+| UniMol prefix | `/home/arin/8TB_arin/unimol_pyg_full/universal_unimol`; 200 available chunks, full baseline selects 0–9 |
+| Metabolite / QM9 | Disabled; documented source paths are currently unavailable |
+
+See [migration inventory](Docs/operations/NON_GIT_INVENTORY.md) for sizes,
+all raw/derived data, user-local tools, temporary evidence and symlinks.
 
 ## Build, Test, and Development Commands
 
-Create the expected environment with:
+Use the working `mind_esa3d` environment. For Atum, export the actual environment
+as described in [migration](Docs/operations/MIGRATION.md); `GET/env.yml` is an
+older vendor environment and does not reproduce the current setup.
 
 ```bash
-conda env create -f GET/env.yml
-conda activate mind_esa3d
+make help
+make test-unit
+make train CONFIG=f LOG=fast_check
+make train GPU=6 CONFIG=m LOG=multidomain_run
+make train GPU=auto CONFIG=f EPOCHS=3 SEED=42 LOG=smoke
+make status
+make logs
 ```
 
-Use `make help` to list supported workflows.
+Training commands are user-executed. Fast duration depends on hardware/data;
+do not promise ten minutes. Logs go to `logs/<MonthYear>/`, outputs to a
+run-specific directory or explicit `OUTPUT_DIR`.
 
-```bash
-make train CONFIG=f LOG=my_test       # Fast sanity check (~10 min), saves to logs/June2026/my_testfast_<datetime>.log
-make train CONFIG=m LOG=my_run        # Full multidomain training
-make train GPU=6 CONFIG=m             # Force specific GPU
-make train GPU=auto CONFIG=m          # Auto-pick GPU with most free VRAM (≥15 GB)
-make process-protein NUM_CHUNKS=10    # Process protein data (sequential)
-make process-protein PARALLEL=2       # Process in 2 parallel groups
-make status                           # Show training processes + GPU usage
-make logs                             # List 10 most recent log files
-```
-
-Log files are auto-routed to `logs/<MonthYear>/<name>_<YYYYMMDD_HHMMSS>.log` for multidomain or `logs/<MonthYear>/<name>fast_<YYYYMMDD_HHMMSS>.log` for fast runs.
+The default `make process-protein` uses 40k source/output paths and `--force`.
+Inspect/override paths before user-authorized processing; never treat it as a
+harmless migration check or a ready-made 1M command.
 
 ## Execution Authority and Process Verification
 
@@ -132,11 +118,27 @@ commands may be run directly under the rules above.
 
 ## Known Issues & Active Work
 
-**CB recall collapse (~0.017–0.28)**: Virtual atoms (9 per GLY, 9 per ALA, …) are all placed at CB's 3D coordinate. After masking removes type signal, the model learns "this position ≈ V" and also predicts CB as V. TRP is the only exception (10 real sidechain atoms, no virtuals, CB is correctly recalled). Tried 2Å offset fix — failed (corrupted edge graph geometry). Next step: evaluate RNA-style backbone stacking (virtuals on CA instead of CB), then BoltzGen if that fails.
+The September 1–12 full run completed 100 epochs. Protein real-sidechain accuracy
+is 85.77%; RNA real-base accuracy is 93.04% at final validation, not held-out test.
 
-**Metabolite disabled**: `bond_edge_index` key in coconut chunks collides with PyG's cross-modal batcher. Keep `metabolite: enabled: false` in configs until resolved.
+Open issues:
 
-**Epoch imbalance**: When protein/RNA data exhausts during an epoch, late batches become UniMol-only. Fix planned: remove per-domain epoch boundary, instead interleave from start.
+- Rare protein chemistry and late-slot real/V confusion remain, particularly
+  CYS, HIS, GLN and TRP. The old geometry-driven CB collapse is not current.
+- Mask token `0` is incorrectly reused as the RBF padding mask for retained
+  real backbone nodes.
+- Batch-wide explicit-bond precedence can zero protein/RNA chemical-coordination
+  features in batches containing bonded small molecules.
+- Lightning can retain the initial batch limit while sampler plan length changes;
+  epoch 99 consumed 19,081 of 19,122 planned batches.
+- The invariant atom-MLM objective and validation results do not establish
+  coordinate generation or downstream foundation-model quality.
+- Metabolite/QM9 remain disabled; enabling another domain requires its own
+  data-contract and mixed-batch verification.
+
+Read [the evidence and next steps](Docs/training/STATUS_AND_NEXT_STEPS_20260912.md)
+before changing the model. Do not restart superseded CB-stacking, synthetic
+template or element-balanced-loss plans from archived notes.
 
 ## Coding Style & Naming Conventions
 
@@ -144,13 +146,18 @@ Use Python 3 with 4-space indentation and descriptive `snake_case` names for mod
 
 ## Testing Guidelines
 
-There is no dedicated checked-in unit test suite. Validate changes with:
+Use focused checked-in tests for each change and inspect skips. Adapter tests:
+`pytest -v tests/test_adapters.py`; the previous standalone adapter validator
+was removed. Geometry, attention, mixed-domain and sampler tests live in
+`tests/`. `make test-unit` exposes pytest through the working environment.
 
-1. **Adapter changes**: `pytest -v tests/test_adapters.py`
-2. **Training changes**: `make train CONFIG=f LOG=<feature_name>` — check log metrics (see `.claude/commands/validate_feature.md` or `.codex/validate_feature.md` for the full checklist)
-3. **Pipeline changes**: `make process-protein NUM_CHUNKS=1` then spot-check the `.pt` output
+Training changes require user-started fast and matched multidomain checks; see
+[validation](Docs/training/VALIDATION.md). Data-processing checks require explicit
+execution authorization, a separate output prefix, and provenance records.
 
-Record the command, config, dataset subset, and any expected metric/log change in your PR.
+Record exact command, config, dataset selection, seed, expected change, result
+and skipped checks. Sampler-only tests do not prove trainer consumption, and
+single-domain tests do not prove mixed-batch feature independence.
 
 ## Commit & Pull Request Guidelines
 
