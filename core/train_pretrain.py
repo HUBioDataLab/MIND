@@ -772,7 +772,8 @@ def train_universal_pretraining(
     dataset_dir: str,
     output_dir: str,
     wandb_project: str,
-    wandb_run_name: str
+    wandb_run_name: str,
+    ckpt_path: str | None = None,
 ):
     """Train universal pretraining model with ESA optimizations"""
 
@@ -998,8 +999,11 @@ def train_universal_pretraining(
 
             print(f"   ✅ Final check: batch_sampler = {type(train_loader.batch_sampler).__name__}, batch_size = {train_loader.batch_size}")
 
-    # Train the model
-    trainer.fit(model, train_loader, val_loader)
+    # Train the model. Passing ckpt_path lets Lightning restore model,
+    # optimizer, scheduler, callback, epoch, and global-step state.
+    if ckpt_path is not None:
+        print(f"♻️ Resuming full training state from: {ckpt_path}")
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
 
     print("✅ Training completed!")
 
@@ -1019,11 +1023,19 @@ def main():
     parser.add_argument("--max-epochs", type=int, default=None, help="Maximum number of epochs")
     parser.add_argument("--seed", type=int, default=None, help="Override the config random seed")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
+    parser.add_argument("--max-atoms-per-batch", type=int, default=None, help="Override the dynamic atom budget per batch")
     parser.add_argument("--devices", type=str, default=None, help="Number of GPUs or device IDs (e.g. 2, '0,1,2', or 'auto')")
     parser.add_argument("--strategy", type=str, default=None, help="Multi-GPU strategy (e.g. 'ddp', 'ddp_spawn', 'auto')")
+    parser.add_argument("--ckpt-path", type=str, default=None, help="Lightning checkpoint to resume with full optimizer/trainer state")
     parser.add_argument("--output-dir", type=str, default="./outputs/universal_pretrain", help="Output directory")
 
     args = parser.parse_args()
+    ckpt_path = None
+    if args.ckpt_path is not None:
+        candidate = Path(args.ckpt_path).expanduser().resolve()
+        if not candidate.is_file():
+            parser.error(f"checkpoint does not exist or is not a file: {candidate}")
+        ckpt_path = str(candidate)
     print(f"📋 Parsed arguments: {args}")
 
     # Load config from YAML
@@ -1046,6 +1058,12 @@ def main():
 
     if args.batch_size is not None:
         config_dict['batch_size'] = args.batch_size
+
+    if args.max_atoms_per_batch is not None:
+        if args.max_atoms_per_batch < 1:
+            parser.error("--max-atoms-per-batch must be at least 1")
+        config_dict['max_atoms_per_batch'] = args.max_atoms_per_batch
+        print(f"⚛️ Using max_atoms_per_batch: {args.max_atoms_per_batch}")
 
     if args.devices is not None:
         # Convert numeric string to int if possible (e.g. "4" -> 4)
@@ -1072,7 +1090,8 @@ def main():
         dataset_dir=config.dataset_download_dir,
         output_dir=args.output_dir,
         wandb_project=getattr(config, 'wandb_project_name', 'MIND-Project-Pretraining'),
-        wandb_run_name=getattr(config, 'wandb_run_name', 'multidomain-pretrain')
+        wandb_run_name=getattr(config, 'wandb_run_name', 'multidomain-pretrain'),
+        ckpt_path=ckpt_path,
     )
 
     print("🎉 Training completed successfully!")

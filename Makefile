@@ -26,6 +26,8 @@ CONFIG ?= m
 LOG ?=
 EPOCHS ?=
 SEED ?=
+CKPT ?=
+MAX_ATOMS ?=
 PYTEST_ARGS ?= tests --ignore=tests/test_multigpu_training.py
 
 ifneq ($(strip $(EPOCHS)),)
@@ -33,6 +35,12 @@ ifneq ($(strip $(EPOCHS)),)
 endif
 ifneq ($(strip $(SEED)),)
   TRAIN_SEED_ARGS := --seed $(SEED)
+endif
+ifneq ($(strip $(CKPT)),)
+  TRAIN_CKPT_ARGS := --ckpt-path "$(CKPT)"
+endif
+ifneq ($(strip $(MAX_ATOMS)),)
+  TRAIN_MAX_ATOMS_ARGS := --max-atoms-per-batch $(MAX_ATOMS)
 endif
 
 # Map single-letter shortcuts to full config names
@@ -117,6 +125,8 @@ train:
 	@echo "  Config: $(CONFIG_FILE)"
 	@echo "  Epochs: $(if $(strip $(EPOCHS)),$(EPOCHS),config default)"
 	@echo "  Seed:   $(if $(strip $(SEED)),$(SEED),config default)"
+	@echo "  Resume: $(if $(strip $(CKPT)),$(CKPT),no)"
+	@echo "  Atoms:  $(if $(strip $(MAX_ATOMS)),$(MAX_ATOMS),config default)"
 	@echo "  Log:    $(LOG_FILE)"
 	@echo "  Output: $(OUTPUT_DIR)"
 	@echo "====================="
@@ -125,6 +135,8 @@ train:
 		--config-yaml-path $(CONFIG_FILE) \
 		$(TRAIN_EPOCH_ARGS) \
 		$(TRAIN_SEED_ARGS) \
+		$(TRAIN_CKPT_ARGS) \
+		$(TRAIN_MAX_ATOMS_ARGS) \
 		--output-dir $(OUTPUT_DIR) \
 		> $(LOG_FILE) 2>&1 &
 	@echo "PID: $$!"
@@ -190,9 +202,11 @@ help:
 	@echo ""
 	@echo "  Training:"
 	@echo "    make train CONFIG=m LOG=run1         Full multidomain training"
-	@echo "    make train CONFIG=f                  Fast sanity check (~10 min)"
+	@echo "    make train CONFIG=f                  Fast sanity check"
 	@echo "    make train CONFIG=f EPOCHS=1         Override config epoch count"
 	@echo "    make train CONFIG=f SEED=43          Independent seeded run"
+	@echo "    make train CONFIG=m CKPT=path EPOCHS=101  Resume full checkpoint state"
+	@echo "    make train CONFIG=m MAX_ATOMS=18000      Override dynamic atom budget"
 	@echo "    make test-unit                       Run the complete unit-test suite"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"
