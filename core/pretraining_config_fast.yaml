@@ -24,12 +24,12 @@ multi_domain:
       chunk_dir: "/home/arin/data/qm9_chunks"
       chunk_range: [0, 0]
     metabolite:
-      enabled: false  # DEFERRED: 8TB build (497 chunks) carries `bond_edge_index` that PDB/RNA/UniMol lack → PyG collate KeyError in mixed batches. Re-enable after we either strip the key or give all domains an empty bond graph (only needed if a bond-masking task is added).
-      chunk_dir: "/media/ubuntu/8TB/ege/processed"
+      enabled: false  # Migrated 497-chunk COCONUT build; mixed-domain coordination remains a documented model defect.
+      chunk_dir: "/home/yusuf/data/metabolites/processed"
       chunk_range: [0, 0]
     unimol:
       enabled: true
-      chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
+      chunk_dir: "/home/yusuf/data/small_molecules/unimol/universal_unimol"
       chunk_range: [0, 0]
       max_graph_atoms: 12000
     rna:

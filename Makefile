@@ -16,7 +16,10 @@
 # ===================================================================
 
 SHELL := /bin/bash
-CONDA_RUN := source /opt/anaconda3/bin/activate && conda activate mind_esa3d &&
+CONDA_ROOT ?= /opt/miniconda3
+MIND_CONDA_ENV ?= /home/yusuf/.conda/envs/mind_esa3d
+MIND_HF_HOME ?= /home/yusuf/.cache/huggingface
+CONDA_RUN := source "$(CONDA_ROOT)/etc/profile.d/conda.sh" && conda activate "$(MIND_CONDA_ENV)" && export PATH="$(MIND_CONDA_ENV)/bin:$$PATH" HF_HOME="$(MIND_HF_HOME)" HUGGINGFACE_HUB_CACHE="$(MIND_HF_HOME)/hub" TRANSFORMERS_CACHE="$(MIND_HF_HOME)/hub" &&
 
 GPU ?= auto
 CONFIG ?= m

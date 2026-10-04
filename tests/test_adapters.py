@@ -118,7 +118,7 @@ END
 
     def test_rna_adapter_23slot_uniform_representation_if_present(self):
         """Test RNAAdapter on real RNA sample if local raw data is available."""
-        real_rna_dir = Path("/media/ubuntu/8TB/arya/rna_data")
+        real_rna_dir = Path("/home/yusuf/data/rna/raw_structures")
         if not real_rna_dir.is_dir():
             self.skipTest(f"Real RNA data dir not present: {real_rna_dir}")
 

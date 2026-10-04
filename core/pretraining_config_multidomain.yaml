@@ -45,19 +45,19 @@ multi_domain:
       chunk_range: null
     
     metabolite:
-      enabled: false  # Path fixed to 8TB build (497 chunks, proper layout). Earlier `smiles`-asymmetry build is gone; current chunks carry only an unused `bond_edge_index` key that PyG collate drops safely. Enable for the multi-domain mega train.
-      chunk_dir: "/media/ubuntu/8TB/ege/processed"
+      enabled: false  # Migrated 497-chunk COCONUT build; mixed-domain coordination remains a documented model defect.
+      chunk_dir: "/home/yusuf/data/metabolites/processed"
       chunk_range: null
 
     unimol:
       enabled: true
-      chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
-      chunk_range: [0, 9]  # 10 chunks (balanced with pdb; bump for a larger run)
+      chunk_dir: "/home/yusuf/data/small_molecules/unimol/universal_unimol"
+      chunk_range: [0, 9]  # Preserve logged lexicographic loader slice: 0, 1, 10, 100-106 (10 chunks).
       max_graph_atoms: 12000
     
     rna:
       enabled: true
-      chunk_dir: "/media/ubuntu/8TB/yusuf/mind_virtual_v1/rna/june_equivalent_23slot_v2/processed_23slot"
+      chunk_dir: "/home/yusuf/data/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot"
       chunk_range: null  # All 67 June-equivalent 23-slot chunks (8,556 graphs <=5,000 real non-H atoms).
       max_graph_atoms: 6000
     
