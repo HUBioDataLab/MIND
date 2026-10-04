@@ -44,10 +44,10 @@ Datasets live outside Git. `chunk_dir` is often a prefix whose sibling
 | Protein PT prefix | `/home/yusuf/data/proteins/processed_14atom`, chunks 0–9 |
 | Raw 40k proteins | `/home/yusuf/data/proteins/raw_structures_hq_40k/` |
 | Protein manifests | `/home/yusuf/data/proteins/afdb_clusters/` |
-| Full-run RNA prefix | `/media/ubuntu/8TB/yusuf/mind_virtual_v1/rna/june_equivalent_23slot_v2/processed_23slot` |
+| Full-run RNA prefix | `/home/yusuf/data/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot` |
 | Fast RNA prefix | `/home/yusuf/data/rna_small/processed_23slot_5k` |
-| UniMol prefix | `/home/arin/8TB_arin/unimol_pyg_full/universal_unimol`; 200 available chunks, full baseline selects 0–9 |
-| Metabolite / QM9 | Disabled; documented source paths are currently unavailable |
+| UniMol prefix | `/home/yusuf/data/small_molecules/unimol/universal_unimol`; 200 available chunks; the logged full baseline loader slice is 0, 1, 10, 100–106 because discovery is lexicographic |
+| Metabolite / QM9 | COCONUT is at `/home/yusuf/data/metabolites/processed`; it remains disabled because mixed-domain coordination is defective. QM9 is unavailable. |
 
 See [migration inventory](Docs/operations/NON_GIT_INVENTORY.md) for sizes,
 all raw/derived data, user-local tools, temporary evidence and symlinks.

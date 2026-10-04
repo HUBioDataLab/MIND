@@ -7,8 +7,11 @@ Read current documents first; archived experiment proposals are not active plans
 ## Start here
 
 - [Anzu → Atum migration](operations/MIGRATION.md)
+- [Atum migration record and pending gates](operations/ATUM_MIGRATION_RECORD_20260913.md)
 - [What Git will not transfer](operations/NON_GIT_INVENTORY.md)
 - [Final 100-epoch results, open issues, and next development steps](training/STATUS_AND_NEXT_STEPS_20260912.md)
+- [Completed Atum/Anzu run comparison and cleanup gates](training/ATUM_ANZU_RUN_COMPARISON_20261004.md)
+- [Full-data scaling plan](training/FULL_DATA_SCALING_PLAN_20260923.md)
 - [Model overview](architecture/MODEL_OVERVIEW.md)
 
 ## Structure

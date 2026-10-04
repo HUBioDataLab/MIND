@@ -8,11 +8,11 @@ uses:
 
 | Item | Path / policy |
 |---|---|
-| Raw RNA source | `/media/ubuntu/8TB/arya/rna_data/` |
-| Current full-training base | `/media/ubuntu/8TB/yusuf/mind_virtual_v1/rna/june_equivalent_23slot_v2/processed_23slot` |
+| Raw RNA source | `/media/16TB/archive/yusuf/MIND/data/raw/rna/arya_rna_data/` |
+| Current full-training base | `/home/yusuf/data/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot` |
 | Full-training chunks | Sibling directories `processed_23slot_chunk_*` discovered by the loader |
 | Protein comparison | `/home/yusuf/data/proteins/processed_14atom` |
-| Small-molecule comparison | `/home/arin/8TB_arin/unimol_pyg_full/universal_unimol` |
+| Small-molecule comparison | `/home/yusuf/data/small_molecules/unimol/universal_unimol` |
 
 The fast YAML currently points at the separate development base
 `/home/yusuf/data/rna_small/processed_23slot_5k` and selects chunk `0`. This is
