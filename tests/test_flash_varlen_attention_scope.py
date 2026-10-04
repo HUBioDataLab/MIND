@@ -23,6 +23,25 @@ def _flash_layer(idx: int) -> SABComplete:
     )
 
 
+@pytest.mark.parametrize("arity", [4, 5])
+def test_unpad_input_compat_accepts_supported_api_arities(monkeypatch, arity):
+    values = tuple(object() for _ in range(arity))
+    monkeypatch.setattr(flash_module, "unpad_input", lambda *_args: values)
+
+    result = flash_module._unpad_input_compat(object(), object())
+
+    assert result == values[:4]
+
+
+def test_unpad_input_compat_rejects_unknown_api_arity(monkeypatch):
+    monkeypatch.setattr(
+        flash_module, "unpad_input", lambda *_args: tuple(object() for _ in range(6))
+    )
+
+    with pytest.raises(ValueError, match="returned 6 values; expected 4 or 5"):
+        flash_module._unpad_input_compat(object(), object())
+
+
 def test_flash_backend_routes_m_layer_through_sparse_graph_attention():
     layer = _flash_layer(idx=1)
     inputs = torch.randn(2, 3, 4)

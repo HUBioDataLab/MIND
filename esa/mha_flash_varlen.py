@@ -24,6 +24,15 @@ from flash_attn.flash_attn_interface import flash_attn_varlen_func
 from flash_attn.bert_padding import unpad_input, pad_input
 
 
+def _unpad_input_compat(hidden_states, attention_mask):
+    result = unpad_input(hidden_states, attention_mask)
+    if len(result) not in (4, 5):
+        raise ValueError(
+            f"FlashAttention unpad_input returned {len(result)} values; expected 4 or 5"
+        )
+    return result[:4]
+
+
 class MABFlashVarlen(nn.Module):
     """
     Multihead Attention Block (MAB) using Flash Attention variable-length functions.
@@ -250,9 +259,9 @@ class MABFlashVarlen(nn.Module):
         padding_mask = torch.arange(max_seq_len, device=Q.device).unsqueeze(0) < seq_lens.unsqueeze(1)
         
         # Unpad Q, K, V - remove all padding tokens
-        Q_unpad, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(Q, padding_mask)
-        K_unpad, indices_k, cu_seqlens_k, max_seqlen_k = unpad_input(K, padding_mask)
-        V_unpad, _, _, _ = unpad_input(V, padding_mask)
+        Q_unpad, indices_q, cu_seqlens_q, max_seqlen_q = _unpad_input_compat(Q, padding_mask)
+        K_unpad, indices_k, cu_seqlens_k, max_seqlen_k = _unpad_input_compat(K, padding_mask)
+        V_unpad, _, _, _ = _unpad_input_compat(V, padding_mask)
         
         # Q_unpad, K_unpad, V_unpad are now [total_tokens, num_heads, head_dim]
         # where total_tokens = sum(seq_lens)
