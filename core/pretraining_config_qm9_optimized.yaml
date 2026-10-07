@@ -1,0 +1,174 @@
+# ==============================================================================
+# MIND Pretraining QM9 Configuration (ALL LATEST PR OPTIMIZATIONS ENABLED)
+# ==============================================================================
+# Includes:
+#   - Opt 1: Vectorized Geometric Feature Extraction & COM Centering
+#   - Opt 2: Vectorized MLM Masking
+#   - Opt 3: Vectorized Edge/Pair Distance Masking (Zero-Sync)
+#   - Opt 4: OpenAI Triton Fused Gather-Scatter Kernel (with Autograd Backward)
+#   - Opt 5: OpenAI Triton Block-Sparse FlashAttention (with Autograd Backward)
+#   - Opt 6: BFloat16 AMP Precision + Explicit Loss Head Autocast
+#   - Opt 8: Triton Variable-Length Padding-Free Attention
+#   - Macro: Dynamic Batching & Multi-GPU DDP Support
+#   - Optimizer: Fused AdamW & Custom Lightning Gradient Clipping
+#   - Validation: Single-Pass Metric Predictions Reuse
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Genel ve Çıktı Ayarları (General & Logging)
+# ------------------------------------------------------------------------------
+seed: 42
+dataset: QM9
+dataset_download_dir: ./data_loading
+out_path: ./outputs/universal_qm9_all_optimizations
+wandb_project_name: mind-pretraining-optimizations
+wandb_run_name: qm9-full-optimizations-triton-bfloat16
+use_wandb: false
+
+# ------------------------------------------------------------------------------
+# 2. Donanım & Dağıtık Eğitim Ayarları (Hardware & DDP)
+# ------------------------------------------------------------------------------
+accelerator: gpu
+devices: 1
+num_workers: 0
+num_sanity_val_steps: 0
+fast_dev_run: false
+
+# ------------------------------------------------------------------------------
+# 3. Eğitim & Optimizer Parametreleri (Training & Optimizer)
+# ------------------------------------------------------------------------------
+max_epochs: 100
+lr: 0.0005
+early_stopping_patience: 30
+optimiser_weight_decay: 1.0e-10
+gradient_clip_val: 0.5
+monitor_loss_name: train_total_loss
+
+# ------------------------------------------------------------------------------
+# 4. Veri Seti & Dinamik Batching Ayarları (Dataset & Dynamic Batching)
+# ------------------------------------------------------------------------------
+max_samples: 130000                     # Full QM9 dataset (~130k molecules)
+molecule_max_atoms: 100
+use_universal_cache: true
+universal_cache_path: "./data_loading/cache/universal_qm9_all.pkl"
+
+# Dynamic Batching (Atom-aware padding reduction)
+use_dynamic_batching: true
+max_atoms_per_batch: 25000              # Target atoms per batch for QM9
+batch_size: 1024                        # Fallback / validation batch size
+log_batch_stats: false
+
+# ------------------------------------------------------------------------------
+# 5. ⚡ Tüm PR Optimizasyon Bayrakları (Full Optimization Suite)
+# ------------------------------------------------------------------------------
+# Opt 1: Vectorized geometric feature extraction & COM centering
+use_vectorized_geometric_features: true
+
+# Opt 2: GPU-level vectorized MLM masking
+use_vectorized_mlm_masking: true
+
+# Opt 3: GPU-level vectorized edge pair masking (long/short range distance)
+use_vectorized_edge_masking: true
+
+# Opt 4: Custom OpenAI Triton Block-Sparse & Varlen FlashAttention
+use_triton_flash_attention: true
+use_triton_varlen_flash_attention: true
+xformers_or_torch_attn: triton
+
+# Opt 5: Hardware BFloat16 AMP Precision & Loss Head Autocast
+use_bfloat16: true
+precision: bfloat16
+use_bfloat16_loss_head: true
+
+# Opt 6 (Negative Result): PyTorch JIT compile is kept false due to dynamic shapes
+use_torch_compile: false
+
+# ------------------------------------------------------------------------------
+# 6. Model Mimarisi (ESA Backbone)
+# ------------------------------------------------------------------------------
+apply_attention_on: node
+graph_dim: 512
+edge_dim: 64
+hidden_dims: [512, 512, 512, 512, 512, 512, 512, 512]
+num_heads: [8, 8, 8, 8, 8, 8, 8, 8]
+layer_types: ["M", "S", "S", "M", "S", "M", "S", "P"]
+norm_type: LN
+use_3d_coordinates: true
+set_max_items: 0
+triu_attn_mask: false
+use_memory_efficient_attention: true
+attention_dropout: 0.1
+
+# Equivariant branch features
+use_equivariant_features: false
+equivariant_lmax: 2
+equivariant_num_features: 16
+equivariant_fusion_method: add
+equivariant_cross_connection: true
+
+# Positional encoding
+use_posenc: false
+
+# ------------------------------------------------------------------------------
+# 7. MLP Ayarları (Feed-Forward Networks)
+# ------------------------------------------------------------------------------
+use_mlps: true
+mlp_hidden_size: 512
+num_mlp_layers: 3
+mlp_type: standard
+mlp_dropout: 0.0
+use_mlp_ln: false
+pre_or_post: pre
+
+# ------------------------------------------------------------------------------
+# 8. Dropout Ayarları
+# ------------------------------------------------------------------------------
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+
+# ------------------------------------------------------------------------------
+# 9. 3D Geometrik ve Mesafe Parametreleri
+# ------------------------------------------------------------------------------
+gaussian_kernels: 128
+cutoff_distance: 5.0
+max_neighbors: 16
+max_distance: 10.0
+distance_bins: 16
+
+# ------------------------------------------------------------------------------
+# 10. Ön-Eğitim Görevleri ve Kayıp Ağırlıkları (Pretraining Tasks & Loss Weights)
+# ------------------------------------------------------------------------------
+pretraining_tasks: ["short_range_distance", "mlm", "long_range_distance", "coordinate_denoising"]
+task_weights:
+  long_range_distance: 1.0
+  short_range_distance: 1.0
+  mlm: 0.5
+  coordinate_denoising: 0.7
+
+coordinate_denoising_noise_std: 0.2
+coordinate_denoising_mask_ratio: 0.25
+mlm_mask_ratio: 0.15
+temperature: 0.1
+
+# ------------------------------------------------------------------------------
+# 11. Evrensel Temsil (GET / Universal Representation)
+# ------------------------------------------------------------------------------
+use_hierarchical_features: true
+preserve_universal_blocks: true
+block_embedding_dim: 32
+position_embedding_dim: 16
+entity_embedding_dim: 8
+max_block_types: 150
+max_position_types: 15
+max_entity_types: 6
+max_atomic_num: 118
+rwse_dim: 24
+lap_dim: 4
+mlp_inter_dim: 128
+pma_num_outputs: 32
+max_node_items: 100
+max_edge_items: 1000
+output_dim: 1

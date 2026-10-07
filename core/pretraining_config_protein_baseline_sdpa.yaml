@@ -1,0 +1,176 @@
+# ==============================================================================
+# MIND Protein Pretraining - BASELINE (All Optimizations DISABLED, PyTorch SDPA)
+# ==============================================================================
+# In this configuration:
+#   - Triton FlashAttention: DISABLED (Uses PyTorch Native SDPA)
+#   - Triton Gather-Scatter: DISABLED (Uses standard torch_scatter.scatter_add)
+#   - Vectorized MLM Masking: DISABLED (Uses legacy per-graph loop)
+#   - Vectorized Edge Masking: DISABLED (Uses legacy while-loop sampling)
+#   - Vectorized Geometric Features: DISABLED (Uses legacy per-graph loop)
+#   - BFloat16 AMP: DISABLED (Uses standard Float32 precision)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Genel ve Çıktı Ayarları (General & Logging)
+# ------------------------------------------------------------------------------
+seed: 42
+dataset: PDB
+universal_cache_path: "/home/yusuf/data/proteins/cache_14atom/universal_pdb_chunk_0.pkl"
+dataset_download_dir: "./data_loading/protein_processed"
+out_path: "./outputs/protein_baseline_sdpa"
+wandb_project_name: "mind-protein-baseline"
+wandb_run_name: "protein-baseline-sdpa-fp32"
+use_wandb: false
+
+# ------------------------------------------------------------------------------
+# 2. Donanım & Dağıtık Eğitim Ayarları (Hardware & DDP)
+# ------------------------------------------------------------------------------
+accelerator: gpu
+devices: 1
+num_workers: 0
+num_sanity_val_steps: 0
+fast_dev_run: false
+
+# ------------------------------------------------------------------------------
+# 3. Eğitim Parametreleri (Training & Optimizer)
+# ------------------------------------------------------------------------------
+max_epochs: 30
+lr: 0.0005
+early_stopping_patience: 15
+optimiser_weight_decay: 1.0e-10
+gradient_clip_val: 0.5
+monitor_loss_name: "train_total_loss"
+
+# ------------------------------------------------------------------------------
+# 4. Veri Seti & Dinamik Batching Ayarları (Dataset & Batching)
+# ------------------------------------------------------------------------------
+max_samples: 4000
+use_universal_cache: true
+
+# Dynamic Batching
+use_dynamic_batching: true
+max_atoms_per_batch: 3500               # Target atoms per batch
+batch_size: 4                           # Fallback / validation batch size
+log_batch_stats: false
+
+# ------------------------------------------------------------------------------
+# 5. ⚡ Tüm Optimizasyon Bayrakları (TAMAMI FALSE - BASELINE)
+# ------------------------------------------------------------------------------
+# Attention: PyTorch Native SDPA (Triton FlashAttention KAPALI)
+# Opt 1: Vectorized geometric feature extraction (KAPALI - Eski Python döngüsü)
+use_vectorized_geometric_features: false
+
+# Opt 2: GPU-level vectorized MLM masking (KAPALI - Eski graf döngüsü)
+use_vectorized_mlm_masking: false
+
+# Opt 3: GPU-level vectorized edge pair masking (KAPALI - Eski while döngüsü)
+use_vectorized_edge_masking: false
+
+# Opt 4: OpenAI Triton FlashAttention (KAPALI - PyTorch SDPA)
+use_triton_flash_attention: false
+use_triton_varlen_flash_attention: false
+xformers_or_torch_attn: torch
+
+# Opt 5: BFloat16 AMP (KAPALI - Standart FP16 AMP)
+use_bfloat16: true
+precision: 16
+use_bfloat16_loss_head: false
+
+# Opt 6: PyTorch JIT compile (KAPALI)
+use_torch_compile: false
+
+# ------------------------------------------------------------------------------
+# 6. Model Mimarisi (ESA Backbone for Proteins)
+# ------------------------------------------------------------------------------
+apply_attention_on: node
+graph_dim: 256
+edge_dim: 64
+hidden_dims: [256, 256, 256, 256, 256, 256, 256, 256]
+num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
+layer_types: ["M", "S", "M", "S", "M", "S", "P", "P"]
+norm_type: LN
+use_3d_coordinates: true
+set_max_items: 0
+triu_attn_mask: false
+use_memory_efficient_attention: true
+attention_dropout: 0.1
+
+# Equivariant branch features (disabled)
+use_equivariant_features: false
+equivariant_lmax: 2
+equivariant_num_features: 16
+equivariant_fusion_method: add
+equivariant_cross_connection: true
+
+# Positional encoding
+use_posenc: false
+
+# ------------------------------------------------------------------------------
+# 7. MLP Ayarları (Feed-Forward Networks)
+# ------------------------------------------------------------------------------
+use_mlps: true
+mlp_hidden_size: 512
+num_mlp_layers: 3
+mlp_type: standard
+mlp_dropout: 0.0
+use_mlp_ln: false
+pre_or_post: pre
+
+# ------------------------------------------------------------------------------
+# 8. Dropout Ayarları
+# ------------------------------------------------------------------------------
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+
+# ------------------------------------------------------------------------------
+# 9. 3D Geometrik ve Mesafe Parametreleri (Proteins)
+# ------------------------------------------------------------------------------
+molecule_max_atoms: null
+gaussian_kernels: 128
+cutoff_distance: 5.0
+max_neighbors: 64
+max_distance: 20.0
+distance_bins: 5
+
+# Hybrid Edge Construction
+use_hybrid_edges: true
+sequence_neighbors_k: 3
+max_spatial_neighbors: 48
+num_random_edges: 8
+random_edge_min_distance: 10.0
+
+# ------------------------------------------------------------------------------
+# 10. Ön-Eğitim Görevleri ve Kayıp Ağırlıkları (Pretraining Tasks)
+# ------------------------------------------------------------------------------
+pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
+task_weights:
+  long_range_distance: 1.5
+  short_range_distance: 1.0
+  mlm: 0.3
+
+mlm_mask_ratio: 0.15
+temperature: 0.2
+
+# ------------------------------------------------------------------------------
+# 11. Evrensel Temsil (GET / Universal Representation)
+# ------------------------------------------------------------------------------
+use_hierarchical_features: false
+preserve_universal_blocks: true
+block_embedding_dim: 32
+position_embedding_dim: 16
+entity_embedding_dim: 8
+max_block_types: 150
+max_position_types: 15
+max_entity_types: 6
+max_atomic_num: 118
+rwse_dim: 24
+lap_dim: 4
+mlp_inter_dim: 128
+pma_num_outputs: 32
+max_node_items: 2000
+max_edge_items: 4000
+output_dim: 1
+posenc: null

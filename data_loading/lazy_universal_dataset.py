@@ -106,8 +106,8 @@ class LazyUniversalDataset(Dataset):
                 print(f"   Metadata loaded: {'✅ Yes' if self.metadata_loaded else '⚠️ No (fallback mode)'}")
 
     @staticmethod
-    def _index_map_cache_path(chunk_pt_files: List[str]) -> Path:
-        """Derive an index-map cache path from the chunk layout."""
+    def _index_map_cache_paths(chunk_pt_files: List[str]) -> List[Path]:
+        """Derive primary (alongside dataset) and local fallback index-map cache paths."""
         if not chunk_pt_files:
             raise ValueError("chunk_pt_files is empty")
 
@@ -115,31 +115,39 @@ class LazyUniversalDataset(Dataset):
         chunk_dir = first.parent.parent
         parent_dir = chunk_dir.parent
         base_name = re.sub(r"_chunk_\d+$", "", chunk_dir.name)
-        return parent_dir / f"{base_name}{INDEX_MAP_SUFFIX}"
+        primary = parent_dir / f"{base_name}{INDEX_MAP_SUFFIX}"
+
+        import hashlib
+        files_hash = hashlib.md5("".join(sorted(str(Path(f).resolve()) for f in chunk_pt_files)).encode()).hexdigest()[:10]
+        local_cache_dir = Path(__file__).resolve().parent / "cache"
+        local_fallback = local_cache_dir / f"{base_name}_{files_hash}{INDEX_MAP_SUFFIX}"
+
+        return [primary, local_fallback]
     
     def _build_index_map(self):
         """Build index map: (global_idx -> (file_idx, local_idx, pt_file)). Uses a cache when available."""
-        cache_path = self._index_map_cache_path(self.chunk_pt_files)
+        cache_paths = self._index_map_cache_paths(self.chunk_pt_files)
         resolved_files = [str(Path(f).resolve()) for f in self.chunk_pt_files]
 
-        if cache_path.exists():
-            try:
-                with open(cache_path, "r") as f:
-                    cached = json.load(f)
-            except Exception:
-                cached = None
+        for cache_path in cache_paths:
+            if cache_path.exists():
+                try:
+                    with open(cache_path, "r") as f:
+                        cached = json.load(f)
+                except Exception:
+                    cached = None
 
-            if cached and cached.get("chunk_pt_files") == resolved_files:
-                self.samples_per_file = cached["samples_per_file"]
-                self.total_samples = cached["total_samples"]
-                self.file_ranges = []
-                cumsum = 0
-                for n_samples, pt_file in zip(self.samples_per_file, self.chunk_pt_files):
-                    self.file_ranges.append((cumsum, cumsum + n_samples, pt_file))
-                    cumsum += n_samples
-                if self.verbose:
-                    print(f"   Index map loaded from cache: {cache_path}")
-                return
+                if cached and cached.get("chunk_pt_files") == resolved_files:
+                    self.samples_per_file = cached["samples_per_file"]
+                    self.total_samples = cached["total_samples"]
+                    self.file_ranges = []
+                    cumsum = 0
+                    for n_samples, pt_file in zip(self.samples_per_file, self.chunk_pt_files):
+                        self.file_ranges.append((cumsum, cumsum + n_samples, pt_file))
+                        cumsum += n_samples
+                    if self.verbose:
+                        print(f"   Index map loaded from cache: {cache_path}")
+                    return
 
         self.file_ranges = []
         self.samples_per_file = []
@@ -174,22 +182,29 @@ class LazyUniversalDataset(Dataset):
         if self.total_samples == 0:
             raise ValueError("No samples found in any chunk files!")
 
-        try:
-            with open(cache_path, "w") as f:
-                json.dump(
-                    {
-                        "chunk_pt_files": resolved_files,
-                        "samples_per_file": self.samples_per_file,
-                        "total_samples": self.total_samples,
-                    },
-                    f,
-                    indent=2,
-                )
-            if self.verbose:
-                print(f"   Index map saved to cache: {cache_path}")
-        except Exception as e:
-            if self.verbose:
-                print(f"   Could not save index map cache: {e}")
+        saved = False
+        for cache_path in cache_paths:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, "w") as f:
+                    json.dump(
+                        {
+                            "chunk_pt_files": resolved_files,
+                            "samples_per_file": self.samples_per_file,
+                            "total_samples": self.total_samples,
+                        },
+                        f,
+                        indent=2,
+                    )
+                if self.verbose:
+                    print(f"   Index map saved to cache: {cache_path}")
+                saved = True
+                break
+            except Exception as e:
+                continue
+
+        if not saved and self.verbose:
+            print("   ⚠️ Could not save index map to any cache path.")
     
     def _estimate_cache_ram(self):
         """Estimate RAM usage for cache (in MB)"""

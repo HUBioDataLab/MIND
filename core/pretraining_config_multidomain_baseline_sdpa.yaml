@@ -1,0 +1,228 @@
+# ===================================================================
+# MIND Project - Multi-Domain Pretraining Configuration (BASELINE)
+# ===================================================================
+# Multi-Domain Pretraining with ALL CUSTOM OPTIMIZATIONS DISABLED:
+# - Triton FlashAttention: DISABLED (Uses PyTorch Native SDPA)
+# - Triton Varlen FlashAttention: DISABLED
+# - Vectorized Geometric Features: DISABLED (Uses legacy Python loops)
+# - Vectorized MLM Masking: DISABLED (Uses legacy per-graph loops)
+# - Vectorized Edge/Pair Masking: DISABLED (Uses legacy while-loop sampling)
+# - BFloat16 AMP: DISABLED (Uses Float32 / standard precision)
+# - BFloat16 Loss Head: DISABLED
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain_baseline_sdpa.yaml
+# ===================================================================
+
+# -------------------------
+# Genel ve Çıktı Ayarları
+# -------------------------
+seed: 42
+out_path: "outputs/multidomain_pretrain_baseline"
+wandb_project_name: "MIND-Project-Pretraining"
+wandb_run_name: "multidomain_baseline_sdpa"
+
+# -------------------------
+# Multi-Domain Configuration
+# -------------------------
+multi_domain:
+  enabled: true  # Multi-domain cross-modal training enabled
+  
+  # Dataset Configurations
+  datasets:
+    pdb:
+      enabled: true
+      chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks (10 chunks)
+      atom_ratio: 10
+      chunk_range: [0, 2]  # Chunks 0..2
+    
+    rna:
+      enabled: true
+      chunk_dir: "/home/yusuf/data/rna/processed_23slot"      # 23-slot RNA chunks (67 chunks)
+      atom_ratio: 5
+      chunk_range: [0, 2]
+
+    qm9:
+      enabled: false
+      chunk_dir: "/home/arin/data/qm9_chunks"
+      atom_ratio: 5
+      chunk_range: null
+
+    metabolite:
+      enabled: false
+      chunk_dir: "/media/ubuntu/8TB/ege/processed"
+      atom_ratio: 10
+      chunk_range: null
+
+    unimol:
+      enabled: false
+      chunk_dir: "/home/arin/8TB_arin/unimol_pyg_full/universal_unimol"
+      atom_ratio: 25
+      chunk_range: null
+
+    dna:
+      enabled: false
+      chunk_dir: "../data/dna/processed_chunks"
+      atom_ratio: 0
+  
+  max_cache_chunks: 20              # Maximum chunks in LRU cache
+  fallback_to_single_domain: true   # Fallback if metadata missing
+
+# -------------------------
+# Single-Domain Fallback Settings
+# -------------------------
+dataset: PDB
+universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
+dataset_download_dir: "/home/yusuf/data/proteins"
+
+# -------------------------
+# Data Loading Settings
+# -------------------------
+num_workers: 2
+max_samples: null
+use_universal_cache: true
+
+# -------------------------
+# ⚡ Optimizasyon Bayrakları (TAMAMI FALSE - BASELINE)
+# -------------------------
+# Opt 1: Vectorized geometric feature extraction & COM centering (KAPALI)
+use_vectorized_geometric_features: false
+
+# Opt 2: GPU-level vectorized MLM masking (KAPALI)
+use_vectorized_mlm_masking: false
+
+# Opt 3: GPU-level vectorized edge pair masking (KAPALI)
+use_vectorized_edge_masking: false
+
+# Opt 4: OpenAI Triton Block-Sparse & Varlen FlashAttention (KAPALI - PyTorch SDPA)
+use_triton_flash_attention: false
+use_triton_varlen_flash_attention: false
+xformers_or_torch_attn: torch
+
+# Opt 5: Hardware BFloat16 AMP Precision (AÇIK - BFloat16)
+use_bfloat16: true
+precision: bfloat16
+use_bfloat16_loss_head: false
+
+# Opt 6: PyTorch JIT compile (KAPALI)
+use_torch_compile: false
+
+# -------------------------
+# Eğitim Parametreleri
+# -------------------------
+max_epochs: 100
+batch_size: 4  # Validation batch size
+use_dynamic_batching: true  # Atom-aware dynamic batching
+use_improved_sampler: true
+max_atoms_per_batch: 8000
+log_batch_statistics: true
+batch_stats_log_frequency: 100
+
+# Per-Type Loss Tracking
+compute_per_type_losses: true   # Track losses per dataset type (protein, rna, etc.)
+log_per_type_frequency: 20
+
+lr: 0.0005
+early_stopping_patience: 25
+gradient_clip_val: 0.5
+optimiser_weight_decay: 1.0e-10
+monitor_loss_name: "val_total_loss"
+num_sanity_val_steps: 0
+val_check_interval: 0.20
+log_every_n_steps: 20
+fast_dev_run: false
+
+# -------------------------
+# Model Mimarisi (ESA Backbone)
+# -------------------------
+apply_attention_on: node
+graph_dim: 256
+edge_dim: 64
+hidden_dims: [256, 256, 256, 256, 256, 256, 256, 256]
+num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
+layer_types: ["M", "S", "M", "S", "M", "S", "P", "P"]
+norm_type: LN
+use_3d_coordinates: true
+set_max_items: 0
+triu_attn_mask: false
+
+# -------------------------
+# Equivariant Features (Disabled)
+# -------------------------
+use_equivariant_features: false
+equivariant_lmax: 2
+equivariant_num_features: 16
+equivariant_fusion_method: add
+equivariant_cross_connection: true
+
+# -------------------------
+# MLP Ayarları
+# -------------------------
+use_mlps: true
+mlp_hidden_size: 512
+num_mlp_layers: 3
+mlp_type: standard
+mlp_dropout: 0.0
+use_mlp_ln: false
+pre_or_post: pre
+
+# -------------------------
+# Dropout Ayarları
+# -------------------------
+sab_dropout: 0.0
+mab_dropout: 0.0
+pma_dropout: 0.0
+attn_residual_dropout: 0.0
+pma_residual_dropout: 0.0
+
+# -------------------------
+# 3D Geometrik Parametreler
+# -------------------------
+molecule_max_atoms: null
+gaussian_kernels: 128
+cutoff_distance: 5.0
+max_neighbors: 64
+
+# Long-range distance loss
+max_distance: 20.0
+distance_bins: 16
+distance_bin_boundaries: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.5, 17.5, 20.0]
+
+# Short-range distance loss
+short_range_max_distance: 5.0
+short_range_distance_bins: 10
+short_range_bin_boundaries: [0.8, 1.2, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+
+# -------------------------
+# Hybrid Edge Construction
+# -------------------------
+use_hybrid_edges: true
+sequence_neighbors_k: 3
+max_spatial_neighbors: 48
+num_random_edges: 8
+random_edge_min_distance: 10.0
+
+# -------------------------
+# Dynamic Random Edges
+# -------------------------
+use_dynamic_random_edges: true
+replace_existing_random_edges: true
+
+# -------------------------
+# Ön-Eğitim Görevleri
+# -------------------------
+pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
+task_weights:
+  long_range_distance: 1.5
+  short_range_distance: 1.0
+  mlm: 0.3
+mlm_mask_ratio: 0.15
+coconut_masking_method: random_walk
+coconut_mask_ratio: 0.15
+coconut_num_random_walks: 1
+log_coconut_masking_stats: true
+log_coconut_masking_frequency: 50
+
+protein_block_mlm: true
+protein_block_mlm_ratio: 0.15
+temperature: 0.2
