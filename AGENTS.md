@@ -13,6 +13,8 @@ Current contracts:
 - Geometry-neutral encoding removes visible V and all masked sidechain/base
   nodes from ESA; post-ESA latent slots read their own backbone context.
 - Protein/RNA MLM masks complete blocks; UniMol uses atom-level masking.
+- Protein/RNA chunks store no edges: protein Tier-1 CA edges are regenerated at load time and
+  every other edge is rebuilt at runtime. Configs that need stored edges are refused loudly.
 - Invariant features are enabled; the optional equivariant branch is disabled.
   M layers are graph-local and S layers are molecule-global.
 - Protein hybrid edges combine CA sequence, real spatial, and dynamic random
@@ -39,13 +41,21 @@ Current contracts:
 Datasets live outside Git. `chunk_dir` is often a prefix whose sibling
 `_chunk_*` directories exist; it need not be a literal directory.
 
-| Dataset | Current Anzu base / source |
+Protein and RNA chunks are edge-free fixed-slot chunks (`mind_pt_schema`, built by
+`data_loading/build_edge_free_chunks.py`); the legacy edge-stored chunks were deleted on
+9 October 2026 after the equivalence checks in the
+[scaling plan](Docs/training/FULL_DATA_SCALING_PLAN_20260923.md) and
+[CURRENT_TODOS.md](CURRENT_TODOS.md).
+
+| Dataset | Current Atum base / source |
 |---|---|
-| Protein PT prefix | `/home/yusuf/data/proteins/processed_14atom`, chunks 0–9 |
-| Raw 40k proteins | `/home/yusuf/data/proteins/raw_structures_hq_40k/` |
-| Protein manifests | `/home/yusuf/data/proteins/afdb_clusters/` |
-| Full-run RNA prefix | `/home/yusuf/data/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot` |
-| Fast RNA prefix | `/home/yusuf/data/rna_small/processed_23slot_5k` |
+| Protein 1M (1,117,868; train/val/test) | `/home/yusuf/data/proteins/processed_14atom_1m_edgefree_{train,val,test}`, split by structure-ID hash |
+| Protein 40k baseline | `/home/yusuf/data/proteins/processed_14atom_edgefree`, chunks 0–9 |
+| Raw 40k / 1M proteins | `/home/yusuf/data/proteins/raw_structures_hq_40k/`, `/home/yusuf/data/protein_1m/raw_structures_1m_1024/` |
+| Protein manifests | `/home/yusuf/data/proteins/afdb_clusters/`, `/home/yusuf/data/protein_1m/afdb_clusters/` |
+| Full RNA corpus (12,869; split by PDB entry) | `/home/yusuf/data/rna/processed_23slot_full_edgefree_{train,val,test}` |
+| June-equivalent RNA (baseline) | `/home/yusuf/data/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot_edgefree` |
+| Fast RNA prefix | `/home/yusuf/data/rna_small/processed_23slot_5k_edgefree` |
 | UniMol prefix | `/home/yusuf/data/small_molecules/unimol/universal_unimol`; 200 available chunks; the logged full baseline loader slice is 0, 1, 10, 100–106 because discovery is lexicographic |
 | Metabolite / QM9 | COCONUT is at `/home/yusuf/data/metabolites/processed`; it remains disabled because mixed-domain coordination is defective. QM9 is unavailable. |
 
@@ -72,9 +82,8 @@ Training commands are user-executed. Fast duration depends on hardware/data;
 do not promise ten minutes. Logs go to `logs/<MonthYear>/`, outputs to a
 run-specific directory or explicit `OUTPUT_DIR`.
 
-The default `make process-protein` uses 40k source/output paths and `--force`.
-Inspect/override paths before user-authorized processing; never treat it as a
-harmless migration check or a ready-made 1M command.
+`make build-edge-free` has no default paths and refuses to overwrite a chunk; it still
+writes data, so run it only on an explicit user request with a new destination prefix.
 
 ## Execution Authority and Process Verification
 

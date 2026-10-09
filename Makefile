@@ -91,22 +91,19 @@ RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
 # ===================================================================
 # Data Processing
 # ===================================================================
-#   make process-protein                   # sequential (all 10 chunks)
-#   make process-protein PARALLEL=2        # 2 parallel groups (nohup)
+# Raw protein/RNA structures -> edge-free fixed-slot chunks
+# (data_loading/build_edge_free_chunks.py). No defaults and no overwrite: the
+# destination must be new and every argument is explicit. Runs detached.
+#   make build-edge-free DOMAIN=protein MANIFEST=<csv> RAW_DIR=<dir> \
+#        DEST_PREFIX=<new prefix> CHUNK_SIZE=4000 WORKERS=32
+#   Optional: SPLIT_GROUP=pdb-entry (RNA), BUILD_ARGS="--no-split --chunks 0"
+# UniMol and COCONUT still use data_loading/process_chunked_dataset.py.
 # ===================================================================
 
-NUM_CHUNKS ?= 10
-PARALLEL ?= 1
-PROCESS_ARGS = --config-yaml-path core/pretraining_config_multidomain.yaml \
-	--dataset pdb \
-	--data-path /home/yusuf/data/proteins/raw_structures_hq_40k \
-	--manifest-file /home/yusuf/data/proteins/afdb_clusters/manifest_hq_40k_len512.csv \
-	--output-base /home/yusuf/data/proteins/processed_14atom \
-	--cache-dir /home/yusuf/data/proteins/cache_14atom \
-	--num-chunks $(NUM_CHUNKS) \
-	--use-hybrid-edges --force
+WORKERS ?= 32
+SPLIT_GROUP ?= id
 
-.PHONY: train test-unit stop status logs help process-protein
+.PHONY: train test-unit stop status logs help build-edge-free
 
 test-unit:
 	$(CONDA_RUN) python -m pytest -q $(PYTEST_ARGS)
@@ -170,29 +167,21 @@ status:
 		printf "  GPU %-2s | %-14s | PID %-8s |%s\n" "$${gpuidx:-?}" "$${usr:-?}" "$$pid" "$$mem"; \
 	done 2>/dev/null || true
 
-process-protein:
-ifeq ($(PARALLEL),1)
-	@echo "=== Processing protein data (sequential, all $(NUM_CHUNKS) chunks) ==="
-	$(CONDA_RUN) nohup python data_loading/process_chunked_dataset.py \
-		$(PROCESS_ARGS) > process_protein.log 2>&1 &
-	@echo "PID: $$!"
-	@echo "Follow: tail -f process_protein.log"
-else
-	@echo "=== Processing protein data ($(PARALLEL) parallel groups) ==="
-	@chunks_per_group=$$(( ($(NUM_CHUNKS) + $(PARALLEL) - 1) / $(PARALLEL) )); \
-	for g in $$(seq 0 $$(($(PARALLEL)-1))); do \
-		start=$$((g * chunks_per_group)); \
-		end_idx=$$((start + chunks_per_group - 1)); \
-		if [ $$end_idx -ge $(NUM_CHUNKS) ]; then end_idx=$$(($(NUM_CHUNKS)-1)); fi; \
-		if [ $$start -ge $(NUM_CHUNKS) ]; then continue; fi; \
-		echo "  Group $$g: chunks $$start-$$end_idx -> process_protein_$${g}.log"; \
-		$(CONDA_RUN) nohup python data_loading/process_chunked_dataset.py \
-			$(PROCESS_ARGS) --chunk-range "$$start-$$end_idx" \
-			> process_protein_$${g}.log 2>&1 & \
-	done
-	@echo ""
-	@echo "Follow: tail -f process_protein_*.log"
-endif
+build-edge-free:
+	@test -n "$(DOMAIN)" -a -n "$(MANIFEST)" -a -n "$(RAW_DIR)" -a -n "$(DEST_PREFIX)" -a -n "$(CHUNK_SIZE)" || { \
+		echo "ERROR: set DOMAIN (protein|rna), MANIFEST, RAW_DIR, DEST_PREFIX and CHUNK_SIZE"; exit 1; }
+	@echo "=== MIND edge-free chunk build ==="
+	@echo "  Domain: $(DOMAIN)   Manifest: $(MANIFEST)"
+	@echo "  Raw:    $(RAW_DIR)"
+	@echo "  Dest:   $(DEST_PREFIX)_*   Chunk size: $(CHUNK_SIZE)   Workers: $(WORKERS)"
+	@echo "  Log:    $(LOG_MONTH_DIR)/build_$(DOMAIN)_$(_LOG_DATETIME).log"
+	@mkdir -p $(LOG_MONTH_DIR)
+	$(CONDA_RUN) setsid nohup python -u -m data_loading.build_edge_free_chunks \
+		--domain $(DOMAIN) --manifest "$(MANIFEST)" --raw-dir "$(RAW_DIR)" \
+		--dest-prefix "$(DEST_PREFIX)" --chunk-size $(CHUNK_SIZE) --workers $(WORKERS) \
+		--split-group $(SPLIT_GROUP) $(BUILD_ARGS) \
+		> $(LOG_MONTH_DIR)/build_$(DOMAIN)_$(_LOG_DATETIME).log 2>&1 < /dev/null &
+	@echo "Follow: tail -f $(LOG_MONTH_DIR)/build_$(DOMAIN)_$(_LOG_DATETIME).log"
 
 logs:
 	@find logs/ -name "*.log" -printf "%T@ %p\n" 2>/dev/null | sort -rn | head -10 | awk '{print $$2}' || echo "No log files found."
@@ -213,7 +202,7 @@ help:
 	@echo "    make logs                            List recent log files"
 	@echo ""
 	@echo "  Data Processing:"
-	@echo "    make process-protein                 All chunks (sequential, nohup)"
-	@echo "    make process-protein PARALLEL=2      2 parallel groups (nohup)"
+	@echo "    make build-edge-free DOMAIN=protein MANIFEST=.. RAW_DIR=.. DEST_PREFIX=.. CHUNK_SIZE=4000"
+	@echo "                                         Raw -> edge-free chunks (detached, no defaults)"
 	@echo ""
 	@echo "  CONFIG shortcuts: m=multidomain, f=fast"

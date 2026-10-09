@@ -44,8 +44,8 @@ exist must be implemented and reviewed before proposing its command.
 
 Data audits, processing, and conversion require explicit user execution
 authorization; record exact inputs, destination, log and result, and never
-overwrite production PTs by default. The current `make process-protein` defaults
-include `--force`; inspect and override its paths before any processing request.
+overwrite production PTs by default. `make build-edge-free` has no defaults and
+refuses to overwrite; give it a new destination prefix and inspect the arguments.
 
 ## Interpret runs honestly
 

@@ -16,17 +16,20 @@ raw structures / molecule records
         └─ train_pretrain.py → LazyUniversalDataset → dynamic batches
 ```
 
-For proteins, the supported preparation workflow is exposed by the Makefile:
+For proteins and RNA, the preparation workflow builds edge-free chunks directly from raw
+structures (`mind_pt_schema`; no `.pkl` cache and no stored edges):
 
 ```bash
-make process-protein NUM_CHUNKS=10
-make process-protein NUM_CHUNKS=10 PARALLEL=2
+make build-edge-free DOMAIN=protein MANIFEST=<csv> RAW_DIR=<dir> DEST_PREFIX=<new prefix> CHUNK_SIZE=4000
+make build-edge-free DOMAIN=rna MANIFEST=<csv> RAW_DIR=<dir> DEST_PREFIX=<new prefix> CHUNK_SIZE=200 SPLIT_GROUP=pdb-entry
 ```
 
-The target paths and arguments are defined in [`Makefile`](../../Makefile).
-Its default includes `--force` and reuses the 40k output prefix. Review and
-override those paths for a new experiment; do not run it as a migration check.
-The underlying orchestrator is
+[`data_loading/build_edge_free_chunks.py`](../../data_loading/build_edge_free_chunks.py) assigns
+train/val/test by SHA-256 of the structure ID (or PDB entry), shuffles within each split,
+writes resumable chunks `<prefix>_<split>_chunk_NNN` and records failures in the metadata.
+The loader is described in [`data_loading/pt_schema.py`](../../data_loading/pt_schema.py).
+
+UniMol and COCONUT still use the two-stage pipeline orchestrated by
 [`data_loading/process_chunked_dataset.py`](../../data_loading/process_chunked_dataset.py).
 It creates a universal cache with
 [`data_loading/cache_universal_datasets.py`](../../data_loading/cache_universal_datasets.py)
@@ -113,8 +116,7 @@ finite coordinates, molecule IDs, and domain labels. For a requested adapter
 or pipeline change, the focused checks are:
 
 ```bash
-pytest -v tests/test_adapters.py
-make process-protein NUM_CHUNKS=1
+pytest -v tests/test_adapters.py tests/test_build_edge_free_chunks.py
 ```
 
 Then inspect one generated graph with `torch.load` and confirm `pos` has shape
