@@ -98,6 +98,40 @@ END
             if temp_path.exists():
                 temp_path.unlink()
 
+    def test_protein_adapter_reads_mmcif_like_pdb(self):
+        """An mmCIF input must yield the same blocks as the equivalent PDB file."""
+        from Bio.PDB import MMCIFIO, PDBParser
+
+        atoms = [
+            ("ALA", 1, "N", "N", (0.0, 1.43, 0.0)), ("ALA", 1, "CA", "C", (0.0, 0.0, 0.0)),
+            ("ALA", 1, "C", "C", (1.52, 0.0, 0.0)), ("ALA", 1, "O", "O", (2.15, 1.05, 0.0)),
+            ("ALA", 1, "CB", "C", (-0.54, -0.77, 1.2)),
+            ("GLY", 2, "N", "N", (2.15, -1.18, 0.0)), ("GLY", 2, "CA", "C", (3.6, -1.3, 0.0)),
+            ("GLY", 2, "C", "C", (4.1, -2.74, 0.0)), ("GLY", 2, "O", "O", (3.3, -3.68, 0.0)),
+        ]
+        lines = [
+            f"ATOM  {serial:5d} {name:<4s} {res:3s} A{seq:4d}    "
+            f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00 90.00          {element:>2s}"
+            for serial, (res, seq, name, element, (x, y, z)) in enumerate(atoms, start=1)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            pdb_path = Path(tmp) / "SAMPLE.pdb"
+            cif_path = Path(tmp) / "SAMPLE.cif"
+            pdb_path.write_text("\n".join(lines + ["END"]) + "\n")
+            io = MMCIFIO()
+            io.set_structure(PDBParser(QUIET=True).get_structure("SAMPLE", str(pdb_path)))
+            io.save(str(cif_path))
+
+            adapter = ProteinAdapter(use_14atom_uniform=True)
+            from_pdb = adapter.convert_to_universal(pdb_path)
+            from_cif = adapter.convert_to_universal(cif_path)
+
+        self.assertEqual(len(from_cif.blocks), 2)
+        self.assertEqual(
+            [(b.symbol, [(a.pos_code, a.position) for a in b.atoms]) for b in from_cif.blocks],
+            [(b.symbol, [(a.pos_code, a.position) for a in b.atoms]) for b in from_pdb.blocks],
+        )
+
     def test_protein_adapter_real_sample_if_present(self):
         """Test ProteinAdapter on real structure if local raw data is available."""
         real_data_dir = Path("/home/yusuf/data/proteins/raw_structures_hq_40k")

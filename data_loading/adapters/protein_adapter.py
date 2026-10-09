@@ -340,8 +340,8 @@ class ProteinAdapter(BaseAdapter):
                 )
             elif suffix == ".cif":
                 structure = self.cif_parser.get_structure(
-                    structure_id=raw_item.stem,
-                    file=str(raw_item)
+                    raw_item.stem,
+                    str(raw_item)
                 )
             else:
                 return []
