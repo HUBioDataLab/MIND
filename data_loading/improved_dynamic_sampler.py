@@ -581,11 +581,15 @@ class ImprovedDynamicBatchSampler(BatchSampler):
             )
 
         batches = [list(batch) for batch in batches]
+        # Cached per-batch atom counts; same selection as recomputing each pass.
+        batch_atoms = [
+            [self._atom_count_for_subset_index(idx) for idx in batch]
+            for batch in batches
+        ]
+        batch_totals = [sum(counts) for counts in batch_atoms]
         while len(batches) < self.epoch_num_batches:
             splittable = [
-                (index, batch)
-                for index, batch in enumerate(batches)
-                if len(batch) > 1
+                index for index, batch in enumerate(batches) if len(batch) > 1
             ]
             if not splittable:
                 raise ValueError(
@@ -593,18 +597,15 @@ class ImprovedDynamicBatchSampler(BatchSampler):
                     f"epoch_num_batches={self.epoch_num_batches}"
                 )
 
-            batch_index, batch = max(
+            batch_index = max(
                 splittable,
-                key=lambda item: (
-                    sum(self._atom_count_for_subset_index(idx) for idx in item[1]),
-                    len(item[1]),
-                    -item[0],
+                key=lambda index: (
+                    batch_totals[index], len(batches[index]), -index,
                 ),
             )
-            atom_counts = [
-                self._atom_count_for_subset_index(idx) for idx in batch
-            ]
-            total_atoms = sum(atom_counts)
+            batch = batches[batch_index]
+            atom_counts = batch_atoms[batch_index]
+            total_atoms = batch_totals[batch_index]
             prefix_atoms = 0
             best_cut = 1
             best_difference = total_atoms
@@ -617,6 +618,13 @@ class ImprovedDynamicBatchSampler(BatchSampler):
 
             batches[batch_index:batch_index + 1] = [
                 batch[:best_cut], batch[best_cut:]
+            ]
+            prefix_total = sum(atom_counts[:best_cut])
+            batch_atoms[batch_index:batch_index + 1] = [
+                atom_counts[:best_cut], atom_counts[best_cut:]
+            ]
+            batch_totals[batch_index:batch_index + 1] = [
+                prefix_total, total_atoms - prefix_total
             ]
 
         self.plan_stats["natural_batches"] = natural_batch_count

@@ -99,6 +99,11 @@ class BatchStatisticsCallback(Callback):
         template_stats = getattr(batch, 'virtual_template_stats', None) or {}
         record['template_total_ms'] = template_stats.get('template_total_ms')
         record['edge_rebuild_ms'] = template_stats.get('edge_rebuild_ms')
+        # Process-local allocator peak since start (other users' GPU memory excluded).
+        record['peak_gpu_mb'] = (
+            torch.cuda.max_memory_allocated() / 2**20
+            if torch.cuda.is_available() and torch.cuda.is_initialized() else None
+        )
         self.batch_stats.append(record)
         wait_ms = 1000.0 * (record['data_wait_seconds'] or 0.0)
         template_ms = (
@@ -109,6 +114,9 @@ class BatchStatisticsCallback(Callback):
             f"{record['edge_rebuild_ms']:.2f}"
             if record['edge_rebuild_ms'] is not None else "na"
         )
+        peak_gpu = (
+            f"{record['peak_gpu_mb']:.0f}" if record['peak_gpu_mb'] is not None else "na"
+        )
         if record['emit_telemetry']:
             print(
                 f"TELEMETRY epoch={record['epoch']} batch={batch_idx} "
@@ -117,7 +125,8 @@ class BatchStatisticsCallback(Callback):
                 f"data_wait_ms={wait_ms:.2f} atoms_s={record['atoms_per_second']:.1f} "
                 f"edges_s={record['edges_per_second']:.1f} "
                 f"graphs_s={record['graphs_per_second']:.2f} "
-                f"template_ms={template_ms} edge_rebuild_ms={edge_rebuild_ms}"
+                f"template_ms={template_ms} edge_rebuild_ms={edge_rebuild_ms} "
+                f"peak_gpu_mb={peak_gpu}"
             )
         self._previous_batch_end = ended_at
         self._active_batch_stat = None
@@ -270,6 +279,9 @@ class BatchStatisticsCallback(Callback):
             f"DATA WAIT ms p50={self._percentile(wait_ms, 0.50):.2f} "
             f"p90={self._percentile(wait_ms, 0.90):.2f}"
         )
+        peaks = [item['peak_gpu_mb'] for item in records if item.get('peak_gpu_mb') is not None]
+        if peaks:
+            print(f"  PEAK GPU allocated MB={max(peaks):.0f} (process-local)")
         print(
             f"  THROUGHPUT atoms/s={sum(batch_sizes) / total_seconds:.1f} "
             f"edges/s={sum(item['num_edges'] for item in records) / total_seconds:.1f} "
