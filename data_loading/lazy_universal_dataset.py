@@ -40,6 +40,14 @@ from data_loading.atom_position_vocab import (
     VIRTUAL_ATOMIC_NUMBER,
     is_virtual_position_code,
 )
+from data_loading.pt_schema import (
+    PT_SCHEMA_NAME,
+    EdgeFreeRuntimeContract,
+    decode_edge_free_sample,
+    normalize_schema_domain,
+    split_chunk_payload,
+    validate_edge_free_schema,
+)
 
 INDEX_MAP_SUFFIX = "_index_map.json"
 
@@ -111,6 +119,9 @@ class LazyUniversalDataset(Dataset):
         load_metadata: bool = False,
         metadata_search_paths: Optional[List[str]] = None,
         max_graph_atoms_by_domain: Optional[Dict[str, int]] = None,
+        edge_free_runtime: Optional[EdgeFreeRuntimeContract] = None,
+        chunk_split_tags: Optional[List[Optional[str]]] = None,
+        oversized_graph_policy_by_domain: Optional[Dict[str, str]] = None,
     ):
         """
         Initialize LazyUniversalDataset
@@ -121,6 +132,13 @@ class LazyUniversalDataset(Dataset):
             max_cache_chunks: Maximum number of chunks to keep in RAM (default: 3)
             verbose: Print loading information
             load_metadata: If True, load metadata for atom-aware sampling (default: False)
+            edge_free_runtime: Config-derived contract required to decode
+                versioned edge-free protein/RNA chunks (``data_loading.pt_schema``).
+            chunk_split_tags: Per-chunk fixed split (``train``/``val``/``test``) or
+                ``None`` for chunks that are randomly split by sample.
+            oversized_graph_policy_by_domain: ``error`` (default) or ``skip`` per
+                metadata dataset type for graphs above ``max_graph_atoms``. Skipped
+                graphs stay indexed but are listed in ``excluded_indices``.
         """
         # Filter out PyG metadata files (pre_transform.pt, pre_filter.pt)
         self.chunk_pt_files = [
@@ -133,6 +151,26 @@ class LazyUniversalDataset(Dataset):
         self.load_metadata = load_metadata
         self.metadata_search_paths = metadata_search_paths or []
         self.max_graph_atoms_by_domain = max_graph_atoms_by_domain or {}
+        self.edge_free_runtime = edge_free_runtime
+        if chunk_split_tags is None:
+            chunk_split_tags = [None] * len(self.chunk_pt_files)
+        if len(chunk_split_tags) != len(self.chunk_pt_files):
+            raise ValueError("chunk_split_tags must have one entry per chunk")
+        invalid_tags = set(chunk_split_tags) - {None, 'train', 'val', 'test'}
+        if invalid_tags:
+            raise ValueError(f"invalid chunk split tags: {sorted(invalid_tags)}")
+        self.chunk_split_tags = list(chunk_split_tags)
+        self.oversized_graph_policy_by_domain = oversized_graph_policy_by_domain or {}
+        invalid_policies = {
+            domain: policy
+            for domain, policy in self.oversized_graph_policy_by_domain.items()
+            if policy not in ('error', 'skip')
+        }
+        if invalid_policies:
+            raise ValueError(f"oversized graph policy must be error or skip: {invalid_policies}")
+        # Global sample indices excluded by a ``skip`` size policy, with their records.
+        self.excluded_indices: set = set()
+        self.excluded_records: list = []
         
         # LRU cache for loaded chunks
         self._cache = OrderedDict()
@@ -148,6 +186,8 @@ class LazyUniversalDataset(Dataset):
         self.metadata_loaded = False
         self.chunk_metadata = []  # List of metadata dicts (one per chunk)
         self.sample_metadata_index = []  # Global index -> metadata mapping
+        # Edge-free schema declared by each chunk's metadata (None = legacy PT)
+        self.metadata_schemas = [None] * len(self.chunk_pt_files)
         
         # Build index map: which sample is in which file?
         self._build_index_map()
@@ -222,7 +262,7 @@ class LazyUniversalDataset(Dataset):
             
             # Load only slices to count samples (minimal RAM)
             try:
-                _, slices = torch.load(
+                payload = torch.load(
                     pt_file,
                     map_location='cpu',
                     weights_only=False,
@@ -230,6 +270,7 @@ class LazyUniversalDataset(Dataset):
                 )
             except Exception as e:
                 raise RuntimeError(f"Failed to load {pt_file}: {e}")
+            _, slices, _ = split_chunk_payload(payload, origin=pt_file)
             
             # Determine number of samples
             # Use 'pos' as reference (every sample must have positions)
@@ -313,8 +354,12 @@ class LazyUniversalDataset(Dataset):
                     self._cache.move_to_end(pt_file)
                 
                 # Extract sample
-                data, slices = self._cache[pt_file]
+                data, slices, schema = self._cache[pt_file]
                 sample = self._extract_sample(data, slices, local_idx)
+                if schema is not None:
+                    sample = decode_edge_free_sample(
+                        sample, schema, self.edge_free_runtime
+                    )
                 sample = normalize_legacy_atom_ids(sample)
                 sample = self._normalize_sample_for_collate(sample)
                 
@@ -391,8 +436,18 @@ class LazyUniversalDataset(Dataset):
             del self._cache[oldest_file]
         
         # Load new chunk
-        data, slices = torch.load(pt_file, map_location='cpu', weights_only=False)
-        self._cache[pt_file] = (data, slices)
+        payload = torch.load(pt_file, map_location='cpu', weights_only=False)
+        data, slices, schema = split_chunk_payload(payload, origin=pt_file)
+        chunk_idx = self.chunk_pt_files.index(pt_file)
+        if self.metadata_loaded and schema != self.metadata_schemas[chunk_idx]:
+            raise ValueError(
+                f"{pt_file}: PT schema does not match its metadata JSON "
+                f"({PT_SCHEMA_NAME} in PT: {schema is not None}, "
+                f"in metadata: {self.metadata_schemas[chunk_idx] is not None})"
+            )
+        if schema is not None:
+            self._require_edge_free_runtime(schema, pt_file)
+        self._cache[pt_file] = (data, slices, schema)
         self._cache_loads += 1
         self._cache_load_seconds += time.perf_counter() - started_at
 
@@ -505,6 +560,7 @@ class LazyUniversalDataset(Dataset):
         # Check if all metadata loaded successfully
         if len(self.chunk_metadata) == len(self.chunk_pt_files):
             self.metadata_loaded = True
+            self._load_metadata_schemas()
             self._build_metadata_index()
             
             if self.verbose:
@@ -528,6 +584,39 @@ class LazyUniversalDataset(Dataset):
                 print(f"💡 Tip: Run create_chunk_metadata.py to generate metadata")
                 print(f"🔄 Falling back to standard mode (metadata-free)")
     
+    def _require_edge_free_runtime(self, schema: dict, origin: str) -> None:
+        if self.edge_free_runtime is None:
+            raise ValueError(
+                f"{origin}: edge-free {schema['domain']} chunk requires an "
+                "edge_free_runtime contract derived from the training config"
+            )
+        self.edge_free_runtime.require_domain(schema['domain'], origin=origin)
+
+    def _load_metadata_schemas(self):
+        """Validate edge-free schemas declared in metadata before any split."""
+        for chunk_idx, metadata in enumerate(self.chunk_metadata):
+            pt_file = self.chunk_pt_files[chunk_idx]
+            schema = metadata.get(PT_SCHEMA_NAME)
+            if schema is None:
+                continue
+            schema = validate_edge_free_schema(schema, origin=f"{pt_file} metadata")
+            if normalize_schema_domain(metadata.get('dataset_type')) != schema['domain']:
+                raise ValueError(
+                    f"{pt_file}: metadata dataset_type {metadata.get('dataset_type')!r} "
+                    f"does not match schema domain {schema['domain']!r}"
+                )
+            self._require_edge_free_runtime(schema, pt_file)
+            self.metadata_schemas[chunk_idx] = schema
+        for chunk_idx, metadata in enumerate(self.chunk_metadata):
+            declared = metadata.get('split')
+            assigned = self.chunk_split_tags[chunk_idx]
+            if declared is not None and declared != assigned:
+                raise ValueError(
+                    f"{self.chunk_pt_files[chunk_idx]}: metadata declares split "
+                    f"{declared!r} but the config assigns {assigned!r}; configure "
+                    "this domain with explicit train/val/test splits"
+                )
+
     def _build_metadata_index(self):
         """
         Build global sample index -> metadata mapping.
@@ -548,28 +637,59 @@ class LazyUniversalDataset(Dataset):
                 })
 
     def _validate_graph_size_limits(self):
-        """Reject configured oversized graphs before train/val/test splitting."""
+        """Apply per-domain graph-size limits before train/val/test splitting.
+
+        Limits are keyed by metadata ``dataset_type``. A graph above its limit
+        raises under the ``error`` policy and is recorded in
+        ``excluded_indices`` under the ``skip`` policy.
+        """
         if not self.max_graph_atoms_by_domain:
             return
         if not self.metadata_loaded:
             raise ValueError("max_graph_atoms requires complete chunk metadata")
+        loaded_domains = {str(m.get('dataset_type', 'unknown')) for m in self.chunk_metadata}
+        unknown = sorted(set(self.max_graph_atoms_by_domain) - loaded_domains)
+        if unknown:
+            raise ValueError(
+                f"max_graph_atoms configured for {unknown}, but loaded chunk "
+                f"dataset types are {sorted(loaded_domains)}"
+            )
 
         for chunk_idx, metadata in enumerate(self.chunk_metadata):
             domain = str(metadata.get('dataset_type', 'unknown'))
             limit = self.max_graph_atoms_by_domain.get(domain)
             if limit is None:
                 continue
+            policy = self.oversized_graph_policy_by_domain.get(domain, 'error')
+            start_idx = self.file_ranges[chunk_idx][0]
             for sample in metadata['samples']:
                 node_count = int(sample['num_atoms'])
                 if node_count <= limit:
                     continue
                 structure_id = sample.get('mol_id', '<metadata-unavailable>')
+                if policy == 'skip':
+                    self.excluded_indices.add(start_idx + int(sample['idx']))
+                    self.excluded_records.append({
+                        'mol_id': structure_id, 'domain': domain,
+                        'num_atoms': node_count, 'limit': limit,
+                        'chunk': self.chunk_pt_files[chunk_idx],
+                        'split': self.chunk_split_tags[chunk_idx],
+                    })
+                    continue
                 raise ValueError(
                     "Oversized graph rejected before split assignment: "
                     f"structure_id={structure_id}, domain={domain}, "
                     f"node_count={node_count}, split=all, configured_limit={limit}, "
                     f"chunk={self.chunk_pt_files[chunk_idx]}, local_idx={sample['idx']}"
                 )
+        if self.excluded_records:
+            by_domain = {}
+            for record in self.excluded_records:
+                by_domain[record['domain']] = by_domain.get(record['domain'], 0) + 1
+            print(
+                f"⚠️  Oversized graphs skipped by policy: {by_domain} "
+                f"(first: {self.excluded_records[:3]})"
+            )
     
     def get_sample_metadata(self, idx: int) -> Optional[Dict[str, Any]]:
         """

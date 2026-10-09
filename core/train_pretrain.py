@@ -15,7 +15,7 @@ import torch
 torch.manual_seed(42)
 from torch_geometric.loader import DataLoader as GeometricDataLoader
 from torch.utils.data import DataLoader
-from torch.utils.data import random_split
+from torch.utils.data import Subset, random_split
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar, Callback, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 
@@ -38,6 +38,7 @@ from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes, AddRandomNoise
 from data_loading.chunk_sampler import ChunkAwareSampler
 from data_loading.dynamic_chunk_sampler import DynamicChunkAwareBatchSampler
+from data_loading.pt_schema import edge_free_runtime_contract_from_config
 from data_loading.improved_dynamic_sampler import ImprovedDynamicBatchSampler
 from data_loading.protein_dynamic_random_edges import OptimizedProteinDynamicRandomEdges
 from torch_geometric.transforms import Compose
@@ -116,6 +117,61 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
     return Compose(transforms) if len(transforms) > 0 else None
 
 
+# Config dataset keys whose chunk metadata uses a different dataset_type name.
+METADATA_DOMAIN_NAMES = {'pdb': 'protein'}
+SPLIT_NAMES = ('train', 'val', 'test')
+
+
+def _discover_chunk_files(label: str, chunk_dir: str, chunk_range) -> list:
+    """Return the data PT of each ``<chunk_dir>_chunk_*`` directory (sorted by name)."""
+    if not chunk_dir:
+        print(f"⚠️  {label.upper()}: chunk_dir not specified")
+        return []
+    dataset_dir_path = Path(chunk_dir)
+    parent_dir = dataset_dir_path.parent
+    base_name = dataset_dir_path.name
+    chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
+    if not chunk_dirs:
+        if not dataset_dir_path.exists():
+            print(f"⚠️  {label.upper()}: chunk_dir not found: {chunk_dir} (and no chunk directories found)")
+            return []
+        # Try loading from the directory itself (non-chunked)
+        processed_dir = dataset_dir_path / "processed"
+        if processed_dir.exists():
+            pt_files = [f for f in processed_dir.glob("*.pt")
+                        if 'pre_filter' not in f.name and 'pre_transform' not in f.name]
+            if pt_files:
+                print(f"   ✓ {label.upper()}: {pt_files[0].name} (single file)")
+                return [str(pt_files[0])]
+        print(f"⚠️  {label.upper()}: No chunks or processed files found in {chunk_dir}")
+        return []
+
+    # Apply chunk_range filter if specified (inclusive [start, end]; null = use all)
+    num_chunks_total = len(chunk_dirs)
+    if chunk_range is not None and isinstance(chunk_range, (list, tuple)) and len(chunk_range) >= 2:
+        start, end = int(chunk_range[0]), int(chunk_range[1])
+        chunk_dirs = chunk_dirs[start : end + 1]
+        if not chunk_dirs:
+            print(f"⚠️  {label.upper()}: chunk_range [{start}, {end}] yielded no chunks (have {num_chunks_total} total)")
+            return []
+        print(f"   📌 {label.upper()}: using chunks {start}..{end} ({len(chunk_dirs)} of {num_chunks_total})")
+
+    # Collect .pt files from chunks; skip in-progress ``.partial`` builder outputs.
+    dtype_chunks = []
+    for chunk_dir_path in chunk_dirs:
+        if chunk_dir_path.name.endswith(".partial"):
+            raise ValueError(f"{chunk_dir_path}: incomplete chunk directory")
+        processed_dir = chunk_dir_path / "processed"
+        if processed_dir.exists():
+            pt_files = [f for f in processed_dir.glob("*.pt")
+                        if 'pre_filter' not in f.name and 'pre_transform' not in f.name]
+            if pt_files:
+                dtype_chunks.append(str(pt_files[0]))
+    if dtype_chunks:
+        print(f"   ✓ {label.upper()}: {len(dtype_chunks)} chunks loaded")
+    return dtype_chunks
+
+
 def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset_dir: str):
     """
     Load universal dataset with optimized caching.
@@ -143,71 +199,47 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
         all_chunk_files = []
         enabled_types = []
 
+        chunk_split_tags = []
         for dtype, dtype_config in multi_domain_config['datasets'].items():
             if not dtype_config.get('enabled', False):
                 continue
 
-            chunk_dir = dtype_config.get('chunk_dir', '')
-            if not chunk_dir:
-                print(f"⚠️  {dtype.upper()}: chunk_dir not specified")
+            splits_config = dtype_config.get('splits')
+            if splits_config is not None:
+                # Fixed splits: every chunk of a split prefix belongs to that split.
+                if dtype_config.get('chunk_dir') or dtype_config.get('chunk_range') is not None:
+                    raise ValueError(
+                        f"{dtype}: use either 'splits' or 'chunk_dir'/'chunk_range', not both"
+                    )
+                unknown = set(splits_config) - set(SPLIT_NAMES)
+                if unknown or 'train' not in splits_config:
+                    raise ValueError(
+                        f"{dtype}: 'splits' needs a train entry and only "
+                        f"{SPLIT_NAMES} keys, got {sorted(splits_config)}"
+                    )
+                for split in SPLIT_NAMES:
+                    split_config = splits_config.get(split)
+                    if split_config is None:
+                        continue
+                    split_files = _discover_chunk_files(
+                        f"{dtype}/{split}",
+                        split_config.get('chunk_dir', ''),
+                        split_config.get('chunk_range'),
+                    )
+                    if not split_files:
+                        raise FileNotFoundError(f"{dtype}/{split}: no chunks found")
+                    all_chunk_files.extend(split_files)
+                    chunk_split_tags.extend([split] * len(split_files))
+                enabled_types.append(dtype)
                 continue
 
-            # Detect chunk directories for this dataset type
-            dataset_dir_path = Path(chunk_dir)
-            parent_dir = dataset_dir_path.parent
-            base_name = dataset_dir_path.name
-
-            # Check if base directory exists, or if chunk directories exist
-            if not dataset_dir_path.exists():
-                # Base directory doesn't exist, but chunk directories might
-                chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
-                if not chunk_dirs:
-                    print(f"⚠️  {dtype.upper()}: chunk_dir not found: {chunk_dir} (and no chunk directories found)")
-                    continue
-            else:
-                # Base directory exists, look for chunks
-                chunk_dirs = sorted(list(parent_dir.glob(f"{base_name}_chunk_*")))
-
-            if not chunk_dirs:
-                # Try loading from the directory itself (non-chunked)
-                processed_dir = dataset_dir_path / "processed"
-                if processed_dir.exists():
-                    pt_files = [f for f in processed_dir.glob("*.pt")
-                               if 'pre_filter' not in f.name and 'pre_transform' not in f.name]
-                    if pt_files:
-                        all_chunk_files.append(str(pt_files[0]))
-                        print(f"   ✓ {dtype.upper()}: {pt_files[0].name} (single file)")
-                        enabled_types.append(dtype)
-                else:
-                    print(f"⚠️  {dtype.upper()}: No chunks or processed files found in {chunk_dir}")
-                continue
-
-            # Apply chunk_range filter if specified (inclusive [start, end]; null = use all)
-            chunk_range = dtype_config.get('chunk_range')
-            num_chunks_total = len(chunk_dirs)
-            if chunk_range is not None and isinstance(chunk_range, (list, tuple)) and len(chunk_range) >= 2:
-                start, end = int(chunk_range[0]), int(chunk_range[1])
-                chunk_dirs = chunk_dirs[start : end + 1]
-                if not chunk_dirs:
-                    print(f"⚠️  {dtype.upper()}: chunk_range [{start}, {end}] yielded no chunks (have {num_chunks_total} total)")
-                    continue
-                print(f"   📌 {dtype.upper()}: using chunks {start}..{end} ({len(chunk_dirs)} of {num_chunks_total})")
-
-            # Collect .pt files from chunks
-            # Only collect the path of the .pt file
-            dtype_chunks = []
-            for chunk_dir in chunk_dirs:
-                processed_dir = chunk_dir / "processed"
-                if processed_dir.exists():
-                    pt_files = [f for f in processed_dir.glob("*.pt")
-                               if 'pre_filter' not in f.name and 'pre_transform' not in f.name]
-                    if pt_files:
-                        dtype_chunks.append(str(pt_files[0]))
-
+            dtype_chunks = _discover_chunk_files(
+                dtype, dtype_config.get('chunk_dir', ''), dtype_config.get('chunk_range')
+            )
             if dtype_chunks:
                 all_chunk_files.extend(dtype_chunks)
+                chunk_split_tags.extend([None] * len(dtype_chunks))
                 enabled_types.append(dtype)
-                print(f"   ✓ {dtype.upper()}: {len(dtype_chunks)} chunks loaded")
 
         if not all_chunk_files:
             raise FileNotFoundError("No chunk files found for any enabled dataset type!")
@@ -236,11 +268,19 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             load_metadata=load_metadata,
             metadata_search_paths=metadata_search_paths if metadata_search_paths else None,
             max_graph_atoms_by_domain={
-                dtype: int(dtype_config['max_graph_atoms'])
+                METADATA_DOMAIN_NAMES.get(dtype, dtype): int(dtype_config['max_graph_atoms'])
                 for dtype, dtype_config in multi_domain_config['datasets'].items()
                 if dtype_config.get('enabled', False)
                 and dtype_config.get('max_graph_atoms') is not None
             },
+            oversized_graph_policy_by_domain={
+                METADATA_DOMAIN_NAMES.get(dtype, dtype): dtype_config['oversized_graphs']
+                for dtype, dtype_config in multi_domain_config['datasets'].items()
+                if dtype_config.get('enabled', False)
+                and dtype_config.get('oversized_graphs') is not None
+            },
+            edge_free_runtime=edge_free_runtime_contract_from_config(config),
+            chunk_split_tags=chunk_split_tags,
         )
 
         print(f"\n✅ Multi-domain dataset loaded:")
@@ -295,7 +335,8 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             transform=transforms,
             max_cache_chunks=3,
             verbose=True,
-            load_metadata=load_metadata
+            load_metadata=load_metadata,
+            edge_free_runtime=edge_free_runtime_contract_from_config(config),
         )
 
         print(f"📊 Caching strategy: {len(chunk_pt_files)} chunks will be loaded into RAM")
@@ -462,27 +503,72 @@ def _build_train_batch_sampler(
         )
 
 
+def _random_split_sizes(total_samples: int) -> list:
+    train_size = int(0.8 * total_samples)
+    val_size = int(0.1 * total_samples)
+    test_size = total_samples - train_size - val_size
+    return [train_size, val_size, test_size]
+
+
+def split_dataset(dataset, seed: int):
+    """Return train/val/test subsets.
+
+    Without fixed-split chunks or size exclusions this is exactly the legacy
+    seeded ``random_split`` over all samples. Chunks tagged with a split go
+    to that split as a whole; untagged chunks are random-split 80/10/10 with
+    the same seed. Graphs excluded by a ``skip`` size policy are removed.
+    """
+    tags = list(getattr(dataset, 'chunk_split_tags', None) or [])
+    excluded = set(getattr(dataset, 'excluded_indices', None) or ())
+    if not any(tags) and not excluded:
+        sizes = _random_split_sizes(len(dataset))
+        print(f"📊 Total samples: {len(dataset)}, Splitting into: Train={sizes[0]}, Val={sizes[1]}, Test={sizes[2]}")
+        # Use random_split to avoid materializing slices into memory
+        return tuple(random_split(dataset, sizes, generator=torch.Generator().manual_seed(seed)))
+
+    fixed = {split: [] for split in SPLIT_NAMES}
+    pooled = []
+    if tags:
+        for chunk_idx, (start_idx, end_idx, _) in enumerate(dataset.file_ranges):
+            target = fixed[tags[chunk_idx]] if tags[chunk_idx] else pooled
+            target.extend(range(start_idx, end_idx))
+    else:
+        pooled = list(range(len(dataset)))
+    if pooled:
+        sizes = _random_split_sizes(len(pooled))
+        permutation = torch.randperm(
+            len(pooled), generator=torch.Generator().manual_seed(seed)
+        ).tolist()
+        offset = 0
+        for split, size in zip(SPLIT_NAMES, sizes):
+            fixed[split].extend(pooled[i] for i in permutation[offset:offset + size])
+            offset += size
+    subsets = []
+    for split in SPLIT_NAMES:
+        indices = sorted(index for index in fixed[split] if index not in excluded)
+        subsets.append(Subset(dataset, indices))
+    print(
+        f"📊 Total samples: {len(dataset)}, fixed-split chunks + random pool "
+        f"({len(pooled)}), excluded {len(excluded)}: "
+        + ", ".join(f"{split}={len(subset)}" for split, subset in zip(SPLIT_NAMES, subsets))
+    )
+    if getattr(dataset, 'metadata_loaded', False):
+        for split, subset in zip(SPLIT_NAMES, subsets):
+            counts = {}
+            for index in subset.indices:
+                dtype = dataset.sample_metadata_index[index]['dataset_type']
+                counts[dtype] = counts.get(dtype, 0) + 1
+            print(f"   {split}: {counts}")
+    if not len(subsets[0]):
+        raise ValueError("training split is empty")
+    return tuple(subsets)
+
+
 def create_data_loaders(dataset, config: PretrainingConfig):
     """Create train/val/test data loaders"""
     print("🔄 Creating data loaders...")
 
-    # Calculate splits
-    total_samples = len(dataset)
-    train_size = int(0.8 * total_samples)
-    val_size = int(0.1 * total_samples)
-    test_size = total_samples - train_size - val_size
-
-    if train_size + val_size + test_size != total_samples:
-        train_size += total_samples - (train_size + val_size + test_size)
-
-    print(f"📊 Total samples: {total_samples}, Splitting into: Train={train_size}, Val={val_size}, Test={test_size}")
-
-    # Use random_split to avoid materializing slices into memory
-    train_dataset, val_dataset, test_dataset = random_split(
-        dataset,
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(config.seed)
-    )
+    train_dataset, val_dataset, test_dataset = split_dataset(dataset, config.seed)
 
     # Check if using LazyUniversalDataset (chunked dataset)
     from data_loading.lazy_universal_dataset import LazyUniversalDataset
