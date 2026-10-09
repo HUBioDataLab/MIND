@@ -12,6 +12,7 @@ Read current documents first; archived experiment proposals are not active plans
 - [Final 100-epoch results, open issues, and next development steps](training/STATUS_AND_NEXT_STEPS_20260912.md)
 - [Completed Atum/Anzu run comparison and cleanup gates](training/ATUM_ANZU_RUN_COMPARISON_20261004.md)
 - [Full-data scaling plan](training/FULL_DATA_SCALING_PLAN_20260923.md)
+- [Encoder feature defects: scope, consequences and repair plan](training/ENCODER_FEATURE_DEFECTS_20261009.md)
 - [Model overview](architecture/MODEL_OVERVIEW.md)
 
 ## Structure
@@ -31,7 +32,7 @@ Docs/
 |---|---|
 | Architecture | [Overview](architecture/MODEL_OVERVIEW.md), [virtual slots](architecture/VIRTUAL_SLOTS.md), [hybrid edges](architecture/HYBRID_EDGES.md) |
 | Data | [Pipeline](data/DATA_PIPELINE.md), [protein representation](data/PROTEIN_REPRESENTATION.md), [atom vocabulary](data/ATOM_VOCABULARY.md), [RNA datasets](data/RNA_DATASETS.md) |
-| Training | [Guide](training/TRAINING_GUIDE.md), [validation](training/VALIDATION.md), [current results/handoff](training/STATUS_AND_NEXT_STEPS_20260912.md), [bounded encoder reproduction](training/reproduce_encoder_findings.py) |
+| Training | [Guide](training/TRAINING_GUIDE.md), [validation](training/VALIDATION.md), [current results/handoff](training/STATUS_AND_NEXT_STEPS_20260912.md), [bounded encoder reproduction](training/reproduce_encoder_findings.py), [encoder defect report](training/ENCODER_FEATURE_DEFECTS_20261009.md) |
 | Operations | [Migration](operations/MIGRATION.md), [inventory](operations/NON_GIT_INVENTORY.md), [baseline checksums](operations/BASELINE_SHA256SUMS.txt) |
 | Development | [Agent workflow](development/AGENT_WORKFLOW.md), [validate-feature skill](../.agents/skills/validate-feature/SKILL.md), [strict-contract skill](../.agents/skills/strict-contracts-and-validation/SKILL.md) |
 | References | [External-model references](reference/EXTERNAL_MODELS.md) |
