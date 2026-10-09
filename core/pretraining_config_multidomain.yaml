@@ -35,7 +35,7 @@ multi_domain:
     # chunk_range: [start, end] inclusive; null = use all chunks.
     pdb:
       enabled: true
-      chunk_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform representation chunks
+      chunk_dir: "/home/yusuf/data/proteins/processed_14atom_edgefree"  # edge-free copy, graph-identical to the legacy chunks of the September/Atum runs (12,225 graphs checked)
       chunk_range: [0, 9]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
       max_graph_atoms: 12000
     
@@ -57,7 +57,7 @@ multi_domain:
     
     rna:
       enabled: true
-      chunk_dir: "/home/yusuf/data/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot"
+      chunk_dir: "/home/yusuf/data/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot_edgefree"  # edge-free June-equivalent copy
       chunk_range: null  # All 67 June-equivalent 23-slot chunks (8,556 graphs <=5,000 real non-H atoms).
       max_graph_atoms: 6000
     
@@ -87,7 +87,7 @@ multi_domain:
 # -------------------------
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
-dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform chunks
+dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom_edgefree"  # 14-atom uniform chunks (edge-free)
 
 # -------------------------
 # Data Loading Settings

@@ -16,7 +16,7 @@ multi_domain:
   datasets:
     pdb:
       enabled: true
-      chunk_dir: "/home/yusuf/data/proteins/processed_14atom"
+      chunk_dir: "/home/yusuf/data/proteins/processed_14atom_edgefree"  # edge-free copy, graph-identical to the legacy chunks of the September/Atum runs (12,225 graphs checked)
       chunk_range: [0, 0]
       max_graph_atoms: 12000
     qm9:
@@ -34,7 +34,7 @@ multi_domain:
       max_graph_atoms: 12000
     rna:
       enabled: true
-      chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k"
+      chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k_edgefree"  # edge-free copy of the development RNA
       chunk_range: [0, 0]
       max_graph_atoms: 5000
     dna:
@@ -54,7 +54,7 @@ multi_domain:
 
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
-dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"
+dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom_edgefree"
 
 num_workers: 0
 max_samples: null
