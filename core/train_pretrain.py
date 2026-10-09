@@ -118,7 +118,7 @@ def create_pretraining_data_transforms(config: PretrainingConfig):
 
 
 # Config dataset keys whose chunk metadata uses a different dataset_type name.
-METADATA_DOMAIN_NAMES = {'pdb': 'protein'}
+METADATA_DOMAIN_NAMES = {'pdb': 'protein', 'metabolite': 'coconut'}
 SPLIT_NAMES = ('train', 'val', 'test')
 
 

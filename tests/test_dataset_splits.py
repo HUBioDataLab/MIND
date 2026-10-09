@@ -144,3 +144,14 @@ def test_config_rejects_mixed_split_layouts(tmp_path):
     config = _config({"pdb": {"enabled": True, "splits": {"val": {"chunk_dir": "y"}}}})
     with pytest.raises(ValueError, match="needs a train entry"):
         load_universal_dataset(config, "PDB", "")
+
+
+def test_metabolite_config_key_maps_to_coconut_metadata_type(tmp_path, monkeypatch):
+    monkeypatch.setenv("MIND_INDEX_MAP_CACHE_DIR", str(tmp_path / "maps"))
+    _write_chunk(tmp_path, "coco", 0, [10, 50, 12], "coconut")
+    config = _config({
+        "metabolite": {"enabled": True, "chunk_dir": str(tmp_path / "coco"), "chunk_range": None,
+                       "max_graph_atoms": 40, "oversized_graphs": "skip"},
+    })
+    dataset = load_universal_dataset(config, "PDB", "")
+    assert dataset.excluded_indices == {1}
