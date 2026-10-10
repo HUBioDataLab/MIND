@@ -227,6 +227,9 @@ class BatchStatisticsCallback(Callback):
         """Print exact domain totals and graph/batch/timing quantiles for the epoch."""
         epoch = trainer.current_epoch
         records = [item for item in self.batch_stats if item['epoch'] == epoch]
+        # Only the epoch summary reads these records, so finished epochs are dropped
+        # to keep host memory constant over a long run.
+        self.batch_stats = []
         if not self.enabled or not records:
             return
         
