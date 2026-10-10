@@ -6,6 +6,7 @@ from torch_geometric.utils import to_dense_batch
 from torch_scatter import scatter_add, scatter_min
 
 from data_loading.gaussian import GaussianLayer
+from data_loading.bond_contract import resolve_bond_sources, validate_graph_edges
 from esa.utils.posenc_encoders.laplace_pos_encoder import LapPENodeEncoder
 from esa.utils.posenc_encoders.kernel_pos_encoder import KernelPENodeEncoder
 
@@ -207,47 +208,46 @@ class UniversalMolecularEncoder(nn.Module):
         return self.molecule_encoder(combined_features)
 
     def _compute_chemical_coordination(self, x_dense, batch, pos=None, edge_distances=None):
-        """Compute true chemical coordination numbers from molecular graph topology or covalent bond distance."""
+        """Count outgoing explicit bonds or distance-proxy edges, chosen per graph."""
         batch_size = x_dense.size(0)
         max_nodes = x_dense.size(1)
         device = x_dense.device
 
-        bond_edge_index = getattr(batch, 'bond_edge_index', None)
-        if bond_edge_index is not None and bond_edge_index.numel() > 0:
-            active_edges = bond_edge_index
-        elif edge_distances is not None:
-            assert hasattr(batch, 'edge_index') and batch.edge_index is not None, (
-                "Edge index is required for chemical coordination computation"
-            )
+        batch_idx = getattr(batch, 'batch', None)
+        graph_ids = batch_idx if batch_idx is not None else torch.zeros(
+            max_nodes, dtype=torch.long, device=device
+        )
+        if graph_ids.device != device:
+            raise ValueError("batch graph ids must be on the same device as encoder nodes")
+        num_graphs = batch_size if batch_idx is not None else 1
+        bonds, has_explicit_bonds = resolve_bond_sources(batch, graph_ids, num_graphs)
+        active_edges = bonds
+        if edge_distances is not None:
+            edges = getattr(batch, 'edge_index', None)
+            validate_graph_edges(edges, graph_ids)
+            if edge_distances.ndim != 1 or edge_distances.numel() != edges.size(1):
+                raise ValueError("edge_distances must contain one distance per edge_index column")
+            if edge_distances.device != device:
+                raise ValueError("edge_distances must be on the same device as encoder nodes")
             covalent_mask = (edge_distances <= 1.85) & (edge_distances > 0.5)
-            active_edges = batch.edge_index[:, covalent_mask]
-        else:
+            proxy_mask = covalent_mask & ~has_explicit_bonds[graph_ids[edges[0]]]
+            active_edges = torch.cat((bonds, edges[:, proxy_mask]), dim=1)
+        elif not bool(has_explicit_bonds.all()):
             raise ValueError(
                 "Chemical coordination computation requires either 'bond_edge_index' or 'edge_distances'"
+                " for every graph; a graph without an explicit source needs distances"
             )
 
-        batch_idx = getattr(batch, 'batch', None)
+        coordination_sparse = torch.zeros(graph_ids.numel(), device=device, dtype=torch.float)
+        src = active_edges[0]
+        coordination_sparse.scatter_add_(0, src, torch.ones_like(src, dtype=torch.float))
         if batch_idx is not None:
-            if active_edges.numel() > 0:
-                src, dst = active_edges[0], active_edges[1]
-                num_nodes = len(batch_idx)
-                coordination_sparse = torch.zeros(num_nodes, device=device, dtype=torch.float)
-                coordination_sparse.scatter_add_(0, src, torch.ones_like(src, dtype=torch.float))
-            else:
-                coordination_sparse = torch.zeros(len(batch_idx), device=device, dtype=torch.float)
-
             coordination_dense, _ = to_dense_batch(
-                coordination_sparse, batch_idx, fill_value=0, max_num_nodes=max_nodes
+                coordination_sparse, batch_idx, fill_value=0, max_num_nodes=max_nodes,
+                batch_size=batch_size,
             )
             return coordination_dense
-        else:
-            if active_edges.numel() > 0:
-                src, dst = active_edges[0], active_edges[1]
-                coordination = torch.zeros(max_nodes, device=device, dtype=torch.float)
-                coordination.scatter_add_(0, src, torch.ones_like(src, dtype=torch.float))
-            else:
-                coordination = torch.zeros(max_nodes, device=device, dtype=torch.float)
-            return coordination.unsqueeze(0).expand(batch_size, -1)
+        return coordination_sparse.unsqueeze(0).expand(batch_size, -1)
 
     def _compute_geometric_features(self, x, pos, batch, batch_obj=None):
         """
@@ -264,6 +264,8 @@ class UniversalMolecularEncoder(nn.Module):
         assert hasattr(batch_obj, 'edge_index'), "Edge index is required"
 
         edge_index = batch_obj.edge_index
+        graph_ids = batch if batch is not None else torch.zeros_like(x)
+        validate_graph_edges(edge_index, graph_ids)
 
         edge_src, edge_dst = edge_index[0], edge_index[1]
         edge_distances = torch.norm(pos[edge_src] - pos[edge_dst], dim=1)  # [num_edges]

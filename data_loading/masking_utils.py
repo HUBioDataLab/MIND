@@ -52,7 +52,8 @@ def select_random_atom_indices(
     k = mask_count(num_nodes, ratio)
     if k <= 0:
         return torch.zeros(0, dtype=torch.long, device=device)
-    return torch.randperm(num_nodes, device=device, generator=generator)[:k]
+    rng_device = generator.device if generator is not None else device
+    return torch.randperm(num_nodes, device=rng_device, generator=generator)[:k].to(device)
 
 
 def select_random_walk_indices(
@@ -99,8 +100,11 @@ def select_random_walk_indices(
         return select_random_atom_indices(num_nodes, ratio, device, generator)
 
     gen = generator
+    # Walk choices index Python adjacency lists. Draw on the generator's device,
+    # then return the selected tensor on the requested node/index device.
+    rng_device = gen.device if gen is not None else torch.device("cpu")
     start = nodes_with_neighbors[
-        int(torch.randint(len(nodes_with_neighbors), (1,), generator=gen).item())
+        int(torch.randint(len(nodes_with_neighbors), (1,), device=rng_device, generator=gen).item())
     ]
     masked = {start}
     current = start
@@ -112,7 +116,7 @@ def select_random_walk_indices(
         unvisited_neighbors = [nb for nb in adj[current] if nb not in masked]
         if unvisited_neighbors:
             idx = int(
-                torch.randint(len(unvisited_neighbors), (1,), generator=gen).item()
+                torch.randint(len(unvisited_neighbors), (1,), device=rng_device, generator=gen).item()
             )
             current = unvisited_neighbors[idx]
             masked.add(current)
@@ -124,7 +128,7 @@ def select_random_walk_indices(
                 if nb not in masked:
                     frontier.append(nb)
         if frontier:
-            current = frontier[int(torch.randint(len(frontier), (1,), generator=gen).item())]
+            current = frontier[int(torch.randint(len(frontier), (1,), device=rng_device, generator=gen).item())]
             masked.add(current)
             continue
 
@@ -132,7 +136,7 @@ def select_random_walk_indices(
         if len(masked) >= k:
             break
         start = nodes_with_neighbors[
-            int(torch.randint(len(nodes_with_neighbors), (1,), generator=gen).item())
+            int(torch.randint(len(nodes_with_neighbors), (1,), device=rng_device, generator=gen).item())
         ]
         if start in masked:
             for candidate in nodes_with_neighbors:
@@ -144,7 +148,7 @@ def select_random_walk_indices(
 
     indices = sorted(masked)
     if len(indices) > k:
-        perm = torch.randperm(len(indices), generator=gen)
+        perm = torch.randperm(len(indices), device=rng_device, generator=gen)
         indices = [indices[i] for i in perm[:k].tolist()]
         indices.sort()
     return torch.tensor(indices, dtype=torch.long, device=device)

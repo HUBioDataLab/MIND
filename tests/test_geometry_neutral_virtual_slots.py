@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 from torch_geometric.data import Batch, Data
+from torch_geometric.utils import to_dense_batch
 
 from core.masked_slot_mapping import attach_runtime_template_metadata
 from core.molecular_encoder import UniversalMolecularEncoder
@@ -605,25 +606,31 @@ class GeometryNeutralVirtualSlotTest(unittest.TestCase):
         self.assertEqual(len(active_unimol_nodes), 3)
 
         # Full UniMol bonds (28 <-> 29) must map to compact bonds
-        compact_bond = view.full_to_compact[batch.bond_edge_index]
-        valid_bond_mask = (compact_bond[0] >= 0) & (compact_bond[1] >= 0)
-        compact_bond_edges = compact_bond[:, valid_bond_mask]
+        compact_bond_edges = view.compact_bond_edge_index
         self.assertEqual(compact_bond_edges.size(1), 2)
 
         # Test encoder coordination calculation on compact batch
         encoder = UniversalMolecularEncoder(config)
-        x_dense = batch.z[view.compact_to_full].unsqueeze(0)
+        compact_batch = batch.batch[view.compact_to_full]
+        x_dense, _ = to_dense_batch(batch.z[view.compact_to_full], compact_batch)
         encoder_batch = SimpleNamespace(
-            batch=batch.batch[view.compact_to_full],
+            batch=compact_batch,
             block_idx=batch.block_idx[view.compact_to_full],
             edge_index=view.compact_edge_index,
             bond_edge_index=compact_bond_edges,
+            has_explicit_bonds=view.has_explicit_bonds,
             geometry_valid_mask=view.geometry_valid_mask[view.compact_to_full],
             domain_local_slot_ids=torch.zeros(view.compact_to_full.numel(), dtype=torch.long),
             dataset_type=getattr(batch, 'dataset_type', None),
             num_graphs=getattr(batch, 'num_graphs', 2),
         )
-        coord = encoder._compute_chemical_coordination(x_dense, encoder_batch)
+        distances = (
+            view.compact_pos[view.compact_edge_index[0]]
+            - view.compact_pos[view.compact_edge_index[1]]
+        ).norm(dim=1)
+        coord = encoder._compute_chemical_coordination(
+            x_dense, encoder_batch, edge_distances=distances
+        )
         # UniMol is graph 1 in the batch: Atom 0 and 1 have bond -> coord = 1.0; Atom 2 has no bond -> coord = 0.0
         self.assertEqual(coord[1, 0].item(), 1.0)
         self.assertEqual(coord[1, 1].item(), 1.0)

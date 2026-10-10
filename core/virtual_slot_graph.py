@@ -22,6 +22,7 @@ from typing import Iterable
 import torch
 from torch_cluster import radius_graph
 
+from data_loading.bond_contract import resolve_bond_sources, validate_graph_edges
 from core.masked_slot_mapping import map_masked_template_slots
 from data_loading.atom_position_vocab import VIRTUAL_ATOMIC_NUMBER
 
@@ -44,6 +45,8 @@ class GeometryNeutralGraphView:
     compact_to_full: torch.Tensor
     full_to_compact: torch.Tensor
     compact_edge_index: torch.Tensor
+    compact_bond_edge_index: torch.Tensor
+    has_explicit_bonds: torch.Tensor
     compact_attention_edge_index: torch.Tensor
     compact_pos: torch.Tensor
     centered_full_pos_for_losses: torch.Tensor
@@ -390,6 +393,10 @@ def build_geometry_neutral_graph_view(
         )
 
     num_nodes = int(batch.z.numel())
+    validate_graph_edges(batch.edge_index, batch.batch)
+    bond_edge_index, has_explicit_bonds = resolve_bond_sources(
+        batch, batch.batch, len(_graph_types(batch))
+    )
     domains = _enabled_domain_names(settings)
     protein_relevant = _relevant_node_mask(batch, ("protein",), num_nodes)
     rna_relevant = _relevant_node_mask(batch, ("rna",), num_nodes)
@@ -479,6 +486,8 @@ def build_geometry_neutral_graph_view(
     full_to_compact[compact_to_full] = torch.arange(
         compact_to_full.numel(), device=batch.z.device
     )
+    compact_bonds = full_to_compact[bond_edge_index]
+    compact_bond_edge_index = compact_bonds[:, (compact_bonds >= 0).all(dim=0)]
     compact_edge_index = full_to_compact[physical_edge_index]
     if compact_edge_index.numel() and bool((compact_edge_index < 0).any()):
         raise RuntimeError("physical edge points to an inactive encoder node")
@@ -504,6 +513,8 @@ def build_geometry_neutral_graph_view(
         compact_to_full=compact_to_full,
         full_to_compact=full_to_compact,
         compact_edge_index=compact_edge_index,
+        compact_bond_edge_index=compact_bond_edge_index,
+        has_explicit_bonds=has_explicit_bonds,
         compact_attention_edge_index=compact_attention_edge_index,
         compact_pos=compact_pos,
         centered_full_pos_for_losses=centered_full_pos_for_losses,

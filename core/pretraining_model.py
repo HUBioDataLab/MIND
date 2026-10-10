@@ -344,19 +344,12 @@ class PretrainingESAModel(pl.LightningModule):
             # ESA sees only the physical graph. Owner routing is a post-ESA
             # latent readout and therefore cannot affect attention geometry.
             attention_edge_index = graph_view.compact_attention_edge_index
-            bond_edge_index = getattr(batch, 'bond_edge_index', None)
-            if bond_edge_index is not None and bond_edge_index.numel() > 0:
-                compact_bond = graph_view.full_to_compact[bond_edge_index]
-                valid_bond_mask = (compact_bond[0] >= 0) & (compact_bond[1] >= 0)
-                compact_bond_edge_index = compact_bond[:, valid_bond_mask]
-            else:
-                compact_bond_edge_index = None
-
             encoder_batch = SimpleNamespace(
                 batch=batch_mapping,
                 block_idx=batch.block_idx[active],
                 edge_index=edge_index,
-                bond_edge_index=compact_bond_edge_index,
+                bond_edge_index=graph_view.compact_bond_edge_index,
+                has_explicit_bonds=graph_view.has_explicit_bonds,
                 geometry_valid_mask=graph_view.geometry_valid_mask[active],
                 domain_local_slot_ids=full_slot_ids[active],
                 dataset_type=getattr(batch, 'dataset_type', None),
@@ -580,6 +573,7 @@ class PretrainingESAModel(pl.LightningModule):
         graph_idx: int,
         indices: torch.Tensor,
         for_coord: bool = False,
+        generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         n = indices.size(0)
         device = indices.device
@@ -601,6 +595,7 @@ class PretrainingESAModel(pl.LightningModule):
             coconut_method=coconut_method,
             num_walks=num_walks,
             device=device,
+            generator=generator,
         )
         return indices[local_indices]
 
@@ -618,11 +613,10 @@ class PretrainingESAModel(pl.LightningModule):
         random draw.
 
         Args:
-            batch_idx: Batch index — used only for deterministic val/test
-                seeding when block-MLM is enabled.
+            batch_idx: Batch index used for deterministic val/test masking.
             is_validation: True for validation/test steps; activates the
-                deterministic seed path so val_mlm_loss is stable across
-                cycles.
+                deterministic seed path for MLM masks across cycles. Other
+                randomized geometry/target paths can still vary the losses.
         """
         if "mlm" not in self.config.pretraining_tasks:
             return
@@ -753,9 +747,15 @@ class PretrainingESAModel(pl.LightningModule):
                 else:
                     if is_coconut_dataset_type(g_dtype):
                         # COCONUT may opt into bond-aware masking. Keep that
-                        # feature isolated from every legacy atom-level domain.
+                        # feature isolated, including the legacy validation RNG
+                        # stream used by protein/RNA blocks and UniMol atoms.
+                        coconut_gen = None
+                        if gen is not None:
+                            coconut_gen = torch.Generator(device='cpu')
+                            coconut_gen.manual_seed(seed + (int(g) + 1) * 1009)
                         selected = PretrainingESAModel._select_graph_mask_indices(
-                            self, batch, int(g), indices, for_coord=False
+                            self, batch, int(g), indices, for_coord=False,
+                            generator=coconut_gen,
                         )
                     else:
                         k = max(1, int(n * atom_mask_ratio))
@@ -779,6 +779,7 @@ class PretrainingESAModel(pl.LightningModule):
                     coconut_method=coconut_method,
                     num_walks=num_walks,
                     device=z.device,
+                    generator=gen,
                 )
             else:
                 k = max(1, int(num_nodes * atom_mask_ratio))

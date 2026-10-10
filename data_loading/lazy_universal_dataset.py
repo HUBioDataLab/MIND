@@ -40,6 +40,7 @@ from data_loading.atom_position_vocab import (
     VIRTUAL_ATOMIC_NUMBER,
     is_virtual_position_code,
 )
+from data_loading.bond_contract import validate_graph_edges
 from data_loading.pt_schema import (
     PT_SCHEMA_NAME,
     EdgeFreeRuntimeContract,
@@ -453,9 +454,23 @@ class LazyUniversalDataset(Dataset):
 
     @staticmethod
     def _normalize_sample_for_collate(sample: Data) -> Data:
-        """Give every domain the optional fields required by mixed PyG collation."""
+        """Normalize legacy bonds and record graph-level source before compaction.
+
+        Legacy empty tensors also represent missing information, so only a
+        nonempty full list establishes an explicit source. Never infer this
+        flag from atom degrees or from the later compact bond list.
+        """
+        graph_ids = torch.zeros(sample.num_nodes, dtype=torch.long, device=sample.z.device)
         if not hasattr(sample, "bond_edge_index") or sample.bond_edge_index is None:
-            sample.bond_edge_index = torch.empty((2, 0), dtype=torch.long)
+            sample.bond_edge_index = torch.empty((2, 0), dtype=torch.long, device=sample.z.device)
+        validate_graph_edges(
+            sample.bond_edge_index, graph_ids,
+            name=f"bond_edge_index (mol_id={getattr(sample, 'mol_id', '?')}, "
+                 f"dataset_type={getattr(sample, 'dataset_type', '?')})",
+        )
+        sample.has_explicit_bonds = torch.tensor(
+            [sample.bond_edge_index.numel() > 0], dtype=torch.bool, device=sample.z.device,
+        )
         return sample
     
     def _extract_sample(self, data: Data, slices: dict, idx: int) -> Data:
