@@ -276,7 +276,10 @@ class OptimizedUniversalDataset(InMemoryDataset):
 
         os.makedirs(root, exist_ok=True)
         super().__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0], map_location='cpu')
+        # Trusted file written by this class (PyG objects need weights_only=False on torch >= 2.6).
+        self.data, self.slices = torch.load(
+            self.processed_paths[0], map_location='cpu', weights_only=False
+        )
 
     @property
     def raw_file_names(self) -> List[str]:
