@@ -32,7 +32,8 @@ Current contracts:
 - `Docs/`: canonical English documentation; start at [Docs/README.md](Docs/README.md).
 - `.agents/skills/`: the shared source for MIND skills; `.claude/skills/` links
   to these folders. `CLAUDE.md` imports this file for Claude Code.
-- `GET/`, `papers/`, `template/`: vendor/reference material, not current operating instructions.
+- `data_loading/ps_tokenizer/`: the PS_300 fragment tokenizer vendored from GET (MIT license kept) for the
+  COCONUT, LBA and QM9 adapters. `papers/` and `template/` are reference material outside Git.
 - `logs/`, `outputs/`: local run evidence and checkpoints, outside Git.
 - `Makefile`: user interface for training and supported local workflows.
 
@@ -65,8 +66,8 @@ all raw/derived data, user-local tools, temporary evidence and symlinks.
 ## Build, Test, and Development Commands
 
 Use the working `mind_esa3d` environment. For Atum, export the actual environment
-as described in [migration](Docs/operations/MIGRATION.md); `GET/env.yml` is an
-older vendor environment and does not reproduce the current setup.
+as described in [migration](Docs/operations/MIGRATION.md). No environment file for it is
+tracked yet (the old vendor `GET/env.yml` was removed because it never matched it).
 
 ```bash
 make help

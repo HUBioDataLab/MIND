@@ -16,8 +16,8 @@ Start with the [documentation index](Docs/README.md).
 ## Commands
 
 Use the working `mind_esa3d` environment. For migration, export the actual
-source environment; `GET/env.yml` is an older vendor environment, not the
-current MIND lockfile.
+source environment; no environment lockfile is tracked yet (the old vendor
+`GET/env.yml` was removed because it never matched the current setup).
 
 ```bash
 make help

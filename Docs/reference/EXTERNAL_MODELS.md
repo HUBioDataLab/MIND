@@ -7,11 +7,12 @@ only summaries of the referenced artifact and are not MIND measurements.
 
 ## GET
 
-The vendored `GET/` tree identifies itself as *Generalist Equivariant Transformer
-Towards 3D Molecular Interaction Learning* and provides a `get_clean` API with
-atom/block ids, coordinates, and edges. Its README is the source for the local
-vendor description. MIND imports its own ESA implementation from `esa/`; it is
-not accurate to call MIND’s current pretraining model a drop-in GET model.
+GET (*Generalist Equivariant Transformer Towards 3D Molecular Interaction Learning*, THUNLP,
+MIT license) was vendored in full until October 2026. MIND only used its PS_300 fragment
+tokenizer, which now lives in `data_loading/ps_tokenizer/` for the COCONUT, LBA and QM9
+adapters; the rest of the tree was removed (recoverable from Git history). MIND imports
+its own ESA implementation from `esa/`; it is not accurate to call MIND’s current
+pretraining model a drop-in GET model.
 
 ## ESA graph attention
 
