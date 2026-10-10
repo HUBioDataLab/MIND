@@ -103,14 +103,7 @@ def process_single_pkl_to_pyg(args_tuple) -> str:
         exclude_rna_p_only_molecules,
     ) = args_tuple
 
-    dataset_class = {
-        "qm9": OptimizedUniversalQM9Dataset,
-        "lba": OptimizedUniversalLBADataset,
-        "pdb": OptimizedUniversalDataset,
-        "coconut": OptimizedUniversalCOCONUTDataset,
-        "rna": OptimizedUniversalRNADataset,
-        "unimol": OptimizedUniversalUniMolDataset,
-    }[dataset_type]
+    dataset_class = DATASET_CLASSES[dataset_type]
 
     output_dir_path = Path(output_dir)
     os.makedirs(output_dir_path, exist_ok=True)
@@ -988,6 +981,17 @@ class OptimizedUniversalUniMolDataset(OptimizedUniversalDataset):
                         transform, pre_transform, pre_filter)
 
 
+# One registry for every conversion route (single file and directory mode).
+DATASET_CLASSES = {
+    "qm9": OptimizedUniversalQM9Dataset,
+    "lba": OptimizedUniversalLBADataset,
+    "pdb": OptimizedUniversalDataset,
+    "coconut": OptimizedUniversalCOCONUTDataset,
+    "rna": OptimizedUniversalRNADataset,
+    "unimol": OptimizedUniversalUniMolDataset,
+}
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -995,7 +999,7 @@ if __name__ == "__main__":
     parser.add_argument("--input-pkl", required=True, help="Path to input .pkl file")
     parser.add_argument("--input-pkl-dir", default=None, help="Directory containing input .pkl files (optional)")
     parser.add_argument("--output-dir", required=True, help="Output directory for .pt file")
-    parser.add_argument("--dataset-type", choices=["qm9", "lba", "pdb", "coconut", "rna", "unimol"], required=True, help="Dataset type")
+    parser.add_argument("--dataset-type", choices=sorted(DATASET_CLASSES), required=True, help="Dataset type")
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum samples to process")
     parser.add_argument("--cutoff", type=float, default=5.0, help="Distance cutoff for edges (Å)")
     parser.add_argument("--max-neighbors", type=int, default=64, help="Maximum neighbors per atom")
@@ -1047,15 +1051,6 @@ if __name__ == "__main__":
         print(f"📦 Converting {len(input_files)} cache files from directory: {input_path}")
         print(f"🚀 Using {worker_count} parallel workers")
 
-        dataset_classes = {
-            "qm9": OptimizedUniversalQM9Dataset,
-            "lba": OptimizedUniversalLBADataset,
-            "pdb": OptimizedUniversalDataset,
-            "coconut": OptimizedUniversalCOCONUTDataset,
-            "rna": OptimizedUniversalRNADataset,
-            "unimol": OptimizedUniversalUniMolDataset,
-        }
-
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
             futures = {
                 executor.submit(
@@ -1103,15 +1098,7 @@ if __name__ == "__main__":
             sys.exit(0)
 
     # Create dataset based on type
-    dataset_classes = {
-        "qm9": OptimizedUniversalQM9Dataset,
-        "lba": OptimizedUniversalLBADataset,
-        "pdb": OptimizedUniversalDataset,
-        "coconut": OptimizedUniversalCOCONUTDataset,
-        "rna": OptimizedUniversalRNADataset,
-    }
-    
-    dataset_class = dataset_classes[args.dataset_type]
+    dataset_class = DATASET_CLASSES[args.dataset_type]
     
     # Hybrid edges only for pdb dataset type
     if args.dataset_type == "pdb" and args.use_hybrid_edges:
