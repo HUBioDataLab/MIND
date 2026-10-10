@@ -26,7 +26,9 @@ adapter expects the extracted file as `<data_path>/COCONUT/coconut.sdf` (rename 
 ## Open question: which SDF produced the 497 production chunks?
 
 The training chunks (`/home/yusuf/data/metabolites/processed_chunk_*`) hold 2,755,135 graphs
-(about 5,549 per chunk, which fits roughly 500 chunks of a ~2.8 M-molecule SDF). The
-600,000-molecule file `coconut_min10atoms_allowed_elements_selected_600000.sdf` has exactly
-600,000 entries and therefore cannot be the source. The exact input file and chunk count are
-not recorded anywhere in the repository; confirm with Ege before regenerating.
+(about 5,549 per chunk, which fits roughly 500 chunks of a ~2.8 M-molecule SDF). Record
+counts of the archived files (10 October): `coconut_min10atoms_allowed_elements_selected_600000.sdf`
+has 600,000 entries and `coconut_min10atoms.sdf` has 5,599,574, so neither is the source;
+the `coconut_min10atoms_allowed_elements.sdf` of step 2 is not in the archive. The exact
+input file, any subsetting and the chunk count are not recorded anywhere in the repository;
+confirm with Ege before regenerating.
