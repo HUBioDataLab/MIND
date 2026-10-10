@@ -2,9 +2,9 @@
 # MIND - Fast check with all four domains: 1M protein, full RNA, UniMol, COCONUT
 # ===================================================================
 # Same as pretraining_config_fast_1m.yaml plus COCONUT (chunks 0-1 in name order,
-# random 80/10/10 split). COCONUT batches carry explicit bonds, which currently
-# zero the chemical-coordination features of every other graph in the batch
-# (documented encoder defect), so this checks the data path, not model quality.
+# random 80/10/10 split). Graph-local coordination was repaired on 10 October.
+# This config provides the user-started routing/crash gate; learning effects
+# require a matched from-scratch comparison (Docs/training/VALIDATION.md).
 # Usage: make train GPU=<id> CONFIG=pretraining_config_fast_1m_coconut EPOCHS=3 LOG=fast_1m_coconut
 # ===================================================================
 

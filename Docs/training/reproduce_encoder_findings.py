@@ -42,6 +42,7 @@ def main():
         block_idx=torch.zeros(2, dtype=torch.long), pos_code=['sm', 'sm'],
         dataset_type='unimol', num_nodes=2,
     )
+    small = LazyUniversalDataset._normalize_sample_for_collate(small)
 
     def coordination(batch):
         x_dense, _ = to_dense_batch(batch.z, batch.batch)

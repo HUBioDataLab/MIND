@@ -58,7 +58,7 @@ Protein and RNA chunks are edge-free fixed-slot chunks (`mind_pt_schema`, built 
 | June-equivalent RNA (baseline) | `/home/yusuf/data/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot_edgefree` |
 | Fast RNA prefix | `/home/yusuf/data/rna_small/processed_23slot_5k_edgefree` |
 | UniMol prefix | `/home/yusuf/data/small_molecules/unimol/universal_unimol`; 200 available chunks; the logged full baseline loader slice is 0, 1, 10, 100–106 because discovery is lexicographic |
-| Metabolite / QM9 | COCONUT is at `/home/yusuf/data/metabolites/processed`; it remains disabled because mixed-domain coordination is defective. QM9 is unavailable. |
+| Metabolite / QM9 | COCONUT is at `/home/yusuf/data/metabolites/processed`; default configs keep it disabled pending user-started validation of the 10 October coordination repair. QM9 is unavailable. |
 
 See [migration inventory](Docs/operations/NON_GIT_INVENTORY.md) for sizes,
 all raw/derived data, user-local tools, temporary evidence and symlinks.
@@ -137,8 +137,8 @@ Open issues:
   CYS, HIS, GLN and TRP. The old geometry-driven CB collapse is not current.
 - Mask token `0` is incorrectly reused as the RBF padding mask for retained
   real backbone nodes.
-- Batch-wide explicit-bond precedence can zero protein/RNA chemical-coordination
-  features in batches containing bonded small molecules.
+- Graph-local explicit-bond precedence and COCONUT validation-mask seeding were
+  repaired on 10 October; CPU contracts pass, CUDA and matched learning checks remain pending.
 - Lightning can retain the initial batch limit while sampler plan length changes;
   epoch 99 consumed 19,081 of 19,122 planned batches.
 - The invariant atom-MLM objective and validation results do not establish
