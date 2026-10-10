@@ -13,14 +13,11 @@ Features:
 """
 
 import os
-import sys
 import pickle
 from typing import List, Any, Dict
 import torch
 import numpy as np
 
-# Add GET's project directory to sys.path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'GET'))
 
 from adapters.base_adapter import BaseAdapter
 from data_types import UniversalAtom, UniversalBlock, UniversalMolecule
@@ -35,8 +32,8 @@ class QM9Adapter(BaseAdapter):
     def _initialize_get_components(self):
         """Initialize GET's tokenization components with GPU optimization"""
         try:
-            from data.pdb_utils import VOCAB
-            from data.tokenizer.tokenize_3d import TOKENIZER, tokenize_3d
+            from data_loading.ps_tokenizer.pdb_utils import VOCAB
+            from data_loading.ps_tokenizer.tokenize_3d import TOKENIZER, tokenize_3d
             from rdkit import RDLogger
             import torch
             

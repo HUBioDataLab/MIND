@@ -8,9 +8,9 @@ from tqdm import tqdm
 
 from .molecule import Molecule
 
-from utils.chem_utils import smi2mol, mol2smi, get_submol
-from utils.chem_utils import cnt_atom, MAX_VALENCE
-from utils.logger import print_log
+from .chem_utils import smi2mol, mol2smi, get_submol
+from .chem_utils import cnt_atom, MAX_VALENCE
+from .logger import print_log
 
 
 '''classes below are used for principal subgraph extraction'''

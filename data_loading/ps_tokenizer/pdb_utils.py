@@ -13,7 +13,7 @@ from Bio.PDB.Chain import Chain as BChain
 from Bio.PDB.Residue import Residue as BResidue
 from Bio.PDB.Atom import Atom as BAtom
 
-from .tokenizer.tokenize_3d import TOKENIZER
+from .tokenize_3d import TOKENIZER
 
 
 BACKBONE = ['N', 'CA', 'C', 'O']

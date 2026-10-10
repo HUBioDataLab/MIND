@@ -13,13 +13,10 @@ Features:
 """
 
 import os
-import sys
 import pickle
 from typing import List, Any, Dict
 import pandas as pd
 
-# Add GET's project directory to sys.path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'GET'))
 
 from adapters.base_adapter import BaseAdapter
 from data_types import UniversalAtom, UniversalBlock, UniversalMolecule
@@ -34,8 +31,8 @@ class LBAAdapter(BaseAdapter):
     def _initialize_get_components(self):
         """Initialize GET's tokenization components"""
         try:
-            from data.pdb_utils import VOCAB
-            from data.tokenizer.tokenize_3d import TOKENIZER, tokenize_3d
+            from data_loading.ps_tokenizer.pdb_utils import VOCAB
+            from data_loading.ps_tokenizer.tokenize_3d import TOKENIZER, tokenize_3d
             from rdkit import RDLogger
             
             # Suppress RDKit warnings for cleaner output
