@@ -9,13 +9,11 @@ Orchestrates the full pipeline for processing large datasets:
    b. Convert to PyG .pt format (via cache_to_pyg.py)
 3. All chunks are automatically detected and used by train_pretrain.py via LazyUniversalDataset
 
-Usage:
-    python data_loading/process_chunked_dataset.py \
-        --config-yaml-path core/pretraining_config_protein.yaml \
-        --data-path ../data/proteins/raw_structures_hq_40k \
-        --manifest-file ../data/proteins/afdb_clusters/manifest_hq_40k_len512.csv \
-        --num-chunks 10
+Protein and RNA chunks are built directly from raw structures by
+`make build-edge-free` (data_loading/build_edge_free_chunks.py); this pipeline is the
+route for UniMol and COCONUT (and the QM9/LBA datasets).
 
+Usage:
     # COCONUT dataset (no manifest needed, reads from SDF)
     # Re-run after coconut_adapter changes so .pt chunks include bond_edge_index
     # (required for coconut_masking_method: random_walk in training YAML).
@@ -96,33 +94,6 @@ def apply_config_defaults(args: argparse.Namespace, config: Dict) -> None:
         args.max_neighbors = config['max_neighbors']
         print(f"  ✓ max_neighbors from config: {args.max_neighbors}")
     
-    # Hybrid edge parameters (Salad-inspired)
-    if not args.use_hybrid_edges and 'use_hybrid_edges' in config:
-        args.use_hybrid_edges = config['use_hybrid_edges']
-        print(f"  ✓ use_hybrid_edges from config: {args.use_hybrid_edges}")
-    
-    if args.sequence_neighbors_k is None and 'sequence_neighbors_k' in config:
-        args.sequence_neighbors_k = config['sequence_neighbors_k']
-        print(f"  ✓ sequence_neighbors_k from config: {args.sequence_neighbors_k}")
-    
-    if args.max_spatial_neighbors is None and 'max_spatial_neighbors' in config:
-        args.max_spatial_neighbors = config['max_spatial_neighbors']
-        print(f"  ✓ max_spatial_neighbors from config: {args.max_spatial_neighbors}")
-    
-    if args.num_random_edges is None and 'num_random_edges' in config:
-        args.num_random_edges = config['num_random_edges']
-        print(f"  ✓ num_random_edges from config: {args.num_random_edges}")
-    
-    if args.random_edge_min_distance is None and 'random_edge_min_distance' in config:
-        args.random_edge_min_distance = config['random_edge_min_distance']
-        print(f"  ✓ random_edge_min_distance from config: {args.random_edge_min_distance}")
-
-    if (
-        not args.exclude_rna_p_only_molecules
-        and config.get('exclude_rna_p_only_molecules', False)
-    ):
-        args.exclude_rna_p_only_molecules = True
-        print("  ✓ exclude_rna_p_only_molecules from config: True")
 
 
 def validate_arguments(args: argparse.Namespace) -> Tuple[bool, str]:
@@ -229,21 +200,6 @@ def process_chunk(chunk_idx: int, args: argparse.Namespace) -> bool:
         pyg_cmd.extend(["--max-neighbors", str(args.max_neighbors)])
     if args.pyg_workers is not None:
         pyg_cmd.extend(["--num-workers", str(args.pyg_workers)])
-    if args.dataset == 'rna' and args.exclude_rna_p_only_molecules:
-        pyg_cmd.append("--exclude-rna-p-only-molecules")
-    
-    # Hybrid edge parameters (Salad-inspired) - only for PDB/protein datasets
-    if args.dataset == 'pdb' and args.use_hybrid_edges:
-        pyg_cmd.append("--use-hybrid-edges")
-        if args.sequence_neighbors_k is not None:
-            pyg_cmd.extend(["--sequence-neighbors-k", str(args.sequence_neighbors_k)])
-        if args.max_spatial_neighbors is not None:
-            pyg_cmd.extend(["--max-spatial-neighbors", str(args.max_spatial_neighbors)])
-        if args.num_random_edges is not None:
-            pyg_cmd.extend(["--num-random-edges", str(args.num_random_edges)])
-        if args.random_edge_min_distance is not None:
-            pyg_cmd.extend(["--random-edge-min-distance", str(args.random_edge_min_distance)])
-    
     if args.force:
         pyg_cmd.append("--force")
     
@@ -277,7 +233,7 @@ def print_summary(
     
     print(f"\n🎯 Next steps:")
     print(f"   1. Run training with automatic chunked dataset detection:")
-    print(f"      python -m core.train_pretrain --config-yaml-path core/pretraining_config_protein.yaml")
+    print(f"      python -m core.train_pretrain --config-yaml-path <your multi-domain config>")
     print(f"   2. The training will automatically detect and use LazyUniversalDataset")
     print("="*80)
 
@@ -366,46 +322,6 @@ def main() -> int:
         default=None,
         help="Worker cap for molecule-to-PyG conversion inside each chunk",
     )
-    parser.add_argument(
-        "--exclude-rna-p-only-molecules",
-        action="store_true",
-        help=(
-            "For RNA, exclude a molecule when any nucleotide has one real P "
-            "atom and no other real atoms"
-        ),
-    )
-    
-    # Hybrid edge parameters (Salad-inspired)
-    parser.add_argument(
-        "--use-hybrid-edges",
-        action="store_true",
-        help="Enable hybrid edge construction (3-tier: sequence + spatial + random)"
-    )
-    parser.add_argument(
-        "--sequence-neighbors-k",
-        type=int,
-        default=None,
-        help="Tier 1: Number of sequence neighbors ±k (default: 3)"
-    )
-    parser.add_argument(
-        "--max-spatial-neighbors",
-        type=int,
-        default=None,
-        help="Tier 2: Maximum spatial neighbors (default: 48)"
-    )
-    parser.add_argument(
-        "--num-random-edges",
-        type=int,
-        default=None,
-        help="Tier 3: Number of random long-range edges (default: 8)"
-    )
-    parser.add_argument(
-        "--random-edge-min-distance",
-        type=float,
-        default=None,
-        help="Tier 3: Minimum distance for random edges in Å (default: 10.0)"
-    )
-    
     # Control parameters
     parser.add_argument(
         "--force",
@@ -432,16 +348,6 @@ def main() -> int:
         args.cutoff = 5.0
     if args.max_neighbors is None:
         args.max_neighbors = 64
-    
-    # Hybrid edge defaults (use_hybrid_edges defaults to False via action="store_true")
-    if args.sequence_neighbors_k is None:
-        args.sequence_neighbors_k = 3
-    if args.max_spatial_neighbors is None:
-        args.max_spatial_neighbors = 48
-    if args.num_random_edges is None:
-        args.num_random_edges = 8
-    if args.random_edge_min_distance is None:
-        args.random_edge_min_distance = 10.0
     
     # Validate arguments
     is_valid, error_msg = validate_arguments(args)
@@ -477,21 +383,7 @@ def main() -> int:
     print(f"Output base:    {args.output_base}")
     print(f"Cutoff:         {args.cutoff} Å")
     print(f"PyG workers:    {args.pyg_workers or 'auto'}")
-    if args.dataset == 'rna':
-        print(
-            "Exclude P-only RNA molecules: "
-            f"{args.exclude_rna_p_only_molecules}"
-        )
-    
-    if args.use_hybrid_edges and args.dataset == 'pdb':
-        print(f"\n🔬 Hybrid Edge Construction (Salad-inspired):")
-        print(f"   ✓ Enabled: 3-tier edge system")
-        print(f"   Tier 1 (Sequence):  ±{args.sequence_neighbors_k} neighbors")
-        print(f"   Tier 2 (Spatial):   {args.max_spatial_neighbors} max neighbors (filtered)")
-        print(f"   Tier 3 (Random):    {args.num_random_edges} edges (>{args.random_edge_min_distance}Å)")
-    else:
-        print(f"Max neighbors:  {args.max_neighbors} (legacy radius graph)")
-    
+    print(f"Max neighbors:  {args.max_neighbors}")
     print("="*80)
     
     # Process chunks

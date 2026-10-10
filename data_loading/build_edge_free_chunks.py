@@ -190,8 +190,6 @@ def _init_worker(domain: str) -> None:
     converter.molecule_max_atoms = None
     converter.cutoff_distance = 5.0
     converter.max_neighbors = 64
-    converter.use_hybrid_edges = False
-    converter.exclude_rna_p_only_molecules = False
     converter.pre_filter = None
     converter.pre_transform = None
     _WORKER = (domain, adapter, converter)

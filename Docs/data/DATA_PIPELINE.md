@@ -65,10 +65,10 @@ and [`data_loading/lazy_universal_dataset.py`](../../data_loading/lazy_universal
 
 `cache_universal_datasets.py` streams molecules into pickle rather than holding
 the whole source corpus in RAM. `cache_to_pyg.py` converts each molecule to a
-PyG graph and writes the collated chunk. Protein preprocessing can add the
-three-tier hybrid graph (sequence, spatial, and random long-range edges); the
-parameters are in the YAML config and the implementation is in
-[`data_loading/cache_to_pyg.py`](../../data_loading/cache_to_pyg.py).
+PyG graph (radius-graph edges) and writes the collated chunk; this is the route for
+UniMol and COCONUT. Protein and RNA do not use it: `make build-edge-free` writes
+edge-free chunks and the runtime rebuilds the three-tier protein graph (see
+[hybrid edges](../architecture/HYBRID_EDGES.md)).
 
 Every chunk used by the improved sampler needs a metadata sidecar. Generate it
 with:

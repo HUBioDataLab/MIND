@@ -1,8 +1,4 @@
-import json
 import math
-import pickle
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -28,10 +24,8 @@ from data_loading.audit_rna_anchor_selection import (
 )
 from data_loading.atom_position_vocab import (
     is_p_only_rna_block,
-    rna_molecule_contains_p_only_block,
 )
-from data_loading.cache_to_pyg import OptimizedUniversalRNADataset
-from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
+from data_loading.data_types import UniversalAtom
 
 
 def _protein_anchors(dtype=torch.float64):
@@ -462,88 +456,3 @@ def test_p_only_filter_ignores_virtual_padding_but_not_real_atoms():
     assert is_p_only_rna_block([p_atom, *virtual_atoms])
     assert not is_p_only_rna_block([p_atom, _universal_rna_atom("OP1")])
     assert not is_p_only_rna_block([p_atom, _universal_rna_atom("sm")])
-
-
-def test_p_only_filter_is_molecule_level_flagged_and_cache_signed():
-    p_only_molecule = UniversalMolecule(
-        id="p_only",
-        dataset_type="rna",
-        blocks=[UniversalBlock(symbol="A", atoms=[_universal_rna_atom("P")])],
-    )
-    assert rna_molecule_contains_p_only_block(p_only_molecule)
-
-    converter = object.__new__(OptimizedUniversalRNADataset)
-    converter.exclude_rna_p_only_molecules = True
-    converter.molecule_max_atoms = None
-    assert converter._create_pyg_data_object(p_only_molecule) is None
-    assert converter._diagnose_skip(p_only_molecule) == (
-        "RNA molecule contains a P-only nucleotide block"
-    )
-
-    converter.exclude_rna_p_only_molecules = False
-    converter.use_hybrid_edges = False
-    converter.cutoff_distance = 8.0
-    converter.max_neighbors = 32
-    converter.pre_filter = None
-    converter.pre_transform = None
-    unfiltered_data = converter._create_pyg_data_object(p_only_molecule)
-    assert unfiltered_data is not None
-    assert unfiltered_data.num_nodes == 1
-
-    converter.universal_cache_path = "/tmp/universal_rna_chunk_0.pkl"
-    converter.max_samples = None
-    converter.exclude_rna_p_only_molecules = True
-    filtered_name = converter.processed_file_names[0]
-    converter.exclude_rna_p_only_molecules = False
-    unfiltered_name = converter.processed_file_names[0]
-    assert "_rna_no_p_only_" in filtered_name
-    assert "_rna_no_p_only_" not in unfiltered_name
-    assert filtered_name != unfiltered_name
-
-
-def test_rna_p_only_filter_end_to_end_writes_reject_manifest():
-    p_only_molecule = UniversalMolecule(
-        id="reject_me",
-        dataset_type="rna",
-        blocks=[UniversalBlock(symbol="A", atoms=[_universal_rna_atom("P")])],
-    )
-    retained_atoms = [
-        _universal_rna_atom("P"),
-        _universal_rna_atom("OP1"),
-    ]
-    retained_atoms[1].position = (1.0, 0.0, 0.0)
-    retained_atoms[1].atom_idx_in_block = 1
-    retained_molecule = UniversalMolecule(
-        id="retain_me",
-        dataset_type="rna",
-        blocks=[UniversalBlock(symbol="A", atoms=retained_atoms)],
-    )
-
-    with tempfile.TemporaryDirectory(prefix="mind_rna_p_only_test_") as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        source_pkl = tmp_path / "tiny_rna.pkl"
-        with source_pkl.open("wb") as handle:
-            pickle.dump(p_only_molecule, handle)
-            pickle.dump(retained_molecule, handle)
-
-        dataset = OptimizedUniversalRNADataset(
-            root=str(tmp_path / "filtered"),
-            universal_cache_path=str(source_pkl),
-            cutoff_distance=8.0,
-            max_neighbors=32,
-            exclude_rna_p_only_molecules=True,
-        )
-        assert len(dataset) == 1
-        assert dataset.get(0).mol_id == "retain_me"
-        assert "_rna_no_p_only_" in Path(dataset.processed_paths[0]).name
-
-        manifests = list(Path(dataset.processed_dir).glob("*_rejects.json"))
-        assert len(manifests) == 1
-        report = json.loads(manifests[0].read_text())
-        assert report["input_molecules"] == 2
-        assert report["rejected_molecules"] == 1
-        assert report["retained_molecules"] == 1
-        assert report["rejections"] == [
-            {"blocks": 1, "molecule_id": "reject_me", "p_only_blocks": 1}
-        ]
-        assert report["source_pkl_rewritten"] is False

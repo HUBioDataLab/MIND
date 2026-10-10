@@ -11,13 +11,10 @@ tensors for instant loading.
 
 import os
 import sys
-import json
 import torch
 import pickle
 import shutil
-from datetime import datetime, timezone
-from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from typing import List, Optional, Iterator, Callable
 from itertools import islice
 from torch_geometric.data import Data, InMemoryDataset
@@ -37,9 +34,7 @@ from torch_cluster import radius_graph
 from data_loading.atom_position_vocab import (
     RARE_ATOMIC_NUMBER,
     VIRTUAL_ATOMIC_NUMBER,
-    count_p_only_rna_blocks,
     is_virtual_position_code,
-    rna_molecule_contains_p_only_block,
 )
 warnings.filterwarnings('ignore')
 
@@ -84,75 +79,6 @@ def load_molecules_iteratively(file_path: str) -> Iterator[UniversalMolecule]:
             except EOFError:
                 break
 
-
-def process_single_pkl_to_pyg(args_tuple) -> str:
-    """Top-level worker for optional directory-mode conversion."""
-    (
-        input_pkl,
-        output_dir,
-        dataset_type,
-        max_samples,
-        cutoff,
-        max_neighbors,
-        force,
-        use_hybrid_edges,
-        sequence_neighbors_k,
-        max_spatial_neighbors,
-        num_random_edges,
-        random_edge_min_distance,
-        exclude_rna_p_only_molecules,
-    ) = args_tuple
-
-    dataset_class = DATASET_CLASSES[dataset_type]
-
-    output_dir_path = Path(output_dir)
-    os.makedirs(output_dir_path, exist_ok=True)
-
-    processed_dir = os.path.join(output_dir_path, "processed")
-    if os.path.exists(processed_dir) and not force:
-        pt_files = [f for f in os.listdir(processed_dir) if f.endswith('.pt')]
-        if dataset_type == "rna":
-            pt_files = [
-                filename
-                for filename in pt_files
-                if ("_rna_no_p_only_" in filename)
-                == exclude_rna_p_only_molecules
-            ]
-        if pt_files:
-            return f"✅ Output already exists: {os.path.join(processed_dir, pt_files[0])}"
-
-    if dataset_type == "pdb" and use_hybrid_edges:
-        dataset = dataset_class(
-            root=str(output_dir_path),
-            universal_cache_path=str(input_pkl),
-            max_samples=max_samples,
-            cutoff_distance=cutoff,
-            max_neighbors=max_neighbors,
-            use_hybrid_edges=True,
-            sequence_neighbors_k=sequence_neighbors_k,
-            max_spatial_neighbors=max_spatial_neighbors,
-            num_random_edges=num_random_edges,
-            random_edge_min_distance=random_edge_min_distance,
-        )
-    elif dataset_type == "rna":
-        dataset = dataset_class(
-            root=str(output_dir_path),
-            universal_cache_path=str(input_pkl),
-            max_samples=max_samples,
-            cutoff_distance=cutoff,
-            max_neighbors=max_neighbors,
-            exclude_rna_p_only_molecules=exclude_rna_p_only_molecules,
-        )
-    else:
-        dataset = dataset_class(
-            root=str(output_dir_path),
-            universal_cache_path=str(input_pkl),
-            max_samples=max_samples,
-            cutoff_distance=cutoff,
-            max_neighbors=max_neighbors,
-        )
-
-    return f"✅ Created {dataset_type.upper()} dataset: {len(dataset)} samples -> {dataset.processed_paths[0]}"
 
 # --- Parallel per-molecule conversion (used by process()) ---------------------
 # Global per-worker converter, initialized once per process to avoid repeatedly
@@ -217,15 +143,9 @@ class OptimizedUniversalDataset(InMemoryDataset):
         molecule_max_atoms: Optional[int] = None,
         cutoff_distance: float = 5.0,
         max_neighbors: int = 32,
-        use_hybrid_edges: bool = False,
-        sequence_neighbors_k: int = 3,
-        max_spatial_neighbors: int = 48,
-        num_random_edges: int = 8,
-        random_edge_min_distance: float = 10.0,
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         pre_filter: Optional[Callable] = None,
-        exclude_rna_p_only_molecules: bool = False,
         conversion_num_workers: Optional[int] = None,
     ):
         """
@@ -238,16 +158,9 @@ class OptimizedUniversalDataset(InMemoryDataset):
             molecule_max_atoms: Maximum number of atoms per molecule (None for no limit)
             cutoff_distance: Distance cutoff for edge construction
             max_neighbors: Maximum number of neighbors per atom
-            use_hybrid_edges: Enable Salad-inspired 3-tier hybrid edge construction
-            sequence_neighbors_k: Tier 1: Connect residue i to i±k neighbors
-            max_spatial_neighbors: Tier 2: Max spatial neighbors (filtered)
-            num_random_edges: Tier 3: Number of random long-range edges
-            random_edge_min_distance: Tier 3: Minimum distance for random edges (Å)
             transform: Transform to apply to each sample
             pre_transform: Pre-transform to apply during processing
             pre_filter: Pre-filter to apply during processing
-            exclude_rna_p_only_molecules: Exclude an entire RNA molecule when
-                any nucleotide block has one real P atom and no other real atoms
             conversion_num_workers: Optional explicit worker cap for converting
                 molecules inside one cache file
         """
@@ -257,12 +170,6 @@ class OptimizedUniversalDataset(InMemoryDataset):
         # Coerce to safe defaults so int()/float() never see None (config may pass null)
         self.cutoff_distance = cutoff_distance if cutoff_distance is not None else 5.0
         self.max_neighbors = max_neighbors if max_neighbors is not None else 32
-        self.use_hybrid_edges = use_hybrid_edges
-        self.sequence_neighbors_k = sequence_neighbors_k if sequence_neighbors_k is not None else 3
-        self.max_spatial_neighbors = max_spatial_neighbors if max_spatial_neighbors is not None else 48
-        self.num_random_edges = num_random_edges if num_random_edges is not None else 8
-        self.random_edge_min_distance = random_edge_min_distance if random_edge_min_distance is not None else 10.0
-        self.exclude_rna_p_only_molecules = bool(exclude_rna_p_only_molecules)
         if conversion_num_workers is not None and conversion_num_workers < 1:
             raise ValueError("conversion_num_workers must be at least 1")
         self.conversion_num_workers = conversion_num_workers
@@ -286,18 +193,8 @@ class OptimizedUniversalDataset(InMemoryDataset):
             cache_name += f"_samples_{self.max_samples}"
         if self.molecule_max_atoms:
             cache_name += f"_maxatoms_{self.molecule_max_atoms}"
-        if self.exclude_rna_p_only_molecules:
-            cache_name += "_rna_no_p_only"
-        
-        # Include hybrid edge parameters in cache signature
-        if self.use_hybrid_edges:
-            config_sig = (f"hybrid_seq{self.sequence_neighbors_k}_"
-                         f"spatial{self.max_spatial_neighbors}_"
-                         f"rand{self.num_random_edges}_"
-                         f"mindist{self.random_edge_min_distance}")
-        else:
-            config_sig = f"cutoff_{self.cutoff_distance}_neighbors_{self.max_neighbors}"
-        
+
+        config_sig = f"cutoff_{self.cutoff_distance}_neighbors_{self.max_neighbors}"
         return [f"optimized_{cache_name}_{config_sig}.pt"]
 
     def download(self) -> None:
@@ -336,34 +233,6 @@ class OptimizedUniversalDataset(InMemoryDataset):
         #    collated dataset is deterministic w.r.t. the input molecule order.
         molecules = list(molecule_iterator)
 
-        p_only_rejects = []
-        if self.exclude_rna_p_only_molecules:
-            retained_molecules = []
-            for molecule in molecules:
-                p_only_block_count = count_p_only_rna_blocks(molecule)
-                if p_only_block_count:
-                    p_only_rejects.append(
-                        {
-                            "molecule_id": str(getattr(molecule, "id", "unknown")),
-                            "blocks": len(getattr(molecule, "blocks", ())),
-                            "p_only_blocks": p_only_block_count,
-                        }
-                    )
-                else:
-                    retained_molecules.append(molecule)
-            input_molecule_count = len(molecules)
-            molecules = retained_molecules
-            self._write_rna_p_only_reject_manifest(
-                p_only_rejects,
-                input_molecule_count=input_molecule_count,
-                retained_molecule_count=len(molecules),
-            )
-            print(
-                "RNA P-only molecule filter: "
-                f"rejected={len(p_only_rejects):,}, retained={len(molecules):,}",
-                flush=True,
-            )
-
         data_list: List[Data] = []
         skipped_count = 0
         first_fail_reason: Optional[str] = None
@@ -382,12 +251,6 @@ class OptimizedUniversalDataset(InMemoryDataset):
             "molecule_max_atoms": self.molecule_max_atoms,
             "cutoff_distance": self.cutoff_distance,
             "max_neighbors": self.max_neighbors,
-            "use_hybrid_edges": self.use_hybrid_edges,
-            "sequence_neighbors_k": self.sequence_neighbors_k,
-            "max_spatial_neighbors": self.max_spatial_neighbors,
-            "num_random_edges": self.num_random_edges,
-            "random_edge_min_distance": self.random_edge_min_distance,
-            "exclude_rna_p_only_molecules": self.exclude_rna_p_only_molecules,
         }
 
         if num_workers == 1:
@@ -455,37 +318,9 @@ class OptimizedUniversalDataset(InMemoryDataset):
         torch.save((data, slices), self.processed_paths[0])
         print(f"✅ Processing complete! Saved to: {self.processed_paths[0]}")
 
-    def _write_rna_p_only_reject_manifest(
-        self,
-        rejected_molecules: list[dict],
-        *,
-        input_molecule_count: int,
-        retained_molecule_count: int,
-    ) -> None:
-        """Write an auditable sidecar without modifying the source PKL."""
-        processed_stem = Path(self.processed_file_names[0]).stem
-        manifest_path = Path(self.processed_dir) / f"{processed_stem}_rejects.json"
-        report = {
-            "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "filter": "exclude_rna_molecules_containing_p_only_blocks",
-            "source_pkl": str(Path(self.universal_cache_path).resolve()),
-            "input_molecules": input_molecule_count,
-            "rejected_molecules": len(rejected_molecules),
-            "retained_molecules": retained_molecule_count,
-            "rejections": rejected_molecules,
-            "source_pkl_rewritten": False,
-        }
-        manifest_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-        print(f"RNA P-only reject manifest: {manifest_path}", flush=True)
-
     def _diagnose_skip(self, mol: UniversalMolecule) -> str:
         """Return a short reason why this molecule would be skipped (for error messages)."""
         try:
-            if (
-                self.exclude_rna_p_only_molecules
-                and rna_molecule_contains_p_only_block(mol)
-            ):
-                return "RNA molecule contains a P-only nucleotide block"
             atoms = mol.get_all_atoms()
             if not atoms:
                 return "get_all_atoms() returned empty (molecule has no blocks or blocks have no atoms)"
@@ -504,11 +339,6 @@ class OptimizedUniversalDataset(InMemoryDataset):
 
     def _create_pyg_data_object(self, mol: UniversalMolecule) -> Optional[Data]:
         """Helper function to filter and convert a single UniversalMolecule."""
-        if (
-            self.exclude_rna_p_only_molecules
-            and rna_molecule_contains_p_only_block(mol)
-        ):
-            return None
         if self.molecule_max_atoms is not None and len(mol.get_all_atoms()) > self.molecule_max_atoms:
             return None
 
@@ -520,241 +350,6 @@ class OptimizedUniversalDataset(InMemoryDataset):
         if self.pre_transform is not None:
             pyg_data = self.pre_transform(pyg_data)
         return pyg_data
-
-    def _build_sequence_edges(
-        self, 
-        block_indices: torch.Tensor, 
-        entity_indices: torch.Tensor, 
-        pos_codes: List[str], 
-        k: int
-    ) -> torch.Tensor:
-        """
-        Build Tier 1: Sequence-based edges (backbone connectivity).
-        Connects residue i to i±1, i±2, ..., i±k neighbors via CA atoms.
-        
-        Args:
-            block_indices: Block (residue) index for each atom
-            entity_indices: Entity (chain) index for each atom
-            pos_codes: Position codes (e.g., 'CA', 'N', 'C', etc.)
-            k: Number of sequence neighbors to connect (±k)
-            
-        Returns:
-            edge_index: [2, num_edges] tensor of sequence-based edges
-        """
-        # Find CA atoms only
-        ca_mask = torch.tensor([code == 'CA' for code in pos_codes], dtype=torch.bool)
-        ca_indices = torch.where(ca_mask)[0]
-
-        n_ca = len(ca_indices)
-        if n_ca < 2:
-            return torch.empty((2, 0), dtype=torch.long)
-
-        ca_block_indices = block_indices[ca_indices]
-        ca_entity_indices = entity_indices[ca_indices]
-
-        # Vectorized equivalent of the original nested loop. The original appends
-        # edges ordered by (i, offset, direction): for each source CA i, for each
-        # offset 1..k, a forward edge [i, i+offset] then a backward edge
-        # [i+offset, i]. We reproduce that exact ordering so edge_index (and the
-        # positionally-computed edge_attr) are bit-identical to the loop version.
-        #
-        # Build the (i, offset) pairs in row-major order over i then offset.
-        i_idx = torch.arange(n_ca).unsqueeze(1).expand(n_ca, k)          # [N, k]
-        offsets = torch.arange(1, k + 1).unsqueeze(0).expand(n_ca, k)    # [N, k]
-        j_idx = i_idx + offsets                                          # neighbor positions
-
-        flat_i = i_idx.reshape(-1)
-        flat_j = j_idx.reshape(-1)
-        flat_off = offsets.reshape(-1)
-
-        # Bounds: i + offset < n_ca
-        in_bounds = flat_j < n_ca
-        if not bool(in_bounds.any()):
-            return torch.empty((2, 0), dtype=torch.long)
-
-        flat_i = flat_i[in_bounds]
-        flat_j = flat_j[in_bounds]
-        flat_off = flat_off[in_bounds]
-
-        # Same-entity and sequential-block constraints
-        same_entity = ca_entity_indices[flat_j] == ca_entity_indices[flat_i]
-        seq_block = ca_block_indices[flat_j] == (ca_block_indices[flat_i] + flat_off)
-        valid = same_entity & seq_block
-
-        flat_i = flat_i[valid]
-        flat_j = flat_j[valid]
-        if flat_i.numel() == 0:
-            return torch.empty((2, 0), dtype=torch.long)
-
-        src = ca_indices[flat_i]
-        dst = ca_indices[flat_j]
-
-        # Interleave forward [src,dst] then backward [dst,src] to match the
-        # original append order exactly.
-        row = torch.stack([src, dst], dim=1).reshape(-1)
-        col = torch.stack([dst, src], dim=1).reshape(-1)
-        return torch.stack([row, col], dim=0).to(torch.long)
-    
-    def _build_random_edges(
-        self,
-        positions: torch.Tensor,
-        block_indices: torch.Tensor,
-        entity_indices: torch.Tensor,
-        pos_codes: List[str],
-        num_random: int,
-        min_distance: float
-    ) -> torch.Tensor:
-        """
-        Build Tier 3: Random long-range edges with inverse distance³ weighting.
-        
-        Args:
-            positions: Atom positions [N, 3]
-            block_indices: Block index for each atom
-            entity_indices: Entity index for each atom
-            pos_codes: Position codes
-            num_random: Number of random edges to sample per CA atom
-            min_distance: Minimum distance threshold (Å)
-            
-        Returns:
-            edge_index: [2, num_edges] tensor of random long-range edges
-        """
-        # Find CA atoms
-        ca_mask = torch.tensor([code == 'CA' for code in pos_codes], dtype=torch.bool)
-        ca_indices = torch.where(ca_mask)[0]
-
-        n_ca = len(ca_indices)
-        if n_ca < 2 or num_random == 0:
-            return torch.empty((2, 0), dtype=torch.long)
-
-        ca_positions = positions[ca_indices]
-
-        # Vectorized version of the original per-CA inverse-distance^3 sampling.
-        #
-        # EQUIVALENT-NOT-IDENTICAL: the original drew one torch.multinomial per CA
-        # from global RNG state, so the exact sampled neighbors are not
-        # reproducible. Here we (a) compute the full pairwise distance matrix once
-        # with torch.cdist instead of recomputing per CA, (b) build the same
-        # inverse-distance^3 weights with the same min_distance / self-exclusion
-        # mask, and (c) draw all per-CA samples in a single batched
-        # torch.multinomial seeded by a fixed generator for reproducibility.
-        # The min_distance constraint and the per-CA edge count match the
-        # original exactly; only which specific long-range partners get sampled
-        # can differ.
-        dist = torch.cdist(ca_positions, ca_positions)  # [N, N]
-
-        eye = torch.eye(n_ca, dtype=torch.bool)
-        valid_mask = (dist >= min_distance) & (~eye)        # [N, N]
-        valid_counts = valid_mask.sum(dim=1)                # [N]
-
-        # Inverse distance^3 weights, zeroed where invalid.
-        weights = 1.0 / (dist ** 3 + 1e-6)
-        weights = weights * valid_mask.to(weights.dtype)
-        # Normalize per-row (rows with no valid entries stay all-zero and are
-        # skipped below). Matches original per-CA normalization.
-        row_sums = weights.sum(dim=1, keepdim=True)
-        safe_sums = torch.where(row_sums > 0, row_sums, torch.ones_like(row_sums))
-        weights = weights / safe_sums
-
-        # Per-CA number of samples = min(num_random, valid_count), as in original.
-        n_samples = torch.clamp(valid_counts, max=num_random)
-
-        gen = torch.Generator()
-        gen.manual_seed(0)
-
-        src_list = []
-        dst_list = []
-        for i in range(n_ca):
-            k_i = int(n_samples[i].item())
-            if k_i == 0:
-                continue
-            sampled_local = torch.multinomial(
-                weights[i], k_i, replacement=False, generator=gen
-            )
-            neighbors = ca_indices[sampled_local]
-            ca_i = ca_indices[i]
-            # Interleave forward then backward to match original append order.
-            si = ca_i.repeat(k_i)
-            src_list.append(torch.stack([si, neighbors], dim=1).reshape(-1))
-            dst_list.append(torch.stack([neighbors, si], dim=1).reshape(-1))
-
-        if not src_list:
-            return torch.empty((2, 0), dtype=torch.long)
-
-        row = torch.cat(src_list)
-        col = torch.cat(dst_list)
-        return torch.stack([row, col], dim=0).to(torch.long)
-    
-    def _filter_duplicate_edges(
-        self, 
-        edge_index_main: torch.Tensor, 
-        edge_index_to_remove: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Remove edges from edge_index_main that exist in edge_index_to_remove.
-        
-        Args:
-            edge_index_main: Main edge set [2, E1]
-            edge_index_to_remove: Edges to exclude [2, E2]
-            
-        Returns:
-            Filtered edge_index [2, E_filtered]
-        """
-        if edge_index_main.size(1) == 0:
-            return edge_index_main
-        if edge_index_to_remove.size(1) == 0:
-            return edge_index_main
-
-        # Vectorized membership test using unique integer keys src*N + dst.
-        # N must exceed the largest node index so (src, dst) pairs map 1:1.
-        # Order of the kept edges in edge_index_main is preserved exactly,
-        # matching the original list-comprehension filter.
-        main = edge_index_main.to(torch.long)
-        rem = edge_index_to_remove.to(torch.long)
-        max_node = int(torch.max(torch.stack([main.max(), rem.max()]))) + 1
-        n = max_node
-        main_keys = main[0] * n + main[1]
-        rem_keys = rem[0] * n + rem[1]
-        keep_mask = ~torch.isin(main_keys, rem_keys)
-        if not bool(keep_mask.any()):
-            return torch.empty((2, 0), dtype=torch.long)
-        return main[:, keep_mask]
-    
-    def _build_hybrid_edges(
-        self,
-        positions: torch.Tensor,
-        block_indices: torch.Tensor,
-        entity_indices: torch.Tensor,
-        pos_codes: List[str]
-    ) -> torch.Tensor:
-        """
-        Build 3-tier hybrid edge construction (Salad-inspired).
-        
-        Returns:
-            edge_index: [2, num_edges] tensor combining all 3 tiers
-        """
-        # Tier 1: Sequence-based edges (backbone)
-        tier1_edges = self._build_sequence_edges(
-            block_indices, entity_indices, pos_codes, self.sequence_neighbors_k
-        )
-        
-        # Tier 2: Spatial edges (radius graph with duplicate filtering)
-        tier2_edges = radius_graph(
-            positions, r=float(self.cutoff_distance), batch=None, loop=False,
-            max_num_neighbors=int(self.max_spatial_neighbors)  # coerced in __init__ if None
-        )
-        # Filter out Tier 1 edges from Tier 2 to maximize information diversity
-        tier2_edges = self._filter_duplicate_edges(tier2_edges, tier1_edges)
-        
-        # Tier 3: Random long-range edges
-        tier3_edges = self._build_random_edges(
-            positions, block_indices, entity_indices, pos_codes,
-            self.num_random_edges, self.random_edge_min_distance
-        )
-        
-        # Combine all tiers
-        all_edges = torch.cat([tier1_edges, tier2_edges, tier3_edges], dim=1)
-        
-        return all_edges
 
     def _universal_to_pyg(self, mol: UniversalMolecule, raise_on_error: bool = False) -> Optional[Data]:
         """Convert a UniversalMolecule to PyTorch Geometric Data object."""
@@ -782,17 +377,10 @@ class OptimizedUniversalDataset(InMemoryDataset):
 
             num_atoms = len(atoms)
             if num_atoms > 1:
-                # Choose edge construction method
-                if self.use_hybrid_edges:
-                    edge_index = self._build_hybrid_edges(
-                        positions, block_indices, entity_indices, pos_codes
-                    )
-                else:
-                    # Legacy: radius graph
-                    edge_index = radius_graph(
-                        positions, r=float(self.cutoff_distance), batch=None, loop=False,
-                        max_num_neighbors=int(self.max_neighbors)
-                    )
+                edge_index = radius_graph(
+                    positions, r=float(self.cutoff_distance), batch=None, loop=False,
+                    max_num_neighbors=int(self.max_neighbors)
+                )
                 edge_attr = self._calculate_edge_features(positions, edge_index)
             else:
                 edge_index = torch.empty((2, 0), dtype=torch.long)
@@ -868,8 +456,10 @@ class OptimizedUniversalQM9Dataset(OptimizedUniversalDataset):
         # Default cache path for QM9
         if universal_cache_path is None:
             universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_qm9_all.pkl')
-        super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
-                        transform, pre_transform, pre_filter)
+        super().__init__(
+            root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
+            transform=transform, pre_transform=pre_transform, pre_filter=pre_filter,
+        )
 
 
 class OptimizedUniversalLBADataset(OptimizedUniversalDataset):
@@ -891,8 +481,10 @@ class OptimizedUniversalLBADataset(OptimizedUniversalDataset):
             root = os.path.join(os.path.dirname(__file__), 'processed', 'lba_optimized')
         if universal_cache_path is None:
             universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_lba_all.pkl')
-        super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
-                        transform, pre_transform, pre_filter)
+        super().__init__(
+            root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
+            transform=transform, pre_transform=pre_transform, pre_filter=pre_filter,
+        )
 
 
 class OptimizedUniversalCOCONUTDataset(OptimizedUniversalDataset):
@@ -913,8 +505,10 @@ class OptimizedUniversalCOCONUTDataset(OptimizedUniversalDataset):
             root = os.path.join(os.path.dirname(__file__), 'processed', 'coconut_optimized')
         if universal_cache_path is None:
             universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_coconut_all.pkl')
-        super().__init__(root, universal_cache_path, max_samples, None, cutoff_distance, max_neighbors,
-                        transform, pre_transform, pre_filter)
+        super().__init__(
+            root, universal_cache_path, max_samples, None, cutoff_distance, max_neighbors,
+            transform=transform, pre_transform=pre_transform, pre_filter=pre_filter,
+        )
 
 class OptimizedUniversalRNADataset(OptimizedUniversalDataset):
     """
@@ -936,7 +530,6 @@ class OptimizedUniversalRNADataset(OptimizedUniversalDataset):
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         pre_filter: Optional[Callable] = None,
-        exclude_rna_p_only_molecules: bool = False,
         conversion_num_workers: Optional[int] = None,
     ):
         if root is None:
@@ -953,7 +546,6 @@ class OptimizedUniversalRNADataset(OptimizedUniversalDataset):
             transform=transform,
             pre_transform=pre_transform,
             pre_filter=pre_filter,
-            exclude_rna_p_only_molecules=exclude_rna_p_only_molecules,
             conversion_num_workers=conversion_num_workers,
         )
 
@@ -977,8 +569,10 @@ class OptimizedUniversalUniMolDataset(OptimizedUniversalDataset):
             root = os.path.join(os.path.dirname(__file__), 'processed', 'unimol_optimized')
         if universal_cache_path is None:
             universal_cache_path = os.path.join(os.path.dirname(__file__), 'cache', 'universal_unimol_all.pkl')
-        super().__init__(root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
-                        transform, pre_transform, pre_filter)
+        super().__init__(
+            root, universal_cache_path, max_samples, molecule_max_atoms, cutoff_distance, max_neighbors,
+            transform=transform, pre_transform=pre_transform, pre_filter=pre_filter,
+        )
 
 
 # One registry for every conversion route (single file and directory mode).
@@ -997,7 +591,6 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Convert universal .pkl cache to PyG .pt format")
     parser.add_argument("--input-pkl", required=True, help="Path to input .pkl file")
-    parser.add_argument("--input-pkl-dir", default=None, help="Directory containing input .pkl files (optional)")
     parser.add_argument("--output-dir", required=True, help="Output directory for .pt file")
     parser.add_argument("--dataset-type", choices=sorted(DATASET_CLASSES), required=True, help="Dataset type")
     parser.add_argument("--max-samples", type=int, default=None, help="Maximum samples to process")
@@ -1010,133 +603,29 @@ if __name__ == "__main__":
         default=None,
         help="Parallel workers (also caps workers inside one RNA cache)",
     )
-    parser.add_argument(
-        "--exclude-rna-p-only-molecules",
-        action="store_true",
-        help=(
-            "For RNA only, reject an entire molecule when any block contains "
-            "one real P atom and no other real atoms"
-        ),
-    )
-    
-    # Hybrid edge construction (Salad-inspired)
-    parser.add_argument("--use-hybrid-edges", action="store_true", help="Enable 3-tier hybrid edge construction")
-    parser.add_argument("--sequence-neighbors-k", type=int, default=3, help="Tier 1: Sequence neighbors (±k)")
-    parser.add_argument("--max-spatial-neighbors", type=int, default=48, help="Tier 2: Max spatial neighbors")
-    parser.add_argument("--num-random-edges", type=int, default=8, help="Tier 3: Random long-range edges")
-    parser.add_argument("--random-edge-min-distance", type=float, default=10.0, help="Tier 3: Min distance (Å)")
 
     args = parser.parse_args()
 
-    if args.input_pkl and args.input_pkl_dir:
-        parser.error("Use only one of --input-pkl or --input-pkl-dir")
-    if not args.input_pkl:
-        parser.error("Provide --input-pkl")
-
-    # Optional directory mode: if a directory is passed via --input-pkl or --input-pkl-dir,
-    # convert each .pkl file independently, otherwise keep the original single-file behavior.
-    input_path = args.input_pkl_dir or args.input_pkl
-    if os.path.isdir(input_path):
-        input_files = sorted(
-            p for p in Path(input_path).glob("*.pkl")
-            if p.is_file() and not p.name.startswith("pre_")
-        )
-        if not input_files:
-            raise FileNotFoundError(f"No .pkl files found in directory: {input_path}")
-
-        base_output = Path(args.output_dir)
-        base_output.mkdir(parents=True, exist_ok=True)
-        worker_count = args.num_workers if args.num_workers is not None else max(1, (os.cpu_count() or 2) - 1)
-        worker_count = max(1, min(worker_count, len(input_files)))
-        print(f"📦 Converting {len(input_files)} cache files from directory: {input_path}")
-        print(f"🚀 Using {worker_count} parallel workers")
-
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(
-                    process_single_pkl_to_pyg,
-                    (
-                        str(input_pkl),
-                        str(base_output / input_pkl.stem),
-                        args.dataset_type,
-                        args.max_samples,
-                        args.cutoff,
-                        args.max_neighbors,
-                        args.force,
-                        args.use_hybrid_edges,
-                        args.sequence_neighbors_k,
-                        args.max_spatial_neighbors,
-                        args.num_random_edges,
-                        args.random_edge_min_distance,
-                        args.exclude_rna_p_only_molecules,
-                    ),
-                ): input_pkl
-                for input_pkl in input_files
-            }
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Converting caches"):
-                print(future.result())
-        sys.exit(0)
-
-    # Original single-file behavior stays exactly the same below.
-    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Check if output already exists (look for any .pt file in processed subdir)
     processed_dir = os.path.join(args.output_dir, "processed")
     if os.path.exists(processed_dir) and not args.force:
         pt_files = [f for f in os.listdir(processed_dir) if f.endswith('.pt')]
-        if args.dataset_type == "rna":
-            pt_files = [
-                filename
-                for filename in pt_files
-                if ("_rna_no_p_only_" in filename)
-                == args.exclude_rna_p_only_molecules
-            ]
         if pt_files:
             print(f"✅ Output already exists: {os.path.join(processed_dir, pt_files[0])}")
             print(f"💡 Use --force to rebuild")
             sys.exit(0)
 
-    # Create dataset based on type
     dataset_class = DATASET_CLASSES[args.dataset_type]
-    
-    # Hybrid edges only for pdb dataset type
-    if args.dataset_type == "pdb" and args.use_hybrid_edges:
-        dataset = dataset_class(
-            root=args.output_dir,
-            universal_cache_path=args.input_pkl,
-            max_samples=args.max_samples,
-            cutoff_distance=args.cutoff,
-            max_neighbors=args.max_neighbors,
-            use_hybrid_edges=True,
-            sequence_neighbors_k=args.sequence_neighbors_k,
-            max_spatial_neighbors=args.max_spatial_neighbors,
-            num_random_edges=args.num_random_edges,
-            random_edge_min_distance=args.random_edge_min_distance,
-            conversion_num_workers=args.num_workers,
-        )
-        print(f"✅ Created {args.dataset_type.upper()} dataset with HYBRID EDGES: {len(dataset)} samples")
-    elif args.dataset_type == "rna":
-        dataset = dataset_class(
-            root=args.output_dir,
-            universal_cache_path=args.input_pkl,
-            max_samples=args.max_samples,
-            cutoff_distance=args.cutoff,
-            max_neighbors=args.max_neighbors,
-            exclude_rna_p_only_molecules=args.exclude_rna_p_only_molecules,
-            conversion_num_workers=args.num_workers,
-        )
-        print(
-            f"✅ Created RNA dataset: {len(dataset)} samples "
-            f"(exclude P-only molecules={args.exclude_rna_p_only_molecules})"
-        )
-    else:
-        # Legacy: radius graph
-        dataset = dataset_class(
-            root=args.output_dir,
-            universal_cache_path=args.input_pkl,
-            max_samples=args.max_samples,
-            cutoff_distance=args.cutoff,
-            max_neighbors=args.max_neighbors
-        )
-        print(f"✅ Created {args.dataset_type.upper()} dataset: {len(dataset)} samples")
+    dataset_kwargs = dict(
+        root=args.output_dir,
+        universal_cache_path=args.input_pkl,
+        max_samples=args.max_samples,
+        cutoff_distance=args.cutoff,
+        max_neighbors=args.max_neighbors,
+    )
+    if args.dataset_type == "rna":
+        dataset_kwargs["conversion_num_workers"] = args.num_workers
+    dataset = dataset_class(**dataset_kwargs)
+    print(f"✅ Created {args.dataset_type.upper()} dataset: {len(dataset)} samples")

@@ -41,10 +41,11 @@ all 14 nodes are physical atoms during model encoding.
 | `block_symbols` | residue symbols |
 | `dataset_type`, `mol_id` | routing and provenance |
 
-Protein caches normally use the hybrid edge builder described in
-[hybrid edges](../architecture/HYBRID_EDGES.md). Legacy radius graphs remain
-supported. `bond_edge_index` is present when the source molecule supplies
-explicit bonds, but protein structure caches generally rely on spatial/hybrid
+The table above is the legacy edge-stored layout (still written for UniMol and
+COCONUT). Protein and RNA chunks are edge-free (`mind_pt_schema`): `edge_index` and
+`edge_attr` are not stored and the runtime builds the hybrid graph described in
+[hybrid edges](../architecture/HYBRID_EDGES.md). `bond_edge_index` is present when the
+source molecule supplies explicit bonds; protein structures rely on spatial/hybrid
 edges rather than a complete chemical-bond graph.
 
 ## Loading and masking

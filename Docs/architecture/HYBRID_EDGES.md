@@ -1,9 +1,10 @@
 # Hybrid and runtime protein edges
 
-## Offline cache construction
+## The three-tier protein graph
 
-`data_loading/cache_to_pyg.py` can build a three-tier protein graph when
-`use_hybrid_edges: true`:
+Protein and RNA chunks store no edges (`mind_pt_schema`); the former offline builder in
+`cache_to_pyg.py` was removed in October 2026. Protein Tier 1 is regenerated when a chunk
+is loaded and every other edge is built at runtime. The tiers are:
 
 1. Tier 1 connects CA atoms at sequence offsets ±1 through ±`k`, constrained to
    one chain/entity. The default is `sequence_neighbors_k: 3`.
@@ -14,11 +15,10 @@
    weighting. The default is `num_random_edges: 8` per CA source, stored in both
    directions.
 
-The cache stores one combined directed `edge_index` and distance `edge_attr`.
-It does not persist a tier identifier, so downstream code must infer or rebuild
-tier semantics from coordinates, block/entity metadata, and configuration.
-Legacy mode uses a radius graph with `max_neighbors` instead of the hybrid
-builder. Cache names include the edge configuration signature.
+The combined graph is one directed `edge_index` with a distance `edge_attr`. It
+carries no tier identifier, so tier semantics are inferred from coordinates,
+block/entity metadata and configuration. Old edge-stored caches (deleted on
+9 October 2026) were built with a radius graph limited by `max_neighbors`.
 
 Virtual nodes are present in old fixed-width cache graphs, so an offline radius
 neighbor limit may have been consumed by virtual padding. The geometry-neutral
