@@ -45,8 +45,7 @@ Datasets live outside Git. `chunk_dir` is often a prefix whose sibling
 Protein and RNA chunks are edge-free fixed-slot chunks (`mind_pt_schema`, built by
 `data_loading/build_edge_free_chunks.py`); the legacy edge-stored chunks were deleted on
 9 October 2026 after the equivalence checks in the
-[scaling plan](Docs/training/FULL_DATA_SCALING_PLAN_20260923.md) and
-[CURRENT_TODOS.md](CURRENT_TODOS.md).
+[scaling plan](Docs/training/FULL_DATA_SCALING_PLAN_20260923.md).
 
 | Dataset | Current Atum base / source |
 |---|---|
@@ -60,13 +59,12 @@ Protein and RNA chunks are edge-free fixed-slot chunks (`mind_pt_schema`, built 
 | UniMol prefix | `/home/yusuf/data/small_molecules/unimol/universal_unimol`; 200 available chunks; the logged full baseline loader slice is 0, 1, 10, 100–106 because discovery is lexicographic |
 | Metabolite / QM9 | COCONUT is at `/home/yusuf/data/metabolites/processed`; default configs keep it disabled pending user-started validation of the 10 October coordination repair. QM9 is unavailable. |
 
-See [migration inventory](Docs/operations/NON_GIT_INVENTORY.md) for sizes,
-all raw/derived data, user-local tools, temporary evidence and symlinks.
+Sizes, raw/derived data, user-local tools and symlinks are tracked in local notes outside Git.
 
 ## Build, Test, and Development Commands
 
 Use the working `mind_esa3d` environment. For Atum, export the actual environment
-as described in [migration](Docs/operations/MIGRATION.md). No environment file for it is
+from the machine in use. No environment file for it is
 tracked yet (the old vendor `GET/env.yml` was removed because it never matched it).
 
 ```bash

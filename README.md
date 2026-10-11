@@ -11,7 +11,6 @@ Start with the [documentation index](Docs/README.md).
 - [Data pipeline](Docs/data/DATA_PIPELINE.md)
 - [Training and validation](Docs/training/TRAINING_GUIDE.md)
 - [Latest training results and development handoff](Docs/training/STATUS_AND_NEXT_STEPS_20260912.md)
-- [Anzu → Atum migration](Docs/operations/MIGRATION.md)
 
 ## Commands
 

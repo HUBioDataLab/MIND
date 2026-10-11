@@ -6,11 +6,7 @@ Read current documents first; archived experiment proposals are not active plans
 
 ## Start here
 
-- [Anzu → Atum migration](operations/MIGRATION.md)
-- [Atum migration record and pending gates](operations/ATUM_MIGRATION_RECORD_20260913.md)
-- [What Git will not transfer](operations/NON_GIT_INVENTORY.md)
 - [Final 100-epoch results, open issues, and next development steps](training/STATUS_AND_NEXT_STEPS_20260912.md)
-- [Completed Atum/Anzu run comparison and cleanup gates](training/ATUM_ANZU_RUN_COMPARISON_20261004.md)
 - [Full-data scaling plan](training/FULL_DATA_SCALING_PLAN_20260923.md)
 - [Encoder feature defects: scope, consequences and repair plan](training/ENCODER_FEATURE_DEFECTS_20261009.md)
 - [Model overview](architecture/MODEL_OVERVIEW.md)
@@ -22,7 +18,6 @@ Docs/
 ├── architecture/   Model, virtual slots, hybrid edges
 ├── data/           Representation, vocabulary, loading, RNA selection
 ├── training/       Commands, validation, dated results and CPU evidence
-├── operations/     Migration and non-Git inventory
 ├── development/    Shared coding-agent setup and workflow
 ├── reference/      External-model comparison boundaries
 └── archive/        Superseded experiments and preserved original documents
@@ -33,12 +28,11 @@ Docs/
 | Architecture | [Overview](architecture/MODEL_OVERVIEW.md), [virtual slots](architecture/VIRTUAL_SLOTS.md), [hybrid edges](architecture/HYBRID_EDGES.md) |
 | Data | [Pipeline](data/DATA_PIPELINE.md), [protein representation](data/PROTEIN_REPRESENTATION.md), [atom vocabulary](data/ATOM_VOCABULARY.md), [RNA datasets](data/RNA_DATASETS.md) |
 | Training | [Guide](training/TRAINING_GUIDE.md), [validation](training/VALIDATION.md), [current results/handoff](training/STATUS_AND_NEXT_STEPS_20260912.md), [bounded encoder reproduction](training/reproduce_encoder_findings.py), [encoder defect report](training/ENCODER_FEATURE_DEFECTS_20261009.md) |
-| Operations | [Migration](operations/MIGRATION.md), [inventory](operations/NON_GIT_INVENTORY.md), [baseline checksums](operations/BASELINE_SHA256SUMS.txt) |
 | Development | [Agent workflow](development/AGENT_WORKFLOW.md), [validate-feature skill](../.agents/skills/validate-feature/SKILL.md), [strict-contract skill](../.agents/skills/strict-contracts-and-validation/SKILL.md) |
 | References | [External-model references](reference/EXTERNAL_MODELS.md) |
 | History | [Representation decisions](archive/REPRESENTATION_HISTORY.md), [pipeline fixes/risks](archive/PIPELINE_FIXES.md), [experiments](archive/EXPERIMENT_HISTORY.md) |
 
-Root `README.md`, `MIGRATION.md`, `CURRENT_TODOS.md` and `CODEX.md` point here or
+Root `README.md` and `CODEX.md` point here or
 to the relevant canonical document. `AGENTS.md` contains shared rules and
 `CLAUDE.md` imports them. All MIND skills live in `.agents/skills/`; Claude's
 `.claude/skills/` contains relative symlinks to those same folders. There are no
@@ -67,13 +61,11 @@ Main replacements:
 | `features/VIRTUAL_ATOMS_IN_GRAPH_TRANSFORMER`, `CB_DUSUKLUGU_ACIKLAMA` | `architecture/VIRTUAL_SLOTS` and `archive/REPRESENTATION_HISTORY` |
 | `features/BOLTZGEN_GEOMETRIC_RESIDUE_ENCODING`, `papers/ESA_COMPARISON` | `reference/EXTERNAL_MODELS` and archive |
 | `proteins/ATOM_TYPES`, `PROTEIN_REPRESENTATION_PIPELINE`, `DYNAMIC_RANDOM_EDGES` | `data/` and `architecture/HYBRID_EDGES` |
-| `DATA_LOADING_DOCUMENTATION`, `DATA_LOCATIONS` | `data/DATA_PIPELINE`, `data/RNA_DATASETS`, `operations/NON_GIT_INVENTORY` |
+| `DATA_LOADING_DOCUMENTATION`, `DATA_LOCATIONS` | `data/DATA_PIPELINE`, `data/RNA_DATASETS` |
 | `FAST_TRAINING_GUIDE`, `TRAINING_DOCUMENTATION` | `training/TRAINING_GUIDE`, `training/VALIDATION` |
 | `PIPELINE_BUGS`, `PROTEIN_LOSS_EXPERIMENTS`, `features/EPOCH_BALANCED_MULTIMODAL_BATCHING` | `archive/PIPELINE_FIXES`, `archive/EXPERIMENT_HISTORY` |
 | `features/MULTIDOMAIN_VIRTUAL_V1_RUN_AUDIT`, root RNA/V handoffs | `training/STATUS_AND_NEXT_STEPS_20260912`, data/archive docs |
-| `NEXT_GOALS`, root `CURRENT_TODOS` | Dated training handoff |
-| Root `MIGRATION` | `operations/MIGRATION` plus root discovery pointer |
 
 Project docs, original-document archive, root entrypoints and shared MIND skills
 are **versioned in Git**. A clone includes them. Logs, checkpoints, external data,
-private tool state and reference trees still need the documented rsync steps.
+private tool state and reference trees still have to be copied separately.
