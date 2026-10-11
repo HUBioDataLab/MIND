@@ -110,6 +110,4 @@ Two current encoder details deserve explicit caution:
   batch contains molecules with explicit bonds.
 
 The metabolite/COCONUT domain remains disabled in the production comparison
-configuration. See [hybrid edges](HYBRID_EDGES.md) for graph construction and
-[virtual-slot history](../archive/REPRESENTATION_HISTORY.md) for rejected and
-partially validated alternatives.
+configuration. See [hybrid edges](HYBRID_EDGES.md) for graph construction.

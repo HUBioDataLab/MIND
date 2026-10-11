@@ -8,7 +8,7 @@ description: Validate MIND training, data, masking, attention, metrics, and conf
 ## Read the current repository contract
 
 Locate the MIND repository and read its root `AGENTS.md`. Read
-`Docs/training/VALIDATION.md` and the current status linked from `Docs/README.md`.
+`Docs/training/TRAINING_GUIDE.md` and any local validation or status notes kept outside Git.
 Use repository paths rather than hard-coding the source server's home directory.
 Read `.agents/skills/strict-contracts-and-validation/SKILL.md` for applicable
 data/transform changes. Report missing documents rather than inventing baselines.

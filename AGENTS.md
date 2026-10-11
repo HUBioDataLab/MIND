@@ -44,8 +44,7 @@ Datasets live outside Git. `chunk_dir` is often a prefix whose sibling
 
 Protein and RNA chunks are edge-free fixed-slot chunks (`mind_pt_schema`, built by
 `data_loading/build_edge_free_chunks.py`); the legacy edge-stored chunks were deleted on
-9 October 2026 after the equivalence checks in the
-[scaling plan](Docs/training/FULL_DATA_SCALING_PLAN_20260923.md).
+9 October 2026 after equivalence checks against the edge-free copies.
 
 | Dataset | Current Atum base / source |
 |---|---|
@@ -144,8 +143,7 @@ Open issues:
 - Metabolite/QM9 remain disabled; enabling another domain requires its own
   data-contract and mixed-batch verification.
 
-Read [the evidence and next steps](Docs/training/STATUS_AND_NEXT_STEPS_20260912.md)
-before changing the model. Do not restart superseded CB-stacking, synthetic
+Read the local status handoff (kept outside Git) before changing the model. Do not restart superseded CB-stacking, synthetic
 template or element-balanced-loss plans from archived notes.
 
 ## Coding Style & Naming Conventions
@@ -160,7 +158,7 @@ was removed. Geometry, attention, mixed-domain and sampler tests live in
 `tests/`. `make test-unit` exposes pytest through the working environment.
 
 Training changes require user-started fast and matched multidomain checks; see
-[validation](Docs/training/VALIDATION.md). Data-processing checks require explicit
+the `validate-feature` skill. Data-processing checks require explicit
 execution authorization, a separate output prefix, and provenance records.
 
 Record exact command, config, dataset selection, seed, expected change, result

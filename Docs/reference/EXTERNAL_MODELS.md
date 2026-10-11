@@ -41,8 +41,7 @@ The archived BoltzGen note describes a protein design representation in which
 fixed atom14 coordinates and marker placement support coordinate generation and
 decoding. That is a different task from MIND’s masked atomic-number prediction.
 MIND does not currently implement a BoltzGen coordinate diffusion process,
-marker-count decoder, or RNA analogue. See [representation history](../archive/REPRESENTATION_HISTORY.md)
-for the local decision and its limitations.
+marker-count decoder, or RNA analogue.
 
 ## Other literature named in archived material
 

@@ -30,11 +30,10 @@ proof that a job stopped. Keep launcher and Python-worker PIDs separate.
 
 ## Documentation and skills
 
-Start with [the documentation index](../README.md),
-[validation](../training/VALIDATION.md), and
-[the current training handoff](../training/STATUS_AND_NEXT_STEPS_20260912.md).
+Start with [the documentation index](../README.md) and
+[the training guide](../training/TRAINING_GUIDE.md).
 Keep substantive project docs under `Docs/`, in English; root/tool entrypoints
-may be short discovery pointers. Preserve superseded evidence in the archive.
+may be short discovery pointers. Run records, migration notes and superseded evidence stay local, outside Git.
 
 All MIND skills have one maintained source in `.agents/skills/`:
 

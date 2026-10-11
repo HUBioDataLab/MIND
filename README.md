@@ -10,7 +10,6 @@ Start with the [documentation index](Docs/README.md).
 - [Architecture](Docs/architecture/MODEL_OVERVIEW.md)
 - [Data pipeline](Docs/data/DATA_PIPELINE.md)
 - [Training and validation](Docs/training/TRAINING_GUIDE.md)
-- [Latest training results and development handoff](Docs/training/STATUS_AND_NEXT_STEPS_20260912.md)
 
 ## Commands
 
@@ -26,7 +25,7 @@ make train CONFIG=m LOG=multidomain_run
 ```
 
 Training is user-started. See [AGENTS.md](AGENTS.md) for execution authority and
-[validation](Docs/training/VALIDATION.md) for interpretation and verification.
+[training guide](Docs/training/TRAINING_GUIDE.md) for commands and verification.
 Project docs, shared rules and MIND skills arrive through Git. Data, logs,
 outputs and private user-tool state require the full migration procedure.
 
