@@ -78,11 +78,19 @@ template/
 #Related Papers
 papers/
 
-#Agents
-.codex
+# Coding-agent configuration (local only)
+AGENTS.md
+CLAUDE.md
+CODEX.md
+.agents/
+.claude/
+.codex/
+Docs/development/AGENT_WORKFLOW.md
 
-# Project documentation and .agents/skills are versioned.
-# Private user-tool state, datasets, logs and checkpoints remain outside Git.
+# Local notes, task lists and reports
+CURRENT_TODOS.md
+MIGRATION.md
+*_RAPORU*.md
 
 # Other codes
 repomix-output.xml
