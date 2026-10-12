@@ -1,0 +1,38 @@
+# MIND runtime dependencies.
+# Versions are the ones installed in the reference environment (Python 3.11,
+# CUDA 12.8) that produced the reported results. Install order matters; see
+# "Installation" in README.md:
+#   1. torch==2.7.1 from the PyTorch cu128 index
+#   2. pip install -r requirements.txt
+#   3. pip install flash-attn==2.8.0.post2 --no-build-isolation
+
+# PyG compiled extensions are published per torch/CUDA build.
+-f https://data.pyg.org/whl/torch-2.7.0+cu128.html
+
+# Training stack
+pytorch-lightning==2.5.2
+torchmetrics==1.7.4
+torch-geometric==2.6.1
+torch-scatter==2.1.2
+torch-sparse==0.6.18
+torch-cluster==1.6.3
+pyg-lib==0.4.0
+xformers==0.0.31.post1
+bitsandbytes==0.46.0
+wandb==0.22.3
+PyYAML==6.0.2
+
+# Data processing and metrics
+numpy==1.26.4
+pandas==2.3.1
+scikit-learn==1.7.1
+networkx==3.4.2
+biopython==1.85
+rdkit-pypi==2022.9.5
+tabulate==0.10.0
+tqdm==4.67.1
+requests==2.32.4
+
+# Only for UniMol LMDB preprocessing (data_loading/adapters/unimol_adapter.py);
+# not part of the reference environment.
+# lmdb
