@@ -19,18 +19,18 @@ from esa.mha_flash_varlen import SABFlashVarlen, PMAFlashVarlen
 from esa.mlp_utils import SmallMLP, GatedMLPMulti
 
 
-def compute_distance_bias(pos, batch_mapping, max_items, distance_scale=1.0, distance_cutoff=10.0, device="cuda:0", use_bfloat16=True):
+def compute_distance_bias(pos, batch_mapping, max_items, distance_scale=1.0, distance_cutoff=10.0, *, device, use_bfloat16=True):
     """
     Compute distance-based attention bias using inverse scale.
     Far atoms get more negative bias (less attention).
-    
+
     Args:
         pos: [num_nodes, 3] atom positions
         batch_mapping: [num_nodes] batch indices
         max_items: maximum nodes per batch
         distance_scale: scaling factor for distance bias (higher = stronger distance penalty)
         distance_cutoff: distances beyond this are clamped (Angstroms)
-        device: device to compute on
+        device: device to compute on (required keyword; no default device)
         use_bfloat16: whether to use bfloat16 for bias
     
     Returns:
@@ -77,7 +77,7 @@ def compute_distance_bias(pos, batch_mapping, max_items, distance_scale=1.0, dis
 
 
 def get_adj_mask_from_edge_index_node(
-    edge_index, batch_size, max_items, batch_mapping, xformers_or_torch_attn, use_bfloat16=True, device="cuda:0"
+    edge_index, batch_size, max_items, batch_mapping, xformers_or_torch_attn, *, device, use_bfloat16=True
 ):
     if xformers_or_torch_attn in ["torch"]:
         empty_mask_fill_value = False
@@ -146,7 +146,7 @@ def get_first_unique_index(t):
     _, ind_sorted = torch.sort(idx, stable=True)
     cum_sum = counts.cumsum(0)
 
-    zero = torch.tensor([0], device=torch.device("cuda:0"))
+    zero = torch.zeros(1, dtype=cum_sum.dtype, device=cum_sum.device)
     cum_sum = torch.cat((zero, cum_sum[:-1]))
     first_indicies = ind_sorted[cum_sum]
 
@@ -158,10 +158,10 @@ def generate_consecutive_tensor(input_tensor, final):
     lengths = input_tensor[1:] - input_tensor[:-1]
 
     # Append the final length
-    lengths = torch.cat((lengths, torch.tensor([final - input_tensor[-1]], device=torch.device("cuda:0"))))
+    lengths = torch.cat((lengths, (final - input_tensor[-1]).reshape(1)))
 
     # Create ranges for each segment
-    ranges = [torch.arange(0, length, device=torch.device("cuda:0")) for length in lengths]
+    ranges = [torch.arange(0, length, device=input_tensor.device) for length in lengths]
 
     # Concatenate all ranges into a single tensor
     result = torch.cat(ranges)
@@ -218,8 +218,9 @@ def get_adj_mask_from_edge_index_edge(
     max_items,
     batch_mapping,
     xformers_or_torch_attn,
+    *,
+    device,
     use_bfloat16=True,
-    device="cuda:0",
 ):
     if xformers_or_torch_attn in ["torch"]:
         empty_mask_fill_value = False
@@ -859,17 +860,30 @@ class ESA(nn.Module):
             self.dim_pma = dim_pma
 
 
+    def _flash_varlen_ignores_dense_mask(self):
+        """True when no layer reads the dense [B, 1, N, N] adjacency mask.
+
+        flash_varlen M layers attend over ``edge_index`` (``forward_graph``), S layers
+        pass ``adj_mask=None`` and PMA only receives ``seq_lens``. The equivariant
+        branch still reads the mask, so it keeps building it.
+        """
+        return self.xformers_or_torch_attn == "flash_varlen" and not self.use_equivariant
+
     def forward(self, X, edge_index, batch_mapping, num_max_items, pos=None):
-        
+
         if self.node_or_edge == "node":
-            adj_mask = get_adj_mask_from_edge_index_node(
-                edge_index=edge_index,
-                batch_mapping=batch_mapping,
-                batch_size=X.shape[0],
-                max_items=num_max_items,
-                xformers_or_torch_attn=self.xformers_or_torch_attn,
-                use_bfloat16=self.use_bfloat16,
-            )
+            if self._flash_varlen_ignores_dense_mask():
+                adj_mask = None
+            else:
+                adj_mask = get_adj_mask_from_edge_index_node(
+                    edge_index=edge_index,
+                    batch_mapping=batch_mapping,
+                    batch_size=X.shape[0],
+                    max_items=num_max_items,
+                    xformers_or_torch_attn=self.xformers_or_torch_attn,
+                    device=X.device,
+                    use_bfloat16=self.use_bfloat16,
+                )
         elif self.node_or_edge == "edge":
             adj_mask = get_adj_mask_from_edge_index_edge(
                 edge_index=edge_index,
@@ -877,8 +891,9 @@ class ESA(nn.Module):
                 batch_size=X.shape[0],
                 max_items=num_max_items,
                 xformers_or_torch_attn=self.xformers_or_torch_attn,
+                device=X.device,
                 use_bfloat16=self.use_bfloat16,
-            )    
+            )
         
         # Add distance-based attention bias if enabled
         if self.use_distance_bias and pos is not None:
