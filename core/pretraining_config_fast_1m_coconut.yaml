@@ -72,7 +72,7 @@ dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
 dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"
 
-num_workers: 0
+num_workers: 8  # same as the full four-domain config; this fast gate tests the worker setting
 max_samples: null
 use_universal_cache: true
 
@@ -108,6 +108,7 @@ hidden_dims: [256, 256, 256, 256, 256, 256, 256]
 num_heads: [16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "M", "S", "M", "S", "P"]
 xformers_or_torch_attn: flash_varlen
+esa_packed_rows: true  # same as the full four-domain config
 norm_type: LN
 use_3d_coordinates: true
 set_max_items: 0
