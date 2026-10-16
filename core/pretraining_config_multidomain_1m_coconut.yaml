@@ -132,6 +132,7 @@ hidden_dims: [256, 256, 256, 256, 256, 256, 256]
 num_heads: [16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "M", "S", "M", "S", "P"]
 xformers_or_torch_attn: flash_varlen  # ⚡ Padding-free for mixed sizes (CORRECT: flash_varlen not varlen_flash!)
+esa_packed_rows: true  # ESA runs on packed [T, D] rows (all four domains); no padded [B, N, D] tensor. Not compatible with equivariant features or distance bias.
 norm_type: LN
 use_3d_coordinates: true
 set_max_items: 0
