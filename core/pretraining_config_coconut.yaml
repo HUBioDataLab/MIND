@@ -21,7 +21,7 @@ edge_dim: 64
 hidden_dims: [512, 512, 512, 512,512,512,512,512]
 num_heads: [16, 16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "S", "M","S","M","S","P"]
-xformers_or_torch_attn: torch
+xformers_or_torch_attn: flash_varlen  # torch/xformers backends were removed
 norm_type: LN
 use_3d_coordinates: true
 use_hierarchical_features: true

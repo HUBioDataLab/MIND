@@ -27,7 +27,7 @@ edge_dim: 64
 hidden_dims: [512, 512, 512, 512,512,512,512,512]
 num_heads: [8, 8, 8, 8,8,8,8,8]
 layer_types: ["M", "S", "S", "M","S","M","S","P"]
-xformers_or_torch_attn: xformers
+xformers_or_torch_attn: flash_varlen  # torch/xformers backends were removed
 norm_type: LN
 use_3d_coordinates: true
 
@@ -57,7 +57,7 @@ mlp_type: standard
 mlp_dropout: 0.0
 use_mlp_ln: false
 pre_or_post: pre
-use_bfloat16: false
+use_bfloat16: true  # Required for flash_varlen
 
 # Dropout settings
 sab_dropout: 0.0
@@ -71,7 +71,7 @@ set_max_items: 0
 triu_attn_mask: false
 
 # Equivariant branch (ESA pos/EquivariantSAB). Default false; set true to enable.
-use_equivariant_features: true
+use_equivariant_features: false  # e3nn/nequip are not installed; the branch is experimental
 equivariant_lmax: 2
 equivariant_num_features: 16
 equivariant_fusion_method: add

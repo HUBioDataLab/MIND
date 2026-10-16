@@ -63,7 +63,7 @@ class QM9TransferModel(pl.LightningModule):
         num_heads: Optional[list] = None,
         layer_types: Optional[list] = None,
         apply_attention_on: str = "node",
-        xformers_or_torch_attn: str = "xformers",
+        xformers_or_torch_attn: str = "flash_varlen",
         use_3d_coordinates: bool = True,
         atom_types: int = 121,
         gaussian_kernels: int = 128,

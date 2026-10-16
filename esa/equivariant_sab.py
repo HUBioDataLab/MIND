@@ -18,7 +18,6 @@ try:
 except (ImportError, ModuleNotFoundError):
     NEQUIP_AVAILABLE = False
 
-from esa.mha import SAB, MAB
 from esa.mha_flash_varlen import SABFlashVarlen
 
 
@@ -39,7 +38,7 @@ class EquivariantSAB(nn.Module):
         dim_out: int,
         num_heads: int,
         dropout: float,
-        xformers_or_torch_attn: str = "xformers",
+        xformers_or_torch_attn: str = "flash_varlen",
         # Equivariant branch parameters
         use_equivariant: bool = True,
         equivariant_lmax: int = 2,
@@ -56,11 +55,13 @@ class EquivariantSAB(nn.Module):
         self.cross_connection = cross_connection
         self.xformers_or_torch_attn = xformers_or_torch_attn
 
-        # Invariant branch: SAB or SABFlashVarlen (flash_varlen must use the latter)
-        if xformers_or_torch_attn == "flash_varlen":
-            self.invariant_sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
-        else:
-            self.invariant_sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
+        # Invariant branch: flash_varlen is the only supported attention backend
+        if xformers_or_torch_attn != "flash_varlen":
+            raise ValueError(
+                f"xformers_or_torch_attn={xformers_or_torch_attn!r} is not supported: the torch "
+                "and xformers attention backends were removed, use flash_varlen"
+            )
+        self.invariant_sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
 
         # Equivariant branch: NequIP InteractionBlock
         if self.use_equivariant:
@@ -252,133 +253,6 @@ class EquivariantSAB(nn.Module):
         # ============================================================
         # 3. FUSION: Combine invariant and equivariant branches
         # ============================================================
-        if self.use_equivariant and equivariant_dense is not None:
-            if self.fusion_method == "add":
-                fused = invariant_out + equivariant_dense
-            elif self.fusion_method == "concat":
-                fused = torch.cat([invariant_out, equivariant_dense], dim=-1)
-                fused = self.fusion(fused)
-            elif self.fusion_method == "bilinear":
-                fused = self.fusion(invariant_out, equivariant_dense)
-            elif self.fusion_method == "gated":
-                gate = self.fusion_gate(equivariant_dense)
-                fused = invariant_out + gate * self.fusion_proj(equivariant_dense)
-            else:
-                fused = invariant_out
-        else:
-            fused = invariant_out
-        
-        return fused
-
-
-class EquivariantMAB(nn.Module):
-    """
-    Multi-Head Attention Block with integrated equivariant features.
-    
-    Similar to EquivariantSAB but for cross-attention (MAB).
-    """
-    
-    def __init__(
-        self,
-        dim_Q: int,
-        dim_K: int,
-        dim_V: int,
-        num_heads: int,
-        dropout_p: float,
-        xformers_or_torch_attn: str = "xformers",
-        # Equivariant branch parameters
-        use_equivariant: bool = True,
-        equivariant_lmax: int = 2,
-        equivariant_num_features: int = 16,
-        fusion_method: str = "add",
-        cross_connection: bool = True,
-    ):
-        super().__init__()
-        
-        self.dim_Q = dim_Q
-        self.dim_K = dim_K
-        self.dim_V = dim_V
-        self.use_equivariant = use_equivariant and NEQUIP_AVAILABLE
-        self.fusion_method = fusion_method
-        self.cross_connection = cross_connection
-        
-        # Invariant branch: Standard MAB
-        self.invariant_mab = MAB(dim_Q, dim_K, dim_V, num_heads, dropout_p, xformers_or_torch_attn)
-        
-        # Equivariant branch (similar to EquivariantSAB)
-        if self.use_equivariant:
-            assert NEQUIP_AVAILABLE, (
-                "nequip is required for equivariant features. "
-                "Install with: pip install nequip"
-            )
-            
-            irreps_in = {
-                AtomicDataDict.NODE_FEATURES_KEY: Irreps(f"{dim_K}x0e"),
-                AtomicDataDict.EDGE_EMBEDDING_KEY: Irreps("1x0e"),
-                AtomicDataDict.EDGE_ATTRS_KEY: Irreps.spherical_harmonics(equivariant_lmax),
-                AtomicDataDict.NODE_ATTRS_KEY: Irreps("1x0e"),
-            }
-            
-            irreps_out = Irreps(f"{equivariant_num_features//2}x0e + {equivariant_num_features//2}x1o")
-            
-            self.equivariant_interaction = InteractionBlock(
-                irreps_in=irreps_in,
-                irreps_out=irreps_out,
-                radial_mlp_depth=2,
-                radial_mlp_width=64,
-                use_sc=True,
-                is_first_layer=False,
-                avg_num_neighbors=10.0,
-            )
-            
-            self.equivariant_to_scalar = nn.Linear(irreps_out.dim, dim_V)
-            
-            if cross_connection:
-                self.inv_to_equiv = nn.Linear(dim_K, dim_K)
-                self.equiv_to_inv_gate = nn.Linear(irreps_out.dim, dim_V)
-        
-        # Fusion layer
-        if fusion_method == "concat":
-            self.fusion = nn.Linear(dim_V * 2, dim_V)
-        elif fusion_method == "bilinear":
-            self.fusion = nn.Bilinear(dim_V, dim_V, dim_V)
-        elif fusion_method == "gated":
-            self.fusion_gate = nn.Sequential(
-                nn.Linear(dim_V, dim_V),
-                nn.Sigmoid()
-            )
-            self.fusion_proj = nn.Linear(dim_V, dim_V)
-    
-    def forward(
-        self,
-        Q: torch.Tensor,  # [batch_size, seq_len_Q, dim_Q]
-        K: torch.Tensor,  # [batch_size, seq_len_K, dim_K]
-        adj_mask: Optional[torch.Tensor] = None,
-        edge_index: Optional[torch.Tensor] = None,
-        edge_vectors: Optional[torch.Tensor] = None,
-        pos: Optional[torch.Tensor] = None,
-        batch_mapping: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Forward pass with integrated equivariant features."""
-        # Invariant branch
-        invariant_out = self.invariant_mab(Q, K, adj_mask=adj_mask)
-        
-        # Equivariant branch (similar logic to EquivariantSAB)
-        if self.use_equivariant and edge_index is not None and edge_vectors is not None:
-            # Use K for equivariant processing (keys represent the graph structure)
-            batch_size, seq_len_K, dim_K = K.shape
-            
-            # Convert to sparse and process equivariant branch
-            # (Similar implementation to EquivariantSAB)
-            # ... (implementation similar to EquivariantSAB)
-            
-            # For now, return invariant output
-            # Full implementation would mirror EquivariantSAB logic
-            equivariant_dense = None
-        else:
-            equivariant_dense = None
-        
-        # Fusion
         if self.use_equivariant and equivariant_dense is not None:
             if self.fusion_method == "add":
                 fused = invariant_out + equivariant_dense

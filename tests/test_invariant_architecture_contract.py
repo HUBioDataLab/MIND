@@ -1,4 +1,3 @@
-from contextlib import nullcontext
 from collections import OrderedDict
 from pathlib import Path
 
@@ -6,8 +5,6 @@ import pytest
 import torch
 import yaml
 
-import esa.masked_layers as masked_layers
-import esa.mha as mha
 import esa.equivariant_sab as equivariant_sab
 from core.pretraining_config import create_pretraining_config
 from core.pretraining_model import (
@@ -35,7 +32,7 @@ def _build_esa(
         num_heads=[2] * len(layer_types),
         layer_types=layer_types,
         node_or_edge="node",
-        xformers_or_torch_attn="torch",
+        xformers_or_torch_attn="flash_varlen",
         pre_or_post="pre",
         norm_type="LN",
         sab_dropout=0.0,
@@ -45,9 +42,9 @@ def _build_esa(
         pma_residual_dropout=0.0,
         use_mlps=False,
         set_max_items=4,
-        use_bfloat16=False,
+        use_bfloat16=True,
         use_equivariant=use_equivariant,
-    )
+    ).to(torch.bfloat16)
 
 
 def _state_schema(module: torch.nn.Module) -> dict[str, tuple[int, ...]]:
@@ -73,9 +70,7 @@ def test_duplicate_p_and_single_p_have_the_same_registered_architecture():
     assert incompatible.unexpected_keys == []
 
 
-def test_duplicate_p_and_single_p_match_after_strict_weight_load_on_cpu(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_duplicate_p_and_single_p_match_after_strict_weight_load_on_cpu(cpu_flash):
     torch.manual_seed(7)
     legacy = _build_esa(["M", "S", "P", "P"])
     single = _build_esa(["M", "S", "P"])
@@ -83,19 +78,9 @@ def test_duplicate_p_and_single_p_match_after_strict_weight_load_on_cpu(
     legacy.eval()
     single.eval()
 
-    # ESA's production mask helper currently defaults to a CUDA device, while
-    # this contract test deliberately exercises the torch attention backend on
-    # CPU. A None mask is valid and gives both models identical global attention.
-    monkeypatch.setattr(
-        masked_layers,
-        "get_adj_mask_from_edge_index_node",
-        lambda **_: None,
-    )
-    # The torch MAB pins SDPA to the CUDA-efficient kernel. Let PyTorch select
-    # its CPU math implementation without changing the model computation.
-    monkeypatch.setattr(mha, "sdpa_kernel", lambda *_args, **_kwargs: nullcontext())
-
-    inputs = torch.randn(1, 4, 8)
+    # The flash_varlen layers run on CPU with the cpu_flash fixture (only the
+    # CUDA kernel is replaced); no dense adjacency mask is built on this path.
+    inputs = torch.randn(1, 4, 8).to(torch.bfloat16)
     edge_index = torch.tensor(
         [[0, 1, 1, 2, 2, 3, 3, 0], [1, 0, 2, 1, 3, 2, 0, 3]],
         dtype=torch.long,
@@ -183,7 +168,7 @@ def test_nested_and_legacy_flat_hparams_reconstruct_invariant_models():
         hidden_dims=[16],
         num_heads=[4],
         layer_types=["S"],
-        xformers_or_torch_attn="torch",
+        xformers_or_torch_attn="flash_varlen",
         set_max_items=4,
         gaussian_kernels=4,
         use_3d_coordinates=True,

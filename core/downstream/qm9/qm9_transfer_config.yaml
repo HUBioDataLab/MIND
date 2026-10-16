@@ -31,7 +31,7 @@ hidden_dims: [512, 512, 512, 512]
 num_heads: [8, 8, 8, 8]
 layer_types: ["S", "S", "S", "P"]  # S = SAB, M = MAB, P = PMA
 apply_attention_on: node  # node or edge
-xformers_or_torch_attn: xformers
+xformers_or_torch_attn: flash_varlen  # torch/xformers backends were removed
 use_3d_coordinates: true
 atom_types: 121
 gaussian_kernels: 128
@@ -63,10 +63,10 @@ wandb_project_name: qm9-transfer-learning
 wandb_run_name: qm9-homo-transfer  # Will be overridden dynamically based on target_name
 
 # Precision
-use_bfloat16: false
+use_bfloat16: true  # Required for flash_varlen
 
 # Equivariant features (experimental)
-use_equivariant_features: true  # Set to true to enable equivariant branch
+use_equivariant_features: false  # e3nn/nequip are not installed; the branch is experimental
 equivariant_lmax: 2  # Maximum angular momentum (l=0,1,2)
 equivariant_num_features: 16  # Number of tensor feature channels
 equivariant_fusion_method: add  # add, concat, or bilinear

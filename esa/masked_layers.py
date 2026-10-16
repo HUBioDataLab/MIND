@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 import torch
 # import admin_torch  # Temporarily disabled
 
@@ -14,9 +16,32 @@ from torch.nn import functional as F
 from torch_geometric.utils import unbatch_edge_index
 
 from esa.utils.norm_layers import BN, LN
-from esa.mha import SAB, PMA
 from esa.mha_flash_varlen import SABFlashVarlen, PMAFlashVarlen
 from esa.mlp_utils import SmallMLP, GatedMLPMulti
+
+
+SUPPORTED_ATTENTION_BACKEND = "flash_varlen"
+
+
+class PackedLayout(NamedTuple):
+    """Row layout of packed ESA input: ``X`` is ``[T, D]`` and graph g owns rows
+    ``cu_seqlens[g]:cu_seqlens[g + 1]``. Rows keep the node order of ``batch_mapping``
+    and ``edge_index``. Carried in the ``adj_mask`` slot of the layer tuple, which
+    nothing reads on the flash_varlen path."""
+
+    cu_seqlens: torch.Tensor  # int32, [num_graphs + 1]
+    max_seqlen: int
+    num_graphs: int
+
+
+def require_flash_varlen(xformers_or_torch_attn):
+    """The torch and xformers attention backends were removed; only flash_varlen is supported."""
+    if xformers_or_torch_attn != SUPPORTED_ATTENTION_BACKEND:
+        raise ValueError(
+            f"xformers_or_torch_attn={xformers_or_torch_attn!r} is not supported: the torch and "
+            f"xformers attention backends were removed, set xformers_or_torch_attn: "
+            f"{SUPPORTED_ATTENTION_BACKEND}"
+        )
 
 
 def compute_distance_bias(pos, batch_mapping, max_items, distance_scale=1.0, distance_cutoff=10.0, *, device, use_bfloat16=True):
@@ -77,16 +102,12 @@ def compute_distance_bias(pos, batch_mapping, max_items, distance_scale=1.0, dis
 
 
 def get_adj_mask_from_edge_index_node(
-    edge_index, batch_size, max_items, batch_mapping, xformers_or_torch_attn, *, device, use_bfloat16=True
+    edge_index, batch_size, max_items, batch_mapping, *, device, use_bfloat16=True
 ):
-    if xformers_or_torch_attn in ["torch"]:
-        empty_mask_fill_value = False
-        mask_dtype = torch.bool
-        edge_mask_fill_value = True
-    else:
-        empty_mask_fill_value = -99999
-        mask_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
-        edge_mask_fill_value = 0
+    # Additive float mask: 0 where attention is allowed, -99999 where it is not.
+    empty_mask_fill_value = -99999
+    mask_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
+    edge_mask_fill_value = 0
 
     # FIXED: Removed incorrect manual reindexing and premature check
     # unbatch_edge_index (line 65) handles per-graph reindexing correctly
@@ -108,9 +129,6 @@ def get_adj_mask_from_edge_index_node(
     adj_mask[
         edge_batch_mapping, edge_batch_non_cumulative[0, :], edge_batch_non_cumulative[1, :]
     ] = edge_mask_fill_value
-
-    if xformers_or_torch_attn in ["torch"]:
-        adj_mask = ~adj_mask
 
     adj_mask = adj_mask.unsqueeze(1)
     return adj_mask
@@ -217,19 +235,14 @@ def get_adj_mask_from_edge_index_edge(
     batch_size,
     max_items,
     batch_mapping,
-    xformers_or_torch_attn,
     *,
     device,
     use_bfloat16=True,
 ):
-    if xformers_or_torch_attn in ["torch"]:
-        empty_mask_fill_value = False
-        mask_dtype = torch.bool
-        edge_mask_fill_value = True
-    else:
-        empty_mask_fill_value = -99999
-        mask_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
-        edge_mask_fill_value = 0
+    # Additive float mask: 0 where attention is allowed, -99999 where it is not.
+    empty_mask_fill_value = -99999
+    mask_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
+    edge_mask_fill_value = 0
 
     adj_mask = torch.full(
         size=(batch_size, max_items, max_items),
@@ -259,10 +272,6 @@ def get_adj_mask_from_edge_index_edge(
         edge_batch_index_to_original_index.index_select(0, eam_nonzero[:, 1]),
     ] = edge_mask_fill_value
 
-
-    if xformers_or_torch_attn in ["torch"]:
-        adj_mask = ~adj_mask
-
     adj_mask = adj_mask.unsqueeze(1)
     return adj_mask
 
@@ -280,7 +289,7 @@ class SABComplete(nn.Module):
         mlp_hidden_size=64,
         mlp_type="standard",
         node_or_edge="edge",
-        xformers_or_torch_attn="xformers",
+        xformers_or_torch_attn="flash_varlen",
         residual_dropout=0,
         set_max_items=0,
         use_bfloat16=True,
@@ -297,6 +306,7 @@ class SABComplete(nn.Module):
         equivariant_cross_connection=True,
     ):
         super(SABComplete, self).__init__()
+        require_flash_varlen(xformers_or_torch_attn)
 
         self.dim_in = dim_in
         self.dim_out = dim_out
@@ -354,10 +364,7 @@ class SABComplete(nn.Module):
         else:
             # Standard attention (no equivariant features)
             self.equivariant_effective = False
-            if xformers_or_torch_attn == "flash_varlen":
-                self.sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
-            else:
-                self.sab = SAB(dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
+            self.sab = SABFlashVarlen(dim_in, dim_out, num_heads, dropout)
 
         if self.idx != 2:
             bn_dim = self.set_max_items
@@ -422,11 +429,30 @@ class SABComplete(nn.Module):
             pos = None
             edge_vectors = None
 
+        layout = adj_mask if isinstance(adj_mask, PackedLayout) else None
+        if (layout is not None) != (X.dim() == 2):
+            raise ValueError(
+                "packed rows need X shaped [T, D] together with a PackedLayout; "
+                f"got X.dim()={X.dim()} and layout={'set' if layout is not None else 'missing'}"
+            )
+        if layout is not None and not isinstance(self.sab, SABFlashVarlen):
+            raise ValueError("packed rows are not supported by the equivariant branch")
+
         if self.pre_or_post == "pre":
             X = self.norm(X)
 
+        if layout is not None:
+            # Packed rows: no padding to remove, nothing to scatter back.
+            if self.idx == 1:
+                out_attn = self.sab.forward_graph_packed(
+                    X,
+                    edge_index=edge_index,
+                    batch_mapping=batch_mapping,
+                )
+            else:
+                out_attn = self.sab.forward_packed(X, layout.cu_seqlens, layout.max_seqlen)
         # Extract sequence lengths for flash_varlen (optional feature)
-        if isinstance(self.sab, SABFlashVarlen):
+        elif isinstance(self.sab, SABFlashVarlen):
             # For flash_varlen: compute actual sequence lengths from batch_mapping
             # batch_mapping: [total_nodes] where each value is the batch index
             # We need to count how many nodes each batch has
@@ -450,8 +476,8 @@ class SABComplete(nn.Module):
                 # By this point M has attached each geometry-free query to its
                 # own residue/nucleotide context.
                 out_attn = self.sab(X, seq_lens=seq_lens, adj_mask=None)
-        elif self.use_equivariant:
-            # EquivariantSAB: pass geometric information
+        else:
+            # EquivariantSAB (the only other layer kind): pass geometric information
             # Compute edge_vectors if not provided
             if edge_vectors is None and pos is not None and edge_index is not None:
                 # Convert pos to sparse if needed
@@ -472,12 +498,6 @@ class SABComplete(nn.Module):
                 pos=pos,
                 batch_mapping=batch_mapping,
             )
-        else:
-            # Standard attention (xformers or torch)
-            if self.idx == 1:
-                out_attn = self.sab(X, adj_mask)
-            else:
-                out_attn = self.sab(X, None)
 
         if out_attn.shape[-1] != X.shape[-1]:
             X = self.proj_1(X)
@@ -519,7 +539,7 @@ class PMAComplete(nn.Module):
         use_mlp=False,
         mlp_hidden_size=64,
         mlp_type="standard",
-        xformers_or_torch_attn="xformers",
+        xformers_or_torch_attn="flash_varlen",
         set_max_items=0,
         use_bfloat16=True,
         num_mlp_layers=3,
@@ -530,6 +550,7 @@ class PMAComplete(nn.Module):
         mlp_dropout=0,
     ):
         super(PMAComplete, self).__init__()
+        require_flash_varlen(xformers_or_torch_attn)
 
         self.use_mlp = use_mlp
         self.mlp_hidden_size = mlp_hidden_size
@@ -545,11 +566,7 @@ class PMAComplete(nn.Module):
             self.residual_attn = as_module(num_layers_for_residual)
             self.residual_mlp = as_module(num_layers_for_residual)
 
-        # Choose PMA implementation based on xformers_or_torch_attn setting
-        if xformers_or_torch_attn == "flash_varlen":
-            self.pma = PMAFlashVarlen(dim_hidden, num_heads, num_outputs, dropout)
-        else:
-            self.pma = PMA(dim_hidden, num_heads, num_outputs, dropout, xformers_or_torch_attn)
+        self.pma = PMAFlashVarlen(dim_hidden, num_heads, num_outputs, dropout)
 
         if norm_type == "LN":
             self.norm = LN(dim_hidden)
@@ -593,18 +610,16 @@ class PMAComplete(nn.Module):
             X, edge_index, batch_mapping, max_items, adj_mask = inp
             pos, edge_vectors = None, None
 
+        if X.dim() != 3:
+            raise ValueError("PMA pooling needs the padded [B, N, D] layout; ESA pads once before it")
         if self.pre_or_post == "pre":
             X = self.norm(X)
 
-        # Handle flash_varlen with sequence lengths
-        if isinstance(self.pma, PMAFlashVarlen):
-            batch_size = X.size(0)
-            # ⚠️ CRITICAL: Compute actual sequence lengths from batch_mapping
-            counts = torch.bincount(batch_mapping, minlength=batch_size)
-            seq_lens = counts.to(torch.int32)
-            out_attn = self.pma(X, seq_lens=seq_lens)
-        else:
-            out_attn = self.pma(X)
+        batch_size = X.size(0)
+        # ⚠️ CRITICAL: Compute actual sequence lengths from batch_mapping
+        counts = torch.bincount(batch_mapping, minlength=batch_size)
+        seq_lens = counts.to(torch.int32)
+        out_attn = self.pma(X, seq_lens=seq_lens)
 
         if self.pre_or_post == "pre" and out_attn.shape[-2] == X.shape[-2]:
             out = X + out_attn
@@ -644,7 +659,7 @@ class ESA(nn.Module):
         num_heads,
         layer_types,
         node_or_edge="edge",
-        xformers_or_torch_attn="xformers",
+        xformers_or_torch_attn="flash_varlen",
         pre_or_post="pre",
         norm_type="LN",
         sab_dropout=0.0,
@@ -668,6 +683,7 @@ class ESA(nn.Module):
         equivariant_cross_connection=True,
     ):
         super(ESA, self).__init__()
+        require_flash_varlen(xformers_or_torch_attn)
 
         assert len(layer_types) == len(dim_hidden) and len(layer_types) == len(num_heads)
 
@@ -867,11 +883,42 @@ class ESA(nn.Module):
         pass ``adj_mask=None`` and PMA only receives ``seq_lens``. The equivariant
         branch still reads the mask, so it keeps building it.
         """
-        return self.xformers_or_torch_attn == "flash_varlen" and not self.use_equivariant
+        return not self.use_equivariant
+
+    def _packed_layout(self, X, batch_mapping):
+        if self.use_equivariant:
+            raise ValueError("packed rows are not supported with the equivariant branch")
+        if self.node_or_edge != "node":
+            raise ValueError("packed rows are only supported for node attention")
+        if self.use_distance_bias:
+            raise ValueError("the distance bias is not supported with packed rows")
+        if batch_mapping.numel() != X.size(0):
+            raise ValueError(
+                f"packed X has {X.size(0)} rows but batch_mapping has {batch_mapping.numel()} nodes"
+            )
+        counts = torch.bincount(batch_mapping)
+        cu_seqlens = F.pad(torch.cumsum(counts, dim=0), (1, 0)).to(torch.int32)
+        return PackedLayout(cu_seqlens, int(counts.max()), int(counts.numel()))
+
+    @staticmethod
+    def _pad_rows(rows, batch_mapping, layout, num_max_items):
+        """Scatter packed rows [T, D] into the padded [B, N, D] layout (used once, before PMA)."""
+        if layout.max_seqlen > num_max_items:
+            raise ValueError(
+                f"num_max_items={num_max_items} is smaller than the longest graph ({layout.max_seqlen})"
+            )
+        offsets = layout.cu_seqlens[:-1].to(torch.long)
+        local = torch.arange(rows.size(0), device=rows.device) - offsets[batch_mapping]
+        dense = rows.new_zeros((layout.num_graphs, num_max_items, rows.size(-1)))
+        dense[batch_mapping, local] = rows
+        return dense
 
     def forward(self, X, edge_index, batch_mapping, num_max_items, pos=None):
 
-        if self.node_or_edge == "node":
+        packed = X.dim() == 2
+        if packed:
+            adj_mask = self._packed_layout(X, batch_mapping)
+        elif self.node_or_edge == "node":
             if self._flash_varlen_ignores_dense_mask():
                 adj_mask = None
             else:
@@ -880,7 +927,6 @@ class ESA(nn.Module):
                     batch_mapping=batch_mapping,
                     batch_size=X.shape[0],
                     max_items=num_max_items,
-                    xformers_or_torch_attn=self.xformers_or_torch_attn,
                     device=X.device,
                     use_bfloat16=self.use_bfloat16,
                 )
@@ -890,7 +936,6 @@ class ESA(nn.Module):
                 batch_mapping=batch_mapping,
                 batch_size=X.shape[0],
                 max_items=num_max_items,
-                xformers_or_torch_attn=self.xformers_or_torch_attn,
                 device=X.device,
                 use_bfloat16=self.use_bfloat16,
             )
@@ -948,8 +993,12 @@ class ESA(nn.Module):
         node_embeddings_before_pma = enc
 
         if hasattr(self, "decoder"):
+            if packed:
+                # PMA pooling works on the padded layout; pad once, here.
+                padded = self._pad_rows(enc, batch_mapping, adj_mask, num_max_items)
+                out, _, _, _, _ = self.decoder((padded, edge_index, batch_mapping, num_max_items, None))
             # Pass geometric information to decoder layers if equivariant features are enabled
-            if self.use_equivariant and pos is not None and edge_vectors is not None:
+            elif self.use_equivariant and pos is not None and edge_vectors is not None:
                 out, _, _, _, _ = self.decoder((enc, edge_index, batch_mapping, num_max_items, adj_mask, pos, edge_vectors))
             else:
                 out, _, _, _, _ = self.decoder((enc, edge_index, batch_mapping, num_max_items, adj_mask))

@@ -41,10 +41,10 @@ early_stopping_patience: 30
 gradient_clip_val: 0.5
 optimiser_weight_decay: 1.0e-10
 monitor_loss_name: "train_total_loss"
-use_bfloat16: false
+use_bfloat16: true  # Required for flash_varlen
 accelerator: auto
 devices: auto
-precision: 16
+precision: bfloat16  # Required for flash_varlen
 num_sanity_val_steps: 0
 fast_dev_run: false
 
@@ -57,7 +57,7 @@ edge_dim: 64
 hidden_dims: [512, 512, 512, 512, 512, 512, 512, 512]
 num_heads: [8, 8, 8, 8, 8, 8, 8, 8]
 layer_types: ["M", "S", "S", "M", "S", "M", "S", "P"]
-xformers_or_torch_attn: xformers
+xformers_or_torch_attn: flash_varlen  # torch/xformers backends were removed
 norm_type: LN
 use_3d_coordinates: true
 set_max_items: 0
@@ -106,7 +106,7 @@ max_position_types: 1
 max_entity_types: 1
 preserve_universal_blocks: false
 use_posenc: false
-use_equivariant_features: true
+use_equivariant_features: false  # e3nn/nequip are not installed; the branch is experimental
 equivariant_lmax: 2
 equivariant_num_features: 16
 equivariant_fusion_method: add

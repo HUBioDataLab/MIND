@@ -171,7 +171,7 @@ def main():
             num_heads=config.get('num_heads', [8, 8, 8, 8]),
             layer_types=config.get('layer_types', ['S', 'S', 'S', 'P']),
             apply_attention_on=config.get('apply_attention_on', 'node'),
-            xformers_or_torch_attn=config.get('xformers_or_torch_attn', 'xformers'),
+            xformers_or_torch_attn=config.get('xformers_or_torch_attn', 'flash_varlen'),
             use_3d_coordinates=config.get('use_3d_coordinates', True),
             atom_types=config.get('atom_types', 121),
             gaussian_kernels=config.get('gaussian_kernels', 128),

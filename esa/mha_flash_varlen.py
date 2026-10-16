@@ -178,6 +178,47 @@ class MABFlashVarlen(nn.Module):
             raise ValueError("dense X is shorter than a graph in batch_mapping")
 
         sparse_x = X[batch_mapping, local_indices]
+        out_sparse = self._graph_attention_rows(sparse_x, edge_index, batch_mapping)
+        out = X.new_zeros((batch_size, max_seq_len, self.dim_V))
+        out[batch_mapping, local_indices] = out_sparse.to(dtype=out.dtype)
+        return out
+
+    def forward_graph_packed(self, X, edge_index, batch_mapping):
+        """``forward_graph`` for packed rows: ``X`` is ``[T, D]``, one row per node.
+
+        Rows are in the order of ``batch_mapping``/``edge_index`` (the order dense
+        batching preserves), so no gather or scatter is needed. Same math as
+        ``forward_graph`` on the real rows.
+        """
+        if X.ndim != 2:
+            raise ValueError("packed graph attention expects X shaped [T, D]")
+        if edge_index.ndim != 2 or edge_index.size(0) != 2:
+            raise ValueError("edge_index must have shape [2, E]")
+        num_nodes = int(batch_mapping.numel())
+        if X.size(0) != num_nodes:
+            raise ValueError(
+                f"packed X has {X.size(0)} rows but batch_mapping has {num_nodes} nodes"
+            )
+        if num_nodes == 0:
+            return torch.zeros_like(X)
+        batch_mapping = batch_mapping.to(device=X.device, dtype=torch.long)
+        edge_index = edge_index.to(device=X.device, dtype=torch.long)
+        if int(batch_mapping.min().item()) < 0:
+            raise ValueError("batch_mapping contains a negative graph id")
+        if batch_mapping.numel() > 1 and bool(
+            (batch_mapping[1:] < batch_mapping[:-1]).any()
+        ):
+            raise ValueError("batch_mapping must be grouped by graph")
+        if edge_index.numel() and (
+            int(edge_index.min().item()) < 0
+            or int(edge_index.max().item()) >= num_nodes
+        ):
+            raise ValueError("edge_index contains a node outside batch_mapping")
+        return self._graph_attention_rows(X, edge_index, batch_mapping).to(dtype=X.dtype)
+
+    def _graph_attention_rows(self, sparse_x, edge_index, batch_mapping):
+        """Edge-list attention over packed rows ``sparse_x`` [T, D]; returns [T, dim_V]."""
+        num_nodes = sparse_x.size(0)
         head_dim = self.dim_V // self.num_heads
         if self.dim_V % self.num_heads != 0:
             raise ValueError("Embedding dim is not divisible by nheads")
@@ -208,9 +249,44 @@ class MABFlashVarlen(nn.Module):
             attended.index_add_(0, source, messages)
 
         out_sparse = attended.reshape(num_nodes, self.dim_V)
-        out_sparse = out_sparse + F.mish(self.fc_o(out_sparse))
-        out = X.new_zeros((batch_size, max_seq_len, self.dim_V))
-        out[batch_mapping, local_indices] = out_sparse.to(dtype=out.dtype)
+        return out_sparse + F.mish(self.fc_o(out_sparse))
+
+    def forward_packed_varlen(self, X, cu_seqlens, max_seqlen):
+        """Self-attention over packed rows with FlashAttention varlen (no padding).
+
+        ``X`` is ``[T, D]`` and ``cu_seqlens`` ([B + 1], int32) marks where each graph
+        starts. Same projections and kernel call as ``_forward_varlen``, but the
+        rows are never unpadded or re-padded.
+        """
+        if X.ndim != 2:
+            raise ValueError("packed attention expects X shaped [T, D]")
+        if int(cu_seqlens[-1]) != X.size(0):
+            raise ValueError(
+                f"cu_seqlens ends at {int(cu_seqlens[-1])} but X has {X.size(0)} rows"
+            )
+        E_total = self.dim_V
+        assert E_total % self.num_heads == 0, "Embedding dim is not divisible by nheads"
+        head_dim = E_total // self.num_heads
+
+        input_dtype = X.dtype
+        if input_dtype != torch.float16:
+            X = X.to(torch.bfloat16)
+        Q = self.fc_q(X).view(-1, self.num_heads, head_dim)
+        V = self.fc_v(X).view(-1, self.num_heads, head_dim)
+        K = self.fc_k(X).view(-1, self.num_heads, head_dim)
+
+        out = flash_attn_varlen_func(
+            Q, K, V,
+            cu_seqlens, cu_seqlens,
+            max_seqlen, max_seqlen,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            softmax_scale=None,
+            causal=False,
+        )
+        out = out.reshape(-1, self.num_heads * head_dim)
+        out = out + F.mish(self.fc_o(out))
+        if input_dtype != out.dtype:
+            out = out.to(input_dtype)
         return out
     
     
@@ -309,6 +385,12 @@ class SABFlashVarlen(nn.Module):
 
     def forward_graph(self, X, edge_index, batch_mapping):
         return self.mab.forward_graph(X, edge_index, batch_mapping)
+
+    def forward_graph_packed(self, X, edge_index, batch_mapping):
+        return self.mab.forward_graph_packed(X, edge_index, batch_mapping)
+
+    def forward_packed(self, X, cu_seqlens, max_seqlen):
+        return self.mab.forward_packed_varlen(X, cu_seqlens, max_seqlen)
 
 
 class PMAFlashVarlen(nn.Module):

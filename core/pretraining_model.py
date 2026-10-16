@@ -509,9 +509,13 @@ class PretrainingESAModel(pl.LightningModule):
                 counts = torch.bincount(batch_mapping)
                 num_max_items = nearest_multiple_of_8(int(counts.max().item()) + 1)
 
-            h, dense_batch_index = to_dense_batch(
-                h, batch_mapping, fill_value=0, max_num_nodes=num_max_items
-            )
+            if getattr(self.config, "esa_packed_rows", False):
+                # Packed rows: [T, D] in node order, no padded [B, N, D] tensor.
+                dense_batch_index = None
+            else:
+                h, dense_batch_index = to_dense_batch(
+                    h, batch_mapping, fill_value=0, max_num_nodes=num_max_items
+                )
 
             esa_output = self.esa_backbone(
                 h,

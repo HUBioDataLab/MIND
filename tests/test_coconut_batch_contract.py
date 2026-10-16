@@ -29,7 +29,7 @@ def _config(**overrides):
         use_posenc=False, use_bfloat16=False, use_equivariant_features=False,
         use_domain_local_slot_embedding=True,
         use_dynamic_random_edges=True, replace_existing_random_edges=True,
-        xformers_or_torch_attn="torch", protein_block_mlm=True, rna_block_mlm=True,
+        xformers_or_torch_attn="flash_varlen", protein_block_mlm=True, rna_block_mlm=True,
         geometry_neutral_virtual_slots={"enabled": True, "protein": True, "rna": True},
         coconut_mask_ratio=0.5,
     )

@@ -7,28 +7,12 @@ production code.
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 import esa.masked_layers as masked_layers
-import esa.mha_flash_varlen as flash_module
 from esa.masked_layers import ESA
 from esa.mha_flash_varlen import MABFlashVarlen
 
 DIM = 16
-
-
-def _sdpa_varlen(q, k, v, cu_q, cu_k, max_q, max_k, dropout_p=0.0, softmax_scale=None, causal=False):
-    outputs = []
-    for i in range(len(cu_q) - 1):
-        a, b = int(cu_q[i]), int(cu_q[i + 1])
-        qi, ki, vi = (t[a:b].transpose(0, 1) for t in (q, k, v))
-        outputs.append(F.scaled_dot_product_attention(qi, ki, vi).transpose(0, 1))
-    return torch.cat(outputs, dim=0)
-
-
-@pytest.fixture
-def cpu_flash(monkeypatch):
-    monkeypatch.setattr(flash_module, "flash_attn_varlen_func", _sdpa_varlen)
 
 
 def _esa(**overrides):
@@ -146,17 +130,17 @@ def test_mask_helpers_require_a_device_and_follow_it():
     common = dict(edge_index=edge_index, batch_size=1, max_items=4, batch_mapping=batch_mapping)
 
     with pytest.raises(TypeError, match="device"):
-        masked_layers.get_adj_mask_from_edge_index_node(**common, xformers_or_torch_attn="xformers")
+        masked_layers.get_adj_mask_from_edge_index_node(**common)
     with pytest.raises(TypeError, match="device"):
-        masked_layers.get_adj_mask_from_edge_index_edge(**common, xformers_or_torch_attn="xformers")
+        masked_layers.get_adj_mask_from_edge_index_edge(**common)
     with pytest.raises(TypeError, match="device"):
         masked_layers.compute_distance_bias(torch.zeros(3, 3), batch_mapping, 4)
 
     node = masked_layers.get_adj_mask_from_edge_index_node(
-        **common, xformers_or_torch_attn="xformers", device="cpu", use_bfloat16=False
+        **common, device="cpu", use_bfloat16=False
     )
     edge = masked_layers.get_adj_mask_from_edge_index_edge(
-        **common, xformers_or_torch_attn="xformers", device="cpu", use_bfloat16=False
+        **common, device="cpu", use_bfloat16=False
     )
     bias = masked_layers.compute_distance_bias(
         torch.randn(3, 3), batch_mapping, 4, device="cpu", use_bfloat16=False
@@ -200,3 +184,23 @@ def test_dense_mask_and_sparse_edge_list_attention_agree(seed):
     for g, size in enumerate(sizes):
         real[g, :size] = True
     torch.testing.assert_close(dense_out[real], sparse_out[real], atol=1e-5, rtol=0)
+
+
+def test_removed_attention_backends_are_refused_loudly():
+    from core.pretraining_config import create_pretraining_config
+    from esa.masked_layers import PMAComplete, SABComplete
+
+    for backend in ("torch", "xformers", "flash"):
+        with pytest.raises(ValueError, match="not supported"):
+            _esa(xformers_or_torch_attn=backend)
+        with pytest.raises(ValueError, match="not supported"):
+            SABComplete(8, 8, 2, 0.0, idx=0, norm_type="LN", xformers_or_torch_attn=backend)
+        with pytest.raises(ValueError, match="not supported"):
+            PMAComplete(8, 2, 1, "LN", xformers_or_torch_attn=backend)
+        with pytest.raises(ValueError, match="not supported"):
+            create_pretraining_config(xformers_or_torch_attn=backend)
+
+
+def test_esa_mha_module_is_gone():
+    with pytest.raises(ModuleNotFoundError):
+        __import__("esa.mha")

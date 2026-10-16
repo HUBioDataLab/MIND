@@ -134,7 +134,8 @@ class PretrainingConfig:
     batch_size: int = 256
     lr: float = 0.0005
     monitor_loss_name: str = "val_total_loss"
-    xformers_or_torch_attn: str = "xformers"
+    xformers_or_torch_attn: str = "flash_varlen"
+    esa_packed_rows: bool = False  # ESA on [T, D] packed rows instead of the padded [B, N, D] tensor
     hidden_dims: List[int] = None
     num_heads: List[int] = None
     num_sabs: int = 4
@@ -272,6 +273,15 @@ def create_pretraining_config(**kwargs) -> PretrainingConfig:
     config = PretrainingConfig()
     for key, value in kwargs.items():
         setattr(config, key, value)
+    if config.esa_packed_rows and getattr(config, "use_equivariant_features", False):
+        raise ValueError("esa_packed_rows is not supported with use_equivariant_features")
+    if config.esa_packed_rows and getattr(config, "use_distance_bias", False):
+        raise ValueError("esa_packed_rows is not supported with use_distance_bias")
+    if config.xformers_or_torch_attn != "flash_varlen":
+        raise ValueError(
+            f"xformers_or_torch_attn={config.xformers_or_torch_attn!r} is not supported: the torch "
+            "and xformers attention backends were removed, set xformers_or_torch_attn: flash_varlen"
+        )
     config.masked_slot_template = normalize_masked_slot_template_config(
         getattr(config, "masked_slot_template", None), allow_enabled=True
     )

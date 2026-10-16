@@ -37,10 +37,10 @@ early_stopping_patience: 15
 gradient_clip_val: 0.5 
 optimiser_weight_decay: 1.0e-10
 monitor_loss_name: "train_total_loss"
-use_bfloat16: false 
+use_bfloat16: true  # Required for flash_varlen
 accelerator: auto
 devices: auto
-precision: 16
+precision: bfloat16  # Required for flash_varlen
 num_sanity_val_steps: 0
 fast_dev_run: false
 
@@ -53,7 +53,7 @@ edge_dim: 96
 hidden_dims: [192, 192, 192, 192, 192, 192] #[256, 256, 256, 256, 256, 256, 256, 256]
 num_heads: [8, 8, 8, 8, 8, 8] #[16, 16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "M", "S", "M", "S"] #["M", "S", "M", "S", "M", "S", "P", "P"]
-xformers_or_torch_attn: torch
+xformers_or_torch_attn: flash_varlen  # torch/xformers backends were removed
 norm_type: LN
 use_3d_coordinates: true
 set_max_items: 5000  # CRITICAL FIX: Increased from 1500 to 5000 to handle large RNA #0
