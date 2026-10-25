@@ -36,7 +36,9 @@ def _write_task(root, *, max_residues=20, length_policy="skip"):
         with gzip.open(root / "raw" / "structures" / f"{entry}.cif.gz", "wt") as handle:
             handle.write(cif_text(entry, chains))
     config = dataset.load_task_config(data_root=root)
-    config.update(label_count=3, missing_atoms=MASK, max_residues=max_residues, length_policy=length_policy)
+    # The fixture writes the DeepFRI/RCSB layout, independent of the checked-in source.
+    config.update(source="deepfri_rcsb", label_count=3, missing_atoms=MASK, max_residues=max_residues,
+                  length_policy=length_policy)
     config["qc"]["max_failed_chain_fraction"] = 0.4
     return config
 

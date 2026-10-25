@@ -9,7 +9,7 @@ data_root: /home/yusuf/data/downstream/ec/protein   # raw/, processed/, splits/,
 
 # deepfri_rcsb: DeepFRI metadata (pinned commit, sha256 checked) + RCSB mmCIF per PDB entry.
 # torchdrug_zip: the per-chain PDB files packaged by TorchDrug/GearNet (Zenodo, md5 checked).
-source: deepfri_rcsb
+source: torchdrug_zip   # decided 2026-10-25: the exact chain files GearNet and the literature numbers used
 sources:
   deepfri_rcsb:
     commit: 6caa96e086091152e74be5924be1fcde11ce2413
@@ -39,8 +39,11 @@ structure:
 #   {policy: drop_residue_missing_backbone, incomplete_sidechain: mask}
 #   {policy: drop_residue_missing_backbone, incomplete_sidechain: drop_chain_if_fraction_above,
 #    max_incomplete_sidechain_fraction: 0.1}
+# Decided 2026-10-25: drop residues with a missing backbone atom; a residue with an incomplete
+# sidechain keeps its backbone and its whole sidechain block is masked like a pretraining MLM block.
 missing_atoms:
-  policy: UNDECIDED
+  policy: drop_residue_missing_backbone
+  incomplete_sidechain: mask
 
 max_residues: 1024      # pretraining max_graph_atoms 14336 = 1024 x 14
 length_policy: skip     # skip (recorded) | crop_windows (contiguous equal windows, embeddings residue-weighted)

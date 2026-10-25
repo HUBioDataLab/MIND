@@ -78,7 +78,13 @@ def test_policy_configuration_fails_loudly(config, message):
         parse_policy(config)
 
 
-def test_checked_in_task_yaml_requires_an_explicit_decision():
+def test_checked_in_task_yaml_names_an_explicit_policy():
     config = load_task_config()
+    assert parse_policy(config["missing_atoms"]) == parse_policy(
+        {"policy": "drop_residue_missing_backbone", "incomplete_sidechain": "mask"}
+    )
+
+
+def test_undecided_policy_is_refused():
     with pytest.raises(ValueError, match="must be one of"):
-        parse_policy(config["missing_atoms"])
+        parse_policy({"policy": "UNDECIDED"})
