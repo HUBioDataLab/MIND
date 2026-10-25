@@ -209,6 +209,64 @@ eval-pretrain:
 		> $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Log: $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log"
 
+# ===================================================================
+# Downstream evaluation (downstream/README.md)
+# ===================================================================
+# Data steps write under /home/yusuf/data/downstream/<task>/; run them only on an explicit
+# decision. embed and finetune are GPU workloads, probe trains small heads on CPU; all three
+# are user-started. Snapshots, embeddings and results go under outputs/ (MIND_OUTPUTS_ROOT
+# overrides it).
+#   make ds-snapshot CKPT=<ckpt> NAME=<snapshot> [ALIAS=current_best]
+#   make ds-download TASK=ec            make ds-process TASK=ec WORKERS=16
+#   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D> GPU=<id> [RANDOM_INIT=1]
+#   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
+#   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]
+#   make ds-report TASK=ec
+# ===================================================================
+
+TASK ?= ec
+HEAD ?= linear
+SEEDS ?= 0 1 2
+POOLING ?=
+DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
+DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
+DS_HF_ARGS := $(if $(filter esm2_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
+
+.PHONY: ds-snapshot ds-download ds-process ds-embed ds-probe ds-finetune ds-report test-downstream
+
+ds-snapshot:
+	@test -n "$(CKPT)" -a -n "$(NAME)" || { echo "ERROR: set CKPT and NAME"; exit 1; }
+	$(CONDA_RUN) python -m downstream.common.registry snapshot "$(CKPT)" "$(NAME)"
+	$(if $(strip $(ALIAS)),$(CONDA_RUN) python -m downstream.common.registry alias "$(ALIAS)" "$(NAME)" --repoint,)
+
+ds-download ds-process:
+	@mkdir -p $(LOG_MONTH_DIR)
+	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(TASK).prepare $(patsubst ds-%,%,$@) \
+		$(if $(filter ds-process,$@),--workers $(WORKERS),) 2>&1 | tee $(call DS_LOG,$(patsubst ds-%,%,$@))
+
+ds-embed ds-finetune:
+	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name, alias or ESM-2 name)"; exit 1; }
+	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; exit 1; fi
+	@mkdir -p $(LOG_MONTH_DIR)
+	$(CONDA_RUN) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -u -m downstream.$(patsubst ds-%,%,$@) \
+		--task $(TASK) --model "$(MODEL)" --device cuda:0 $(DS_RANDOM_INIT_ARGS) \
+		$(if $(filter ds-embed,$@),$(DS_HF_ARGS),--seeds $(SEEDS)) \
+		> $(call DS_LOG,$(patsubst ds-%,%,$@)) 2>&1 &
+	@echo "GPU: $(RESOLVED_GPU)   Log: $(call DS_LOG,$(patsubst ds-%,%,$@))"
+
+ds-probe:
+	@test -n "$(MODEL_ID)" || { echo "ERROR: set MODEL_ID (snapshot, <snapshot>.random_init or ESM-2 name)"; exit 1; }
+	@mkdir -p $(LOG_MONTH_DIR)
+	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --task $(TASK) --model-id "$(MODEL_ID)" \
+		--head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) \
+		2>&1 | tee $(call DS_LOG,probe_$(HEAD))
+
+ds-report:
+	$(CONDA_RUN) python -m downstream.report --task $(TASK)
+
+test-downstream:
+	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -m pytest -q tests/test_downstream_*.py
+
 logs:
 	@find logs/ -name "*.log" -printf "%T@ %p\n" 2>/dev/null | sort -rn | head -10 | awk '{print $$2}' || echo "No log files found."
 
@@ -226,6 +284,14 @@ help:
 	@echo "    make check-epoch-plan CONFIG=pretraining_config_protein_only  Epoch plan fits epoch_num_batches?"
 	@echo "    make test-unit                       Run the complete unit-test suite"
 	@echo "    make eval-pretrain CKPT=<ckpt> SPLIT=test GPU=<id> OUT=<new dir>  Offline checkpoint eval (GPU)"
+	@echo ""
+	@echo "  Downstream (see downstream/README.md):"
+	@echo "    make ds-snapshot CKPT=<ckpt> NAME=<snapshot> ALIAS=current_best"
+	@echo "    make ds-download TASK=ec / ds-process TASK=ec WORKERS=16   (data, explicit decision)"
+	@echo "    make ds-embed TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]   (GPU)"
+	@echo "    make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp"
+	@echo "    make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id>   (GPU, long)"
+	@echo "    make ds-report TASK=ec / make test-downstream"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"
 	@echo "    make logs                            List recent log files"

@@ -1,0 +1,83 @@
+# Enzyme Commission number prediction (DeepFRI nrPDB-EC 2020.04 split, as used by GearNet).
+# 538 EC terms, multi-label; train/valid/test = 15,550 / 1,729 / 1,919 PDB chains.
+# Test subsets: chains below 30/40/50/70/95 % max sequence identity to train
+# (column "<X%" == 1 in the cutoff CSV; 95 % is the full test set, the headline number).
+
+task: ec
+modality: protein
+data_root: /home/yusuf/data/downstream/ec/protein   # raw/, processed/, splits/, provenance.json
+
+# deepfri_rcsb: DeepFRI metadata (pinned commit, sha256 checked) + RCSB mmCIF per PDB entry.
+# torchdrug_zip: the per-chain PDB files packaged by TorchDrug/GearNet (Zenodo, md5 checked).
+source: deepfri_rcsb
+sources:
+  deepfri_rcsb:
+    commit: 6caa96e086091152e74be5924be1fcde11ce2413
+    base_url: https://raw.githubusercontent.com/flatironinstitute/DeepFRI/{commit}/preprocessing/data
+    files:   # sha256 verified against the pinned commit on 2026-10-19
+      annot: {name: nrPDB-EC_2020.04_annot.tsv, sha256: 79e429e2efe9f8a9ad973ddb27c1ba1425f2b6aa1989fb01fe10f65a84899ed1}
+      train: {name: nrPDB-EC_2020.04_train.txt, sha256: 5b674928876400203c6eb1e96250b951676024f17b2cfecf48de4f822a2606db}
+      valid: {name: nrPDB-EC_2020.04_valid.txt, sha256: 2630c4d46fc35965979b57bfc1476f5cc3da17ac227c8beca9e12a3d1caf6fc2}
+      test: {name: nrPDB-EC_2020.04_test.txt, sha256: e1cfd23416673a9f594ee4c1f01c03f463baeb52ea1310f7d4b87868a28ccafe}
+      test_cutoffs: {name: nrPDB-EC_2020.04_test.csv, sha256: 3cbaef7f4c022519c2f57d021ee84b6d2c342459525aec25ed056a7c2b9ad209}
+    structure_url: https://files.rcsb.org/download/{pdb_id}.cif.gz
+    download_workers: 8
+  torchdrug_zip:
+    url: https://zenodo.org/records/6622158/files/EnzymeCommission.zip
+    md5: 33f799065f8ad75f87b709a87293bc65   # 1,034,145,814 bytes
+
+splits: [train, valid, test]
+label_count: 538
+test_cutoffs: [30, 40, 50, 70, 95]
+metric: fmax            # protein-centric Fmax; pair_aupr and accuracies are reported too
+
+structure:
+  mse_to_met: true      # selenomethionine -> MET (SE -> SD); counted per chain
+
+# REQUIRED decision (no default). Options, see downstream/common/missing_atoms.py:
+#   {policy: strict}
+#   {policy: drop_residue_missing_backbone, incomplete_sidechain: mask}
+#   {policy: drop_residue_missing_backbone, incomplete_sidechain: drop_chain_if_fraction_above,
+#    max_incomplete_sidechain_fraction: 0.1}
+missing_atoms:
+  policy: UNDECIDED
+
+max_residues: 1024      # pretraining max_graph_atoms 14336 = 1024 x 14
+length_policy: skip     # skip (recorded) | crop_windows (contiguous equal windows, embeddings residue-weighted)
+min_residues: 2
+
+qc:
+  max_failed_chain_fraction: 0.05     # per split; above it the processed file is not written, exit 1
+  max_download_failure_fraction: 0.02
+
+graph:
+  sequence_neighbors_k: 3             # stored in the schema; must equal the model config at load time
+
+embedding:
+  seed: 0                             # fixes the per-chain random long-range edges
+  poolings: [mean_atoms, ca, mean_residues]
+  max_atoms_per_batch: 30000
+
+probe:
+  pooling: mean_atoms
+  seeds: [0, 1, 2]
+  epochs: 300
+  patience: 30
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+finetune:
+  pooling: mean_atoms
+  head: mlp
+  seeds: [0]
+  epochs: 50
+  patience: 10
+  max_atoms_per_batch: 15000
+  lr_encoder: 0.00001
+  lr_head: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
