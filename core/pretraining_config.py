@@ -1,5 +1,46 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, List, Dict
+
+import yaml
+
+
+# Mappings an override file replaces as a whole instead of merging key by key,
+# so a single-domain config does not inherit the other domains' weights.
+REPLACED_CONFIG_MAPPINGS = frozenset({"domain_weights"})
+
+
+def _merge_config_override(base: dict, override: dict, source: Path, prefix: str = "") -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        name = f"{prefix}{key}"
+        if key not in base:
+            raise KeyError(f"{source}: override key '{name}' does not exist in its base_config")
+        if isinstance(value, dict) and isinstance(base[key], dict) and key not in REPLACED_CONFIG_MAPPINGS:
+            merged[key] = _merge_config_override(base[key], value, source, f"{name}.")
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config_yaml(path, _chain: tuple = ()) -> dict:
+    """Load a pretraining YAML; ``base_config`` names a file (relative to this one) to override.
+
+    Override keys must already exist in the base, so a typo cannot silently add a
+    setting that nothing reads.
+    """
+    path = Path(path).resolve()
+    if path in _chain:
+        raise ValueError("base_config cycle: " + " -> ".join(str(p) for p in (*_chain, path)))
+    with open(path, "r") as handle:
+        config_dict = yaml.safe_load(handle)
+    if not isinstance(config_dict, dict):
+        raise ValueError(f"{path}: config must be a YAML mapping")
+    base_name = config_dict.pop("base_config", None)
+    if base_name is None:
+        return config_dict
+    base_dict = load_config_yaml(path.parent / base_name, (*_chain, path))
+    return _merge_config_override(base_dict, config_dict, path)
 
 
 MASKED_SLOT_TEMPLATE_DEFAULTS = {

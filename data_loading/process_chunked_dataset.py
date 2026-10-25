@@ -18,7 +18,7 @@ Usage:
     # Re-run after coconut_adapter changes so .pt chunks include bond_edge_index
     # (required for coconut_masking_method: random_walk in training YAML).
     python data_loading/process_chunked_dataset.py \
-        --config-yaml-path core/pretraining_config_coconut.yaml \
+        --config-yaml-path core/pretraining_config_coconut_only.yaml \
         --dataset coconut \
         --data-path ./data \
         --output-base ./data/COCONUT/processed \
@@ -33,7 +33,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import yaml
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.pretraining_config import load_config_yaml  # noqa: E402
 
 
 def load_config(config_path: Path) -> Dict:
@@ -41,8 +42,7 @@ def load_config(config_path: Path) -> Dict:
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+    return load_config_yaml(config_path)
 
 
 def parse_chunk_range(chunk_range: str, num_chunks: int) -> List[int]:

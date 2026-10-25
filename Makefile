@@ -77,7 +77,9 @@ endif
 # A unique checkpoint directory is essential when independent validation runs
 # share the machine. The old single default directory allowed concurrent jobs
 # to overwrite each other's last.ckpt.
-OUTPUT_DIR ?= outputs/$(_LOG_BASE)_$(_LOG_DATETIME)
+# Single-domain configs (pretraining_config_<domain>_only) write under outputs/<domain>_only/.
+RUN_GROUP := $(if $(filter pretraining_config_%_only,$(CONFIG)),$(patsubst pretraining_config_%,%,$(CONFIG))/,)
+OUTPUT_DIR ?= outputs/$(RUN_GROUP)$(_LOG_BASE)_$(_LOG_DATETIME)
 
 MIN_VRAM_MB ?= 15000
 
@@ -103,10 +105,18 @@ RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
 WORKERS ?= 32
 SPLIT_GROUP ?= id
 
-.PHONY: train test-unit stop status logs help build-edge-free
+.PHONY: train test-unit stop status logs help build-edge-free check-epoch-plan
+
+PLAN_EPOCHS ?= 5
 
 test-unit:
 	$(CONDA_RUN) python -m pytest -q $(PYTEST_ARGS)
+
+# Natural batch plan of the first PLAN_EPOCHS epochs from chunk metadata (CPU, reads only);
+# fails when a fixed epoch_num_batches would be exceeded. Run it before a long run.
+check-epoch-plan:
+	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" WANDB_MODE=disabled nice -n 19 python -m core.check_epoch_plan \
+		--config-yaml-path $(CONFIG_FILE) --epochs $(PLAN_EPOCHS) $(TRAIN_SEED_ARGS)
 
 train:
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then \
@@ -196,6 +206,8 @@ help:
 	@echo "    make train CONFIG=f SEED=43          Independent seeded run"
 	@echo "    make train CONFIG=m CKPT=path EPOCHS=101  Resume full checkpoint state"
 	@echo "    make train CONFIG=m MAX_ATOMS=18000      Override dynamic atom budget"
+	@echo "    make train CONFIG=pretraining_config_protein_only EPOCHS=500 SEED=42  Protein-only (outputs/protein_only/)"
+	@echo "    make check-epoch-plan CONFIG=pretraining_config_protein_only  Epoch plan fits epoch_num_batches?"
 	@echo "    make test-unit                       Run the complete unit-test suite"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"

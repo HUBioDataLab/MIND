@@ -1,0 +1,23 @@
+# ===================================================================
+# MIND - rna-only pretraining, matched to the four-domain 1M run
+# ===================================================================
+# Everything (model, tasks, masking, LR schedule, 18k atoms per batch, 6,400 batches
+# per epoch, splits) comes from base_config; only the other domains are switched off.
+# Compare with the four-domain run at the same epoch: both use the same per-epoch
+# LR schedule and step count. Check the epoch plan before a long run:
+#   make check-epoch-plan CONFIG=pretraining_config_rna_only
+# Usage: make train GPU=<id> CONFIG=pretraining_config_rna_only EPOCHS=500 SEED=42 LOG=rna_only_1m_500ep
+# ===================================================================
+
+base_config: pretraining_config_multidomain_1m_coconut.yaml
+out_path: "outputs/rna_only"
+wandb_run_name: "rna-only-1m-v1"
+
+multi_domain:
+  datasets:
+    pdb: {enabled: false}
+    unimol: {enabled: false}
+    metabolite: {enabled: false}
+  atom_sampling:
+    epoch_atom_budget: 100000000
+    domain_weights: {rna: 1}

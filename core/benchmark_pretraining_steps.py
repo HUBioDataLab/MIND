@@ -12,10 +12,9 @@ import time
 from pathlib import Path
 
 import torch
-import yaml
 from pytorch_lightning.callbacks import Callback
 
-from core.pretraining_config import create_pretraining_config
+from core.pretraining_config import create_pretraining_config, load_config_yaml
 from core import train_pretrain
 
 
@@ -164,7 +163,7 @@ def main() -> None:
         raise ValueError("--warmup-steps must be in [0, steps)")
 
     os.environ.setdefault("WANDB_MODE", "offline")
-    config_dict = yaml.safe_load(args.config.read_text())
+    config_dict = load_config_yaml(args.config)
     config = create_pretraining_config(**config_dict)
     timing_callback = StepTimingCallback(args.report, args.steps, args.warmup_steps)
 
