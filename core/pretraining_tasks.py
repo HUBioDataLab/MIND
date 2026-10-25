@@ -45,6 +45,60 @@ class PretrainingTasks(nn.Module):
         # Legitimate empty cases return a graph-connected zero loss and are
         # counted here; the model drains and logs them as loss_skipped/*.
         self._pending_loss_skips = Counter()
+        # Opt-in validation/test diagnostic (DomainMLMMetricsCallback): the
+        # batch-level distance losses keep compact per-pair records of their
+        # own head outputs. Never recorded in training mode; losses unchanged.
+        self.capture_distance_diagnostics = False
+        self._distance_diagnostics = {}
+
+    def distance_bin_centers(self, kind: str) -> torch.Tensor:
+        """Representative distance (Å) of each bin, for expected-distance MAE.
+
+        Inner bins use their midpoint. The long-range last bin is open-ended
+        (every distance beyond the last boundary lands in it), so its lower
+        edge is used. The short-range loss only scores distances up to
+        ``short_range_max_distance``, so its last bin is closed there and uses
+        its midpoint.
+        """
+        if kind == "long_range":
+            boundaries, num_bins = self.bin_boundaries, self.config.distance_bins
+            upper = float(self.config.max_distance)
+        elif kind == "short_range":
+            boundaries, num_bins = self.sr_bin_boundaries, self.config.short_range_distance_bins
+            upper = float(self.config.short_range_max_distance)
+        else:
+            raise ValueError(f"unknown distance head: {kind!r}")
+        if boundaries is not None:
+            edges = [0.0] + [float(b) for b in boundaries.tolist()]
+        else:
+            width = upper / num_bins
+            edges = [k * width for k in range(num_bins)]
+        centers = [(edges[k] + edges[k + 1]) / 2.0 for k in range(num_bins - 1)]
+        last = edges[-1] if kind == "long_range" else (edges[-1] + upper) / 2.0
+        return torch.tensor(centers + [last], dtype=torch.float32)
+
+    def _record_distance_diagnostics(self, kind, logits, target_bins, distances, node_index, scope):
+        if not self.capture_distance_diagnostics or self.training or scope != "batch":
+            return
+        if kind in self._distance_diagnostics:
+            raise RuntimeError(f"{kind} distance diagnostics were recorded twice without being read")
+        with torch.no_grad():
+            probabilities = F.softmax(logits.detach().float(), dim=-1)
+            centers = self.distance_bin_centers(kind).to(probabilities.device)
+            self._distance_diagnostics[kind] = {
+                'node_index': node_index.detach().cpu(),
+                'pred_bin': probabilities.argmax(dim=-1).to(torch.int16).cpu(),
+                'true_bin': target_bins.detach().to(torch.int16).cpu(),
+                # Elementwise, not a matmul: autocast would round it to bf16.
+                'expected_distance': (probabilities * centers).sum(dim=-1).cpu(),
+                'true_distance': distances.detach().float().cpu(),
+                'num_bins': int(logits.size(-1)),
+            }
+
+    def pop_distance_diagnostics(self) -> dict:
+        records = self._distance_diagnostics
+        self._distance_diagnostics = {}
+        return records
 
     def record_loss_skip(self, task: str, reason: str, scope: str = "batch") -> None:
         self._pending_loss_skips[f"{scope}_{task}_{reason}"] += 1
@@ -254,6 +308,9 @@ class PretrainingTasks(nn.Module):
         distance_bins = self._distances_to_bins(true_distances)
 
         loss = F.cross_entropy(distance_logits, distance_bins, reduction='mean')
+        self._record_distance_diagnostics(
+            "long_range", distance_logits, distance_bins, true_distances, i_indices, scope
+        )
         return loss
 
     def short_range_distance_loss(self, node_embeddings, edge_index, distances, mask,
@@ -283,6 +340,9 @@ class PretrainingTasks(nn.Module):
         logits = self.distance_head(edge_emb)
         distance_bins = self._short_range_distances_to_bins(valid_distances)
         loss = F.cross_entropy(logits, distance_bins, reduction='mean')
+        self._record_distance_diagnostics(
+            "short_range", logits, distance_bins, valid_distances, valid_edges[0], scope
+        )
         return loss
 
     def mlm_loss(self, node_embeddings, data, scope: str = "batch"):

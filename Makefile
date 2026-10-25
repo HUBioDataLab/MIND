@@ -105,7 +105,7 @@ RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
 WORKERS ?= 32
 SPLIT_GROUP ?= id
 
-.PHONY: train test-unit stop status logs help build-edge-free check-epoch-plan
+.PHONY: train test-unit stop status logs help build-edge-free check-epoch-plan eval-pretrain
 
 PLAN_EPOCHS ?= 5
 
@@ -193,6 +193,22 @@ build-edge-free:
 		> $(LOG_MONTH_DIR)/build_$(DOMAIN)_$(_LOG_DATETIME).log 2>&1 < /dev/null &
 	@echo "Follow: tail -f $(LOG_MONTH_DIR)/build_$(DOMAIN)_$(_LOG_DATETIME).log"
 
+# Offline evaluation of a frozen checkpoint (GPU workload, user-started). Masks and the batch
+# plan depend only on the data selection, split and seed, so checkpoints evaluated with the same
+# EVAL_CONFIG see identical masks. OUT must be a new directory.
+#   make eval-pretrain CKPT=<ckpt> SPLIT=test SEED=0 GPU=<id> OUT=<new dir> \
+#        [EVAL_CONFIG=pretraining_config_multidomain_1m_coconut] [DOMAINS=protein,rna] [MAX_BATCHES=N]
+eval-pretrain:
+	@test -n "$(CKPT)" -a -n "$(SPLIT)" -a -n "$(OUT)" || { echo "ERROR: set CKPT, SPLIT and OUT"; exit 1; }
+	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; exit 1; fi
+	@mkdir -p $(LOG_MONTH_DIR)
+	$(CONDA_RUN) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -u -m core.evaluate_pretrain \
+		--ckpt "$(CKPT)" --split $(SPLIT) --seed $(or $(SEED),0) --output-dir "$(OUT)" --device cuda:0 \
+		$(if $(strip $(EVAL_CONFIG)),--config-yaml-path core/$(EVAL_CONFIG).yaml,) \
+		$(if $(strip $(DOMAINS)),--domains $(DOMAINS),) $(if $(strip $(MAX_BATCHES)),--max-batches $(MAX_BATCHES),) \
+		> $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log 2>&1 &
+	@echo "GPU: $(RESOLVED_GPU)   Log: $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log"
+
 logs:
 	@find logs/ -name "*.log" -printf "%T@ %p\n" 2>/dev/null | sort -rn | head -10 | awk '{print $$2}' || echo "No log files found."
 
@@ -209,6 +225,7 @@ help:
 	@echo "    make train CONFIG=pretraining_config_protein_only EPOCHS=500 SEED=42  Protein-only (outputs/protein_only/)"
 	@echo "    make check-epoch-plan CONFIG=pretraining_config_protein_only  Epoch plan fits epoch_num_batches?"
 	@echo "    make test-unit                       Run the complete unit-test suite"
+	@echo "    make eval-pretrain CKPT=<ckpt> SPLIT=test GPU=<id> OUT=<new dir>  Offline checkpoint eval (GPU)"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"
 	@echo "    make logs                            List recent log files"

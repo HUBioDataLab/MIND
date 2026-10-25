@@ -191,6 +191,10 @@ class PretrainingESAModel(pl.LightningModule):
         # Pretraining tasks (all loss heads)
         self.pretraining_tasks = PretrainingTasks(config)
         self._loss_skip_totals = Counter()
+        # Validation/test-only diagnostics read by DomainMLMMetricsCallback:
+        # number of encoder-visible node states sampled per batch for the
+        # embedding-health metrics (0 = off). Never used by training_step.
+        self.eval_embedding_sample_nodes = 0
 
         self.equivariant_requested = bool(config.use_equivariant_features)
         self.equivariant_effective = bool(
@@ -310,7 +314,9 @@ class PretrainingESAModel(pl.LightningModule):
             context + slot_states, (context.size(-1),)
         )
         result = full_node_embeddings.clone()
-        result.index_copy_(0, target_nodes, slot_states)
+        # Under bf16 autocast the layer norm runs in float32. On CUDA the ESA states
+        # are float32 too, so this is a no-op there; the CPU path keeps bf16 states.
+        result.index_copy_(0, target_nodes, slot_states.to(result.dtype))
         return result
 
     def forward(self, batch, slot_readout_mode: str = "correct"):
@@ -677,6 +683,21 @@ class PretrainingESAModel(pl.LightningModule):
             seed = int(getattr(self.config, 'seed', 0)) + int(batch_idx) * 100003
             gen = torch.Generator(device='cpu')
             gen.manual_seed(seed)
+        # Offline evaluation (core/evaluate_pretrain.py) attaches one seed per
+        # graph, derived from the sample's chunk and index. Each graph then
+        # gets its own generator, so its mask does not depend on the batch_idx
+        # or on the other graphs of its batch. Training batches never carry it.
+        per_graph_seeds = (
+            getattr(batch, 'eval_mask_seed', None) if is_validation else None
+        )
+        if per_graph_seeds is not None:
+            expected_graphs = int(getattr(batch, 'num_graphs', 1) or 1)
+            if per_graph_seeds.numel() != expected_graphs:
+                raise ValueError(
+                    f"eval_mask_seed has {per_graph_seeds.numel()} entries for "
+                    f"{expected_graphs} graphs"
+                )
+            per_graph_seeds = per_graph_seeds.detach().long().cpu().tolist()
 
         def _randperm(n: int) -> torch.Tensor:
             if gen is not None:
@@ -691,6 +712,10 @@ class PretrainingESAModel(pl.LightningModule):
                 n = indices.size(0)
                 if n == 0:
                     continue
+                if per_graph_seeds is not None:
+                    seed = int(per_graph_seeds[g])
+                    gen = torch.Generator(device='cpu')
+                    gen.manual_seed(seed)
 
                 g_dtype = dtype_list[g] if (dtype_list is not None and g < len(dtype_list)) else None
                 is_protein = (g_dtype is not None
@@ -757,7 +782,10 @@ class PretrainingESAModel(pl.LightningModule):
                         coconut_gen = None
                         if gen is not None:
                             coconut_gen = torch.Generator(device='cpu')
-                            coconut_gen.manual_seed(seed + (int(g) + 1) * 1009)
+                            coconut_gen.manual_seed(
+                                seed if per_graph_seeds is not None
+                                else seed + (int(g) + 1) * 1009
+                            )
                         selected = PretrainingESAModel._select_graph_mask_indices(
                             self, batch, int(g), indices, for_coord=False,
                             generator=coconut_gen,
@@ -1483,6 +1511,7 @@ class PretrainingESAModel(pl.LightningModule):
         self._log_loss_skips("val")
 
         outputs = {'loss': total_loss}
+        outputs.update(self._evaluation_diagnostics(batch, batch_idx, losses, node_embeddings))
         if "mlm" in self.config.pretraining_tasks:
             # Domain metric callbacks consume these predictions immediately.
             # Reusing this forward avoids running the ESA backbone again in
@@ -1491,6 +1520,7 @@ class PretrainingESAModel(pl.LightningModule):
             outputs['mlm_preds_atomic_num'] = (
                 mlm_logits.argmax(dim=1).detach().cpu()
             )
+            outputs['mlm_eval'] = self._masked_mlm_eval_outputs(batch, mlm_logits)
             outputs['virtual_slot_context_audit'] = (
                 self._virtual_slot_context_audit(
                     batch,
@@ -1524,13 +1554,82 @@ class PretrainingESAModel(pl.LightningModule):
         self._log_loss_skips("test")
 
         outputs = {'loss': total_loss}
+        outputs.update(self._evaluation_diagnostics(batch, batch_idx, losses, node_embeddings))
         if "mlm" in self.config.pretraining_tasks:
+            mlm_logits = self.pretraining_tasks.mlm_head(node_embeddings)
             outputs['mlm_preds_atomic_num'] = (
-                self.pretraining_tasks.mlm_head(node_embeddings)
-                .argmax(dim=1)
-                .detach()
-                .cpu()
+                mlm_logits.argmax(dim=1).detach().cpu()
             )
+            outputs['mlm_eval'] = self._masked_mlm_eval_outputs(batch, mlm_logits)
+        return outputs
+
+    # ------------------------------------------------------------------
+    # Validation/test diagnostics for DomainMLMMetricsCallback. They read
+    # tensors that the step already computed and never change a loss.
+    # ------------------------------------------------------------------
+
+    MLM_EVAL_TOP_K = 5
+
+    @classmethod
+    def _masked_mlm_eval_outputs(cls, batch, mlm_logits: torch.Tensor) -> dict:
+        """Per masked atom: target, top-k classes, true-class log-prob, top-1 prob.
+
+        Column 0 of ``topk`` is the argmax used by ``mlm_preds_atomic_num``;
+        tied logits can otherwise make ``torch.topk`` order them differently.
+        """
+        if getattr(batch, 'mlm_mask', None) is None or getattr(batch, 'original_types', None) is None:
+            raise ValueError("MLM evaluation outputs require batch.mlm_mask and batch.original_types")
+        with torch.no_grad():
+            node_index = torch.where(batch.mlm_mask.bool())[0]
+            logits = mlm_logits.detach()[node_index].float()
+            targets = batch.original_types[node_index].long()
+            log_probs = F.log_softmax(logits, dim=-1)
+            k = min(cls.MLM_EVAL_TOP_K, int(log_probs.size(-1)))
+            top_log_probs, topk = log_probs.topk(k, dim=-1)
+            argmax = logits.argmax(dim=-1)
+            displaced = topk[:, :1].expand_as(topk)
+            topk = torch.where(topk == argmax.unsqueeze(1), displaced, topk)
+            topk[:, 0] = argmax
+            return {
+                'node_index': node_index.cpu(),
+                'target': targets.cpu(),
+                'topk': topk.cpu(),
+                'target_log_prob': log_probs.gather(1, targets.unsqueeze(1)).squeeze(1).cpu(),
+                'top1_prob': top_log_probs[:, 0].exp().cpu(),
+            }
+
+    def _evaluation_diagnostics(self, batch, batch_idx, losses, node_embeddings) -> dict:
+        """Detached task losses plus the opt-in distance/embedding captures.
+
+        The captures are armed by DomainMLMMetricsCallback and only taken in
+        eval mode (Lightning's validation/test loops), never in training_step.
+        """
+        outputs = {
+            'task_losses': {
+                name: value.detach() if isinstance(value, torch.Tensor) else torch.tensor(float(value))
+                for name, value in losses.items()
+            },
+        }
+        distance = self.pretraining_tasks.pop_distance_diagnostics()
+        if distance:
+            outputs['distance_eval'] = distance
+        sample_nodes = int(self.eval_embedding_sample_nodes)
+        if sample_nodes > 0 and not self.training:
+            visible = getattr(batch, 'active_node_mask', None)
+            if visible is None:
+                visible = torch.ones(node_embeddings.size(0), dtype=torch.bool, device=node_embeddings.device)
+            mlm_mask = getattr(batch, 'mlm_mask', None)
+            if mlm_mask is not None:
+                visible = visible & ~mlm_mask.bool()
+            candidates = torch.where(visible)[0].cpu()
+            generator = torch.Generator(device='cpu')
+            generator.manual_seed(int(getattr(self.config, 'seed', 0)) + int(batch_idx) * 100003)
+            chosen = candidates[torch.randperm(candidates.numel(), generator=generator)[:sample_nodes]]
+            chosen = chosen.sort().values
+            outputs['embedding_sample'] = {
+                'node_index': chosen,
+                'embedding': node_embeddings.detach()[chosen.to(node_embeddings.device)].float().cpu(),
+            }
         return outputs
 
     def on_before_optimizer_step(self, optimizer):

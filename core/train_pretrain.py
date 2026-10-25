@@ -35,6 +35,7 @@ from core.metrics.protein_per_atom_metrics_callback import ProteinPerAtomMetrics
 from core.metrics.virtual_slot_diagnostics_callback import (
     VirtualSlotDiagnosticsCallback,
 )
+from core.metrics.domain_mlm_metrics_callback import DomainMLMMetricsCallback
 from data_loading.cache_to_pyg import OptimizedUniversalQM9Dataset
 from data_loading.pretraining_transforms import MaskAtomTypes, AddRandomNoise
 from data_loading.chunk_sampler import ChunkAwareSampler
@@ -985,6 +986,10 @@ def train_universal_pretraining(
     )
     callbacks.append(virtual_slot_diagnostics)
     print("✅ Virtual-slot prior/context diagnostics callback enabled")
+
+    # Per-domain masked-atom metrics (top-k, CE/PPL, ECE, element P/R, residue
+    # and nucleotide identity) for every enabled domain: val_<domain>_mlm/*.
+    callbacks.append(DomainMLMMetricsCallback(enabled=True, log_every_n_epochs=1, print_every_n_epochs=5))
 
     # Validation and logging frequency (from config)
     val_check_interval = getattr(config, 'val_check_interval', 0.25)
