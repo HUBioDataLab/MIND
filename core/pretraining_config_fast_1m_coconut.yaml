@@ -1,7 +1,7 @@
 # ===================================================================
 # MIND - Fast check with all four domains: 1M protein, full RNA, UniMol, COCONUT
 # ===================================================================
-# Same as pretraining_config_fast_1m.yaml plus COCONUT (chunks 0-1 in name order,
+# The three-domain fast 1M check (removed config pretraining_config_fast_1m.yaml) plus COCONUT (chunks 0-1 in name order,
 # random 80/10/10 split). Graph-local coordination was repaired on 10 October.
 # This config provides the user-started routing/crash gate; learning effects
 # require a matched from-scratch comparison (see the validate-feature skill).
