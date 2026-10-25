@@ -531,7 +531,10 @@ def parse_args(argv=None):
     parser.add_argument("--num-workers", type=int, default=None, help="loader workers (default: config num_workers)")
     parser.add_argument("--output-dir", required=True, help="new directory (must not exist)")
     parser.add_argument("--device", default="cuda", help="cuda, cuda:<i> or cpu (cpu only for tests)")
+    parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
     args = parser.parse_args(argv)
+    if args.threads < 1:
+        parser.error("--threads must be at least 1")
     if args.max_batches is not None and args.max_batches < 1:
         parser.error("--max-batches must be at least 1")
     return args
@@ -563,6 +566,7 @@ def _trainer_device(device: str) -> tuple:
 def evaluate(args) -> dict:
     started = time.time()
     ckpt, out = _prepare_paths(args)
+    torch.set_num_threads(args.threads)
     accelerator, devices = _trainer_device(args.device)
     if accelerator == "gpu":
         enable_deterministic_algorithms()

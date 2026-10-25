@@ -71,7 +71,11 @@ def main(argv=None) -> int:
     parser.add_argument("--hf-cache-dir", default=None, help="required for ESM-2")
     parser.add_argument("--hf-local-files-only", action="store_true")
     parser.add_argument("--esm-batch-size", type=int, default=8)
+    parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
     args = parser.parse_args(argv)
+    if args.threads < 1:
+        parser.error("--threads must be at least 1")
+    torch.set_num_threads(args.threads)
 
     config = load_task_config(TASK_CONFIGS[args.task], data_root=args.data_root)
     device = torch.device(args.device)

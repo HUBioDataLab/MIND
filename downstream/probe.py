@@ -89,7 +89,11 @@ def main(argv=None) -> int:
     parser.add_argument("--seeds", type=int, nargs="+", default=None)
     parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--outputs-root", type=Path, default=None)
+    parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
     args = parser.parse_args(argv)
+    if args.threads < 1:
+        parser.error("--threads must be at least 1")
+    torch.set_num_threads(args.threads)
     config = load_task_config(TASK_CONFIGS[args.task], data_root=args.data_root)
     settings = config["probe"]
     pooling = args.pooling or settings["pooling"]

@@ -202,7 +202,7 @@ eval-pretrain:
 	@test -n "$(CKPT)" -a -n "$(SPLIT)" -a -n "$(OUT)" || { echo "ERROR: set CKPT, SPLIT and OUT"; exit 1; }
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; exit 1; fi
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(CONDA_RUN) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -u -m core.evaluate_pretrain \
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -u -m core.evaluate_pretrain --threads $(DS_THREADS) \
 		--ckpt "$(CKPT)" --split $(SPLIT) --seed $(or $(SEED),0) --output-dir "$(OUT)" --device cuda:0 \
 		$(if $(strip $(EVAL_CONFIG)),--config-yaml-path core/$(EVAL_CONFIG).yaml,) \
 		$(if $(strip $(DOMAINS)),--domains $(DOMAINS),) $(if $(strip $(MAX_BATCHES)),--max-batches $(MAX_BATCHES),) \
@@ -228,6 +228,9 @@ TASK ?= ec
 HEAD ?= linear
 SEEDS ?= 0 1 2
 POOLING ?=
+# CPU threads per downstream/eval process (unbounded torch threads slowed a live run on 25 Oct)
+DS_THREADS ?= 8
+DS_ENV := OMP_NUM_THREADS=$(DS_THREADS) OPENBLAS_NUM_THREADS=$(DS_THREADS) MKL_NUM_THREADS=$(DS_THREADS)
 DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
 DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
 DS_HF_ARGS := $(if $(filter esm2_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
@@ -248,8 +251,8 @@ ds-embed ds-finetune:
 	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name, alias or ESM-2 name)"; exit 1; }
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; exit 1; fi
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(CONDA_RUN) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -u -m downstream.$(patsubst ds-%,%,$@) \
-		--task $(TASK) --model "$(MODEL)" --device cuda:0 $(DS_RANDOM_INIT_ARGS) \
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -u -m downstream.$(patsubst ds-%,%,$@) \
+		--threads $(DS_THREADS) --task $(TASK) --model "$(MODEL)" --device cuda:0 $(DS_RANDOM_INIT_ARGS) \
 		$(if $(filter ds-embed,$@),$(DS_HF_ARGS),--seeds $(SEEDS)) \
 		> $(call DS_LOG,$(patsubst ds-%,%,$@)) 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Log: $(call DS_LOG,$(patsubst ds-%,%,$@))"
@@ -257,7 +260,7 @@ ds-embed ds-finetune:
 ds-probe:
 	@test -n "$(MODEL_ID)" || { echo "ERROR: set MODEL_ID (snapshot, <snapshot>.random_init or ESM-2 name)"; exit 1; }
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --task $(TASK) --model-id "$(MODEL_ID)" \
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --threads $(DS_THREADS) --task $(TASK) --model-id "$(MODEL_ID)" \
 		--head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) \
 		2>&1 | tee $(call DS_LOG,probe_$(HEAD))
 
