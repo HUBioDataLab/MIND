@@ -3,10 +3,12 @@ import torch
 import numpy as np
 from itertools import chain
 from pytorch_lightning.callbacks import Callback
-from pytorch_lightning.loggers import WandbLogger
 from typing import Optional, Dict, List
 
-from core.metrics.per_atom_metrics import PerAtomMetricsCalculator
+from core.metrics.per_atom_metrics import (
+    PerAtomMetricsCalculator,
+    require_wandb_logger_or_announce,
+)
 from core.metrics.rna_atom_types import (
     ALL_RNA_ATOMS,
     ATOMIC_NUM_TO_ELEMENT,
@@ -118,7 +120,7 @@ class PerAtomMetricsCallback(Callback):
         self._val_nt_block_stats = self._fresh_nt_block_stats()
         self._test_nt_block_stats = self._fresh_nt_block_stats()
         self._last_val_metrics_snapshot: Optional[Dict] = None
-        self._processing_error_logged = False
+        self._no_wandb_announced = False
         
         if enabled:
             print(f"✅ PerAtomMetricsCallback enabled")
@@ -137,18 +139,14 @@ class PerAtomMetricsCallback(Callback):
         if self.only_rna and not self._is_rna_batch(batch):
             return
         
-        # Extract atom predictions and targets from MLM task
-        try:
-            self._process_batch_metrics(
-                batch,
-                pl_module,
-                self.val_metrics,
-                self._val_nt_stats,
-                self._val_nt_block_stats,
-                outputs=outputs,
-            )
-        except Exception as exc:
-            self._log_processing_error('validation', batch_idx, exc)
+        self._process_batch_metrics(
+            batch,
+            pl_module,
+            self.val_metrics,
+            self._val_nt_stats,
+            self._val_nt_block_stats,
+            outputs=outputs,
+        )
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         """Process test batch."""
@@ -158,17 +156,14 @@ class PerAtomMetricsCallback(Callback):
         if self.only_rna and not self._is_rna_batch(batch):
             return
         
-        try:
-            self._process_batch_metrics(
-                batch,
-                pl_module,
-                self.test_metrics,
-                self._test_nt_stats,
-                self._test_nt_block_stats,
-                outputs=outputs,
-            )
-        except Exception as exc:
-            self._log_processing_error('test', batch_idx, exc)
+        self._process_batch_metrics(
+            batch,
+            pl_module,
+            self.test_metrics,
+            self._test_nt_stats,
+            self._test_nt_block_stats,
+            outputs=outputs,
+        )
     
     def _process_batch_metrics(self, batch, pl_module, metrics_calculator,
                                nt_stats, nt_block_stats, outputs=None):
@@ -201,22 +196,18 @@ class PerAtomMetricsCallback(Callback):
                 f"({len(flattened_pos_codes)} != {len(preds_atomic_num)})"
             )
 
-        # 3. Hizalama (Alignment)
+        # 3. Alignment. The MLM head predicts an element, so an atom counts as
+        # correct when the predicted element matches the element of its
+        # pos_code. y_pred keeps the true class for correct atoms and an
+        # out-of-vocabulary label otherwise (Recall = element accuracy); the
+        # predicted and true elements go to the calculator so Precision is
+        # computed over the predicted element instead of being ~1 by
+        # construction.
         try:
-            # Gerçek değerleri RNA indekslerine çevir
             y_true_indices = np.array([
                 ALL_RNA_ATOMS.index(pos_code_to_atom_class(c))
                 for c in flattened_pos_codes
             ])
-
-            # FIX: "first-matching-element" lock-in bug'ı yerine element-aware eşleşme.
-            # Her pozisyon için: modelin tahmin ettiği element (C/N/O/P/...) pos_code'un
-            # beklenen elementi ile uyuşuyorsa y_pred = y_true (yani "o pozisyondaki atomu
-            # doğru bildi" sayılır); uyuşmuyorsa vocabulary dışı bir idx verilir.
-            # Bu sayede:
-            #   Recall (per-atom) = doğru-element-tahmin-edilen / toplam = element accuracy
-            #   Precision by construction ≈ 1.0 (artefakt), anlamlı kolon Recall'dır
-            #   F1 = 2R/(1+R) Recall ile monotonik — anlamlı
             pred_elements = np.array([
                 ATOMIC_NUM_TO_ELEMENT.get(int(n), RNA_UNKNOWN_ATOM)
                 for n in preds_atomic_num
@@ -225,13 +216,6 @@ class PerAtomMetricsCallback(Callback):
             is_correct_element = (pred_elements == true_elements)
             OUT_OF_VOCAB = len(ALL_RNA_ATOMS)
             y_pred_indices = np.where(is_correct_element, y_true_indices, OUT_OF_VOCAB)
-            
-            # Boyut Kontrolü (Hata almamak için savunma hattı)
-            if len(y_true_indices) != len(y_pred_indices):
-                # Eğer hala uyuşmazlık varsa (nadir bir PyG durumu) logla ve geç
-                if self.trainer.global_step % 100 == 0:
-                    print(f"⚠️ Boyut Uyuşmazlığı: True({len(y_true_indices)}) vs Pred({len(y_pred_indices)})")
-                return
 
             if not hasattr(batch, 'mlm_mask') or batch.mlm_mask is None:
                 raise ValueError("batch.mlm_mask is missing")
@@ -245,31 +229,22 @@ class PerAtomMetricsCallback(Callback):
             # Mixed batches can contain RNA + protein + UniMol. The batch-level
             # RNA gate only says "there is RNA somewhere"; this per-atom mask
             # keeps non-RNA graph atoms out of RNA metrics.
-            is_rna_per_atom = np.ones(len(y_true_indices), dtype=bool)
-            graph_dtypes = self._graph_dtype_list(batch)
-            if (graph_dtypes is not None
-                    and hasattr(batch, 'batch')
-                    and batch.batch is not None):
-                mol_idx = batch.batch.cpu().numpy()
-                if len(mol_idx) == len(y_true_indices):
-                    is_rna_per_atom = np.array(
-                        [
-                            (g < len(graph_dtypes)
-                             and str(graph_dtypes[g]).lower() in RNA_DATASET_TYPES)
-                            for g in mol_idx
-                        ],
-                        dtype=bool,
-                    )
+            is_rna_per_atom = self._rna_atom_mask(batch, len(y_true_indices))
 
             effective_mask = mlm_mask_np & is_rna_per_atom
             y_true = y_true_indices[effective_mask]
             y_pred = y_pred_indices[effective_mask]
 
-            # 4. Hesaplayıcıyı Güncelle
+            # 4. Update the calculator
             if len(y_true) > 0:
-                metrics_calculator.update(y_pred, y_true)
+                metrics_calculator.update(
+                    y_pred,
+                    y_true,
+                    predicted_elements=pred_elements[effective_mask],
+                    target_elements=true_elements[effective_mask],
+                )
 
-            if self.compute_per_nucleotide and mlm_mask_np is not None:
+            if self.compute_per_nucleotide:
                 self._accumulate_nt_stats(
                     batch=batch,
                     flattened_pos_codes=flattened_pos_codes,
@@ -278,7 +253,7 @@ class PerAtomMetricsCallback(Callback):
                     nt_stats=nt_stats,
                 )
 
-            if self.compute_per_nucleotide_block and mlm_mask_np is not None:
+            if self.compute_per_nucleotide_block:
                 self._accumulate_nt_block_stats(
                     batch=batch,
                     flattened_pos_codes=flattened_pos_codes,
@@ -286,9 +261,76 @@ class PerAtomMetricsCallback(Callback):
                     is_correct_element=is_correct_element,
                     nt_block_stats=nt_block_stats,
                 )
-                
+
         except Exception as exc:
             raise RuntimeError(f"RNA metric alignment failed: {exc}") from exc
+
+    @classmethod
+    def _rna_atom_mask(cls, batch, n_atoms: int) -> np.ndarray:
+        graph_dtypes = cls._graph_dtype_list(batch)
+        mol_idx = cls._mol_idx_per_atom(batch, n_atoms)
+        is_rna_graph = np.array(
+            [str(dt).lower() in RNA_DATASET_TYPES for dt in graph_dtypes],
+            dtype=bool,
+        )
+        return is_rna_graph[mol_idx]
+
+    @staticmethod
+    def _mol_idx_per_atom(batch, n_atoms: int) -> np.ndarray:
+        if getattr(batch, 'batch', None) is None:
+            raise ValueError("batch.batch (graph index per atom) is missing")
+        mol_idx = batch.batch.cpu().numpy()
+        if len(mol_idx) != n_atoms:
+            raise ValueError(
+                f"batch.batch/atom length mismatch ({len(mol_idx)} != {n_atoms})"
+            )
+        num_graphs = len(PerAtomMetricsCallback._graph_dtype_list(batch))
+        if len(mol_idx) and int(mol_idx.max()) >= num_graphs:
+            raise ValueError(
+                f"graph index {int(mol_idx.max())} out of range for "
+                f"{num_graphs} dataset_type entries"
+            )
+        return mol_idx
+
+    @staticmethod
+    def _block_inputs(batch, flattened_pos_codes, mlm_mask_np, is_correct_element):
+        """Validate and return (mol_idx, block_idx, per-molecule block symbols)."""
+        missing = [
+            name for name in ('block_idx', 'block_symbols')
+            if getattr(batch, name, None) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"RNA per-nucleotide metrics require batch attributes: {', '.join(missing)}"
+            )
+        n_atoms = len(flattened_pos_codes)
+        mol_idx_per_atom = PerAtomMetricsCallback._mol_idx_per_atom(batch, n_atoms)
+        block_idx_per_atom = batch.block_idx.cpu().numpy()
+        if not (len(block_idx_per_atom) == len(mlm_mask_np)
+                == len(is_correct_element) == n_atoms):
+            raise ValueError(
+                "block_idx/mlm_mask/prediction/pos_code length mismatch "
+                f"({len(block_idx_per_atom)}, {len(mlm_mask_np)}, "
+                f"{len(is_correct_element)}, {n_atoms})"
+            )
+        if n_atoms and int(block_idx_per_atom.max()) >= 100_000:
+            raise ValueError("block_idx >= 100000 breaks the (graph, block) key")
+        per_mol_symbols = PerAtomMetricsCallback._per_mol_block_symbols(batch.block_symbols)
+        return mol_idx_per_atom, block_idx_per_atom, per_mol_symbols
+
+    @staticmethod
+    def _block_symbol(per_mol_symbols, mol_i: int, block_i: int) -> str:
+        if mol_i >= len(per_mol_symbols):
+            raise ValueError(
+                f"graph {mol_i} has no block_symbols entry ({len(per_mol_symbols)} graphs)"
+            )
+        mol_symbols = per_mol_symbols[mol_i]
+        if block_i >= len(mol_symbols):
+            raise ValueError(
+                f"graph {mol_i} block_idx {block_i} exceeds its "
+                f"{len(mol_symbols)} block_symbols"
+            )
+        return mol_symbols[block_i]
 
     @staticmethod
     def _get_atomic_predictions(batch, pl_module, outputs=None) -> np.ndarray:
@@ -312,44 +354,16 @@ class PerAtomMetricsCallback(Callback):
             mlm_logits = pl_module.pretraining_tasks.mlm_head(node_emb)
             return mlm_logits.argmax(dim=1).detach().cpu().numpy()
 
-    def _log_processing_error(self, stage: str, batch_idx: int, exc: Exception) -> None:
-        if self._processing_error_logged:
-            return
-        self._processing_error_logged = True
-        detail = str(exc).splitlines()[0] if str(exc) else "no detail"
-        print(
-            f"⚠️ RNA metric callback error "
-            f"({stage} batch {batch_idx}): {type(exc).__name__}: {detail}. "
-            f"Further callback errors will be suppressed."
-        )
-
     def _accumulate_nt_stats(self, batch, flattened_pos_codes, mlm_mask_np,
                              is_correct_element, nt_stats):
-        if not hasattr(batch, 'block_idx') or not hasattr(batch, 'block_symbols'):
-            return
-        if not hasattr(batch, 'batch') or batch.batch is None:
-            return
-
         graph_dtypes = self._graph_dtype_list(batch)
-        mol_idx_per_atom = batch.batch.cpu().numpy()
-        block_idx_per_atom = batch.block_idx.cpu().numpy()
-        if (
-            len(mol_idx_per_atom) != len(block_idx_per_atom)
-            or len(mlm_mask_np) != len(mol_idx_per_atom)
-            or len(is_correct_element) != len(mol_idx_per_atom)
-            or len(flattened_pos_codes) != len(mol_idx_per_atom)
-        ):
-            return
-
-        per_mol_symbols = self._per_mol_block_symbols(batch.block_symbols)
-        n_atoms = len(mol_idx_per_atom)
-        if len(flattened_pos_codes) == n_atoms:
-            is_real_per_atom = np.array(
-                [not _is_virtual_atom(c) for c in flattened_pos_codes],
-                dtype=bool,
-            )
-        else:
-            is_real_per_atom = np.ones(n_atoms, dtype=bool)
+        mol_idx_per_atom, block_idx_per_atom, per_mol_symbols = self._block_inputs(
+            batch, flattened_pos_codes, mlm_mask_np, is_correct_element
+        )
+        is_real_per_atom = np.array(
+            [not _is_virtual_atom(c) for c in flattened_pos_codes],
+            dtype=bool,
+        )
 
         block_key = (
             mol_idx_per_atom.astype(np.int64) * 100_000
@@ -361,22 +375,15 @@ class PerAtomMetricsCallback(Callback):
             mol_i = int(bkey // 100_000)
             block_i = int(bkey % 100_000)
 
-            if graph_dtypes is not None and mol_i < len(graph_dtypes):
-                if str(graph_dtypes[mol_i]).lower() not in RNA_DATASET_TYPES:
-                    continue
+            # Domain filter: other graphs of a mixed batch are not RNA.
+            if str(graph_dtypes[mol_i]).lower() not in RNA_DATASET_TYPES:
+                continue
 
             block_mask = block_key == bkey
             masked_atoms = block_mask & mlm_mask_np
-            if not masked_atoms.any():
-                continue
-
-            if mol_i >= len(per_mol_symbols):
-                continue
-            mol_symbols = per_mol_symbols[mol_i]
-            if block_i >= len(mol_symbols):
-                continue
-
-            bucket = _normalize_nucleotide_symbol(mol_symbols[block_i])
+            bucket = _normalize_nucleotide_symbol(
+                self._block_symbol(per_mol_symbols, mol_i, block_i)
+            )
             all_correct = bool(is_correct_element[masked_atoms].all())
 
             masked_real = masked_atoms & is_real_per_atom
@@ -397,22 +404,10 @@ class PerAtomMetricsCallback(Callback):
     def _accumulate_nt_block_stats(self, batch, flattened_pos_codes,
                                    mlm_mask_np, is_correct_element,
                                    nt_block_stats):
-        if not hasattr(batch, 'block_idx') or not hasattr(batch, 'block_symbols'):
-            return
-        if not hasattr(batch, 'batch') or batch.batch is None:
-            return
-
         graph_dtypes = self._graph_dtype_list(batch)
-        mol_idx_per_atom = batch.batch.cpu().numpy()
-        block_idx_per_atom = batch.block_idx.cpu().numpy()
-        if (
-            len(mol_idx_per_atom) != len(block_idx_per_atom)
-            or len(mlm_mask_np) != len(mol_idx_per_atom)
-            or len(is_correct_element) != len(mol_idx_per_atom)
-            or len(flattened_pos_codes) != len(mol_idx_per_atom)
-        ):
-            return
-        per_mol_symbols = self._per_mol_block_symbols(batch.block_symbols)
+        mol_idx_per_atom, block_idx_per_atom, per_mol_symbols = self._block_inputs(
+            batch, flattened_pos_codes, mlm_mask_np, is_correct_element
+        )
 
         n_atoms = len(flattened_pos_codes)
         is_backbone = np.zeros(n_atoms, dtype=bool)
@@ -436,21 +431,14 @@ class PerAtomMetricsCallback(Callback):
             mol_i = int(bkey // 100_000)
             block_i = int(bkey % 100_000)
 
-            if graph_dtypes is not None and mol_i < len(graph_dtypes):
-                if str(graph_dtypes[mol_i]).lower() not in RNA_DATASET_TYPES:
-                    continue
+            if str(graph_dtypes[mol_i]).lower() not in RNA_DATASET_TYPES:
+                continue
 
             block_mask = block_key == bkey
             masked_in_block = block_mask & mlm_mask_np
-            if not masked_in_block.any():
-                continue
-
-            if mol_i >= len(per_mol_symbols):
-                continue
-            mol_symbols = per_mol_symbols[mol_i]
-            if block_i >= len(mol_symbols):
-                continue
-            bucket = _normalize_nucleotide_symbol(mol_symbols[block_i])
+            bucket = _normalize_nucleotide_symbol(
+                self._block_symbol(per_mol_symbols, mol_i, block_i)
+            )
 
             bb_mask = masked_in_block & is_backbone
             base_mask = masked_in_block & is_base_slot
@@ -474,6 +462,7 @@ class PerAtomMetricsCallback(Callback):
             return
 
         if len(self.val_metrics.all_predictions) == 0:
+            self._announce_empty_epoch('validation', pl_module)
             return
 
         metrics = self.val_metrics.compute()
@@ -486,6 +475,7 @@ class PerAtomMetricsCallback(Callback):
             nt_accuracies,
             nt_block_accuracies,
             stage='val',
+            pl_module=pl_module,
         )
 
         # Son validation snapshot'ını sakla — on_train_end'de final tablo için kullanılacak.
@@ -520,6 +510,7 @@ class PerAtomMetricsCallback(Callback):
             return
         snap = getattr(self, '_last_val_metrics_snapshot', None)
         if snap is None:
+            print("ℹ️  RNA per-atom metrics: no validation epoch with RNA MLM atoms; no final table")
             return
         print("\n" + "="*100)
         print(f"🏁 FINAL RNA METRICS (last validation, epoch {snap['epoch']})")
@@ -540,6 +531,7 @@ class PerAtomMetricsCallback(Callback):
             return
         
         if len(self.test_metrics.all_predictions) == 0:
+            self._announce_empty_epoch('test', pl_module)
             return
         
         metrics = self.test_metrics.compute()
@@ -552,6 +544,7 @@ class PerAtomMetricsCallback(Callback):
             nt_accuracies,
             nt_block_accuracies,
             stage='test',
+            pl_module=pl_module,
         )
         
         # Print summary
@@ -569,9 +562,19 @@ class PerAtomMetricsCallback(Callback):
         self._test_nt_stats = self._fresh_nt_stats()
         self._test_nt_block_stats = self._fresh_nt_block_stats()
     
+    @staticmethod
+    def _announce_empty_epoch(stage: str, pl_module) -> None:
+        # Legitimate when the run has no RNA domain or MLM is not trained.
+        reason = (
+            "MLM is not a pretraining task"
+            if "mlm" not in pl_module.config.pretraining_tasks
+            else "no RNA graph with masked atoms was seen"
+        )
+        print(f"ℹ️  RNA per-atom metrics: nothing to log for this {stage} epoch ({reason})")
+
     def _log_metrics(self, trainer, metrics: Dict[str, Dict],
                      nt_accuracies, nt_block_accuracies,
-                     stage: str = 'val'):
+                     stage: str = 'val', pl_module=None):
         """
         Log metrics to WandB.
         
@@ -580,13 +583,9 @@ class PerAtomMetricsCallback(Callback):
             metrics: Dict with 'per_atom', 'per_group', 'overall' keys
             stage: 'val' or 'test'
         """
-        # Get WandB logger
-        wandb_logger = None
-        for logger in trainer.loggers:
-            if isinstance(logger, WandbLogger):
-                wandb_logger = logger
-                break
-        
+        wandb_logger = require_wandb_logger_or_announce(
+            self, trainer, pl_module, 'RNA per-atom metrics'
+        )
         if wandb_logger is None:
             return
         
@@ -732,10 +731,8 @@ class PerAtomMetricsCallback(Callback):
 
     @staticmethod
     def _is_rna_batch(batch) -> bool:
-        if not hasattr(batch, 'dataset_type') or batch.dataset_type is None:
-            # Preserve the old single-domain behavior: when no dtype metadata
-            # exists, assume the callback was attached to an RNA-only loader.
-            return True
+        if getattr(batch, 'dataset_type', None) is None:
+            raise ValueError("RNA metrics require batch.dataset_type to select RNA graphs")
         dtypes = batch.dataset_type
         if isinstance(dtypes, (list, tuple)):
             return any(str(dt).lower() in RNA_DATASET_TYPES for dt in dtypes)
@@ -743,8 +740,8 @@ class PerAtomMetricsCallback(Callback):
 
     @staticmethod
     def _graph_dtype_list(batch):
-        if not hasattr(batch, 'dataset_type') or batch.dataset_type is None:
-            return None
+        if getattr(batch, 'dataset_type', None) is None:
+            raise ValueError("RNA metrics require batch.dataset_type to select RNA graphs")
         dt = batch.dataset_type
         if isinstance(dt, (list, tuple)):
             return list(dt)
@@ -870,65 +867,6 @@ class PerAtomMetricsCallback(Callback):
             self.val_metrics.print_summary()
         else:
             self.test_metrics.print_summary()
-
-
-class SimplePerAtomMetricsCallback(Callback):
-    """
-    Simplified version that only tracks atom prediction accuracy without detailed metrics.
-    
-    Useful for quick experiments where detailed per-atom metrics are not needed.
-    """
-    
-    def __init__(self, enabled: bool = False):
-        super().__init__()
-        self.enabled = enabled
-        self.val_atom_preds = []
-        self.val_atom_targets = []
-        self.test_atom_preds = []
-        self.test_atom_targets = []
-    
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
-        if not self.enabled or "mlm" not in pl_module.config.pretraining_tasks:
-            return
-        
-        try:
-            if hasattr(batch, 'original_types') and hasattr(batch, 'mlm_mask'):
-                with torch.no_grad():
-                    _, node_emb = pl_module.forward(batch)
-                    mlm_logits = pl_module.pretraining_tasks.mlm_head(node_emb)
-                    preds = mlm_logits.argmax(dim=1)
-                    
-                    mask = batch.mlm_mask
-                    self.val_atom_preds.append(preds[mask].cpu())
-                    self.val_atom_targets.append(batch.original_types[mask].cpu())
-        except:
-            pass
-    
-    def on_validation_epoch_end(self, trainer, pl_module):
-        if not self.enabled or len(self.val_atom_preds) == 0:
-            return
-        
-        preds = torch.cat(self.val_atom_preds)
-        targets = torch.cat(self.val_atom_targets)
-        
-        acc = (preds == targets).float().mean()
-        trainer.logger.log_metrics({"val_atom_accuracy": acc.item()}, step=trainer.global_step)
-        
-        self.val_atom_preds.clear()
-        self.val_atom_targets.clear()
-    
-    def on_test_epoch_end(self, trainer, pl_module):
-        if not self.enabled or len(self.test_atom_preds) == 0:
-            return
-        
-        preds = torch.cat(self.test_atom_preds)
-        targets = torch.cat(self.test_atom_targets)
-        
-        acc = (preds == targets).float().mean()
-        trainer.logger.log_metrics({"test_atom_accuracy": acc.item()}, step=trainer.global_step)
-        
-        self.test_atom_preds.clear()
-        self.test_atom_targets.clear()
 
 
 if __name__ == "__main__":

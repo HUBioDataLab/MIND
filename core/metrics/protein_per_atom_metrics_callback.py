@@ -19,6 +19,9 @@ Per-atom fix (same design as the RNA callback):
   (derived from pos_code); the y_pred vector is set to y_true when the
   elements match and to an out-of-vocab index when they differ. This keeps
   Recall meaningful as per-atom element accuracy without fuzzy heuristics.
+  Precision is computed over the predicted element (a wrong prediction of
+  element B is a false positive for the rows whose element is B), so it is
+  no longer ~1 by construction.
 
 Per-amino-acid metric:
 - For every residue that has at least one masked atom in the batch, we
@@ -37,9 +40,11 @@ import numpy as np
 from itertools import chain
 from typing import Dict, List, Optional
 from pytorch_lightning.callbacks import Callback
-from pytorch_lightning.loggers import WandbLogger
 
-from core.metrics.per_atom_metrics import PerAtomMetricsCalculator
+from core.metrics.per_atom_metrics import (
+    PerAtomMetricsCalculator,
+    require_wandb_logger_or_announce,
+)
 from core.metrics.protein_atom_types import (
     ALL_PROTEIN_ATOMS,
     PROTEIN_BACKBONE_ATOMS,
@@ -118,7 +123,7 @@ class ProteinPerAtomMetricsCallback(Callback):
 
         # Snapshot of the last validation metrics (used for on_train_end print).
         self._last_snapshot: Optional[Dict] = None
-        self._processing_error_logged = False
+        self._no_wandb_announced = False
 
         if enabled:
             print("✅ ProteinPerAtomMetricsCallback enabled")
@@ -144,14 +149,11 @@ class ProteinPerAtomMetricsCallback(Callback):
             return
         if self.only_protein and not self._is_protein_batch(batch):
             return
-        try:
-            self._process_batch_metrics(
-                batch, pl_module, self.val_metrics,
-                self._val_aa_stats, self._val_aa_block_stats,
-                outputs=outputs,
-            )
-        except Exception as exc:
-            self._log_processing_error('validation', batch_idx, exc)
+        self._process_batch_metrics(
+            batch, pl_module, self.val_metrics,
+            self._val_aa_stats, self._val_aa_block_stats,
+            outputs=outputs,
+        )
 
     def on_test_batch_end(self, trainer, pl_module, outputs, batch,
                           batch_idx, dataloader_idx=0):
@@ -159,14 +161,11 @@ class ProteinPerAtomMetricsCallback(Callback):
             return
         if self.only_protein and not self._is_protein_batch(batch):
             return
-        try:
-            self._process_batch_metrics(
-                batch, pl_module, self.test_metrics,
-                self._test_aa_stats, self._test_aa_block_stats,
-                outputs=outputs,
-            )
-        except Exception as exc:
-            self._log_processing_error('test', batch_idx, exc)
+        self._process_batch_metrics(
+            batch, pl_module, self.test_metrics,
+            self._test_aa_stats, self._test_aa_block_stats,
+            outputs=outputs,
+        )
 
     # ------------------------------------------------------------------ #
     # Core metric computation                                             #
@@ -217,7 +216,8 @@ class ProteinPerAtomMetricsCallback(Callback):
         is_correct_element = (pred_elements == true_elements)
 
         # 4. Element-aware y_pred: set to y_true when element matches, else to
-        #    an out-of-vocab idx so one-vs-rest precision stays clean.
+        #    an out-of-vocab idx (Recall = element accuracy). The element
+        #    arrays go to the calculator so Precision uses the predicted element.
         out_of_vocab = len(ALL_PROTEIN_ATOMS)
         y_pred_indices = np.where(is_correct_element, y_true_indices, out_of_vocab)
 
@@ -235,40 +235,33 @@ class ProteinPerAtomMetricsCallback(Callback):
                 f"({len(mlm_mask_np)} != {len(y_true_indices)})"
             )
 
-        # Build per-atom protein mask (True for atoms whose graph dtype is
-        # protein/pdb). When no dtype info is available, treat everything as
-        # protein — preserves single-domain protein-only behaviour.
-        is_protein_per_atom = np.ones(len(y_true_indices), dtype=bool)
+        # Per-atom protein mask (True for atoms whose graph dtype is protein/pdb).
         graph_dtypes = self._graph_dtype_list(batch)
-        if (graph_dtypes is not None
-                and hasattr(batch, 'batch')
-                and batch.batch is not None):
-            mol_idx = batch.batch.cpu().numpy()
-            if len(mol_idx) == len(y_true_indices):
-                protein_set = PROTEIN_DATASET_TYPES
-                is_protein_graph = np.array(
-                    [
-                        (g < len(graph_dtypes)
-                         and str(graph_dtypes[g]).lower() in protein_set)
-                        for g in mol_idx
-                    ],
-                    dtype=bool,
-                )
-                is_protein_per_atom = is_protein_graph
+        mol_idx = self._mol_idx_per_atom(batch, len(y_true_indices))
+        is_protein_graph = np.array(
+            [str(dt).lower() in PROTEIN_DATASET_TYPES for dt in graph_dtypes],
+            dtype=bool,
+        )
+        is_protein_per_atom = is_protein_graph[mol_idx]
 
         effective_mask = mlm_mask_np & is_protein_per_atom
         y_true_masked = y_true_indices[effective_mask]
         y_pred_masked = y_pred_indices[effective_mask]
 
         if len(y_true_masked) > 0:
-            metrics_calculator.update(y_pred_masked, y_true_masked)
+            metrics_calculator.update(
+                y_pred_masked,
+                y_true_masked,
+                predicted_elements=pred_elements[effective_mask],
+                target_elements=true_elements[effective_mask],
+            )
 
         # 6. Per-AA metric: for each residue that has ≥1 masked atom, check
         #    whether ALL masked atoms in that residue got correct element.
         #    Real-only column is computed in the same pass by excluding virtual
         #    atoms from the per-residue "all correct" check — useful because
         #    virtuals are easy (V recall ~0.94) and inflate the binary signal.
-        if self.compute_per_aa and mlm_mask_np is not None:
+        if self.compute_per_aa:
             self._accumulate_aa_stats(
                 batch=batch,
                 flattened_pos_codes=flattened_pos_codes,
@@ -282,7 +275,7 @@ class ProteinPerAtomMetricsCallback(Callback):
         #    (real sidechain OR virtual padding), and sidechain-real-only are
         #    tracked separately so we can compare MIND's slot-recognition vs
         #    Salad-style real-atom recognition.
-        if self.compute_per_aa_block and mlm_mask_np is not None:
+        if self.compute_per_aa_block:
             self._accumulate_aa_block_stats(
                 batch=batch,
                 flattened_pos_codes=flattened_pos_codes,
@@ -308,51 +301,24 @@ class ProteinPerAtomMetricsCallback(Callback):
         RNA nucleotides ('A','U','G','C') fall through `STANDARD_AMINO_ACIDS`
         and pollute the `UNKNOWN` bucket of the protein table.
         """
-        if not hasattr(batch, 'block_idx') or not hasattr(batch, 'block_symbols'):
-            return
-        if not hasattr(batch, 'batch') or batch.batch is None:
-            # Can't group atoms by molecule without PyG's batch index.
-            return
-
         # Per-graph dtype list (len = batch.num_graphs) — used to skip non-protein
         # graphs in mixed-modality batches.
         graph_dtypes = self._graph_dtype_list(batch)
+        mol_idx_per_atom, block_idx_per_atom, per_mol_symbols = self._block_inputs(
+            batch, flattened_pos_codes, mlm_mask_np, is_correct_element
+        )
 
-        mol_idx_per_atom = batch.batch.cpu().numpy()
-        block_idx_per_atom = batch.block_idx.cpu().numpy()
-
-        # block_symbols is stored per molecule as a list; PyG collates a list
-        # attribute by concatenation, so we expect list-of-lists here.
-        raw_block_symbols = batch.block_symbols
-        per_mol_symbols: List[List[str]]
-        if (isinstance(raw_block_symbols, list)
-                and len(raw_block_symbols) > 0
-                and isinstance(raw_block_symbols[0], list)):
-            per_mol_symbols = raw_block_symbols
-        else:
-            # Flat fallback — assume single molecule or already-flat list.
-            per_mol_symbols = [list(raw_block_symbols)]
-
-        # Pre-classify each atom as "real" (non-virtual). Aligned with the
-        # flattened pos_code order, identical to the atom ordering of
-        # mol_idx_per_atom / block_idx_per_atom.
-        n_atoms = len(mol_idx_per_atom)
-        if len(flattened_pos_codes) == n_atoms:
-            is_real_per_atom = np.array(
-                [not is_virtual_atom(c) for c in flattened_pos_codes], dtype=bool
-            )
-        else:
-            # Size mismatch — defensive fallback: treat everything as real so
-            # the "real" column behaves like the regular column rather than
-            # silently dropping data.
-            is_real_per_atom = np.ones(n_atoms, dtype=bool)
+        # Pre-classify each atom as "real" (non-virtual), aligned with the
+        # flattened pos_code order.
+        is_real_per_atom = np.array(
+            [not is_virtual_atom(c) for c in flattened_pos_codes], dtype=bool
+        )
 
         # Unique (molecule, block) pairs that contain at least one masked atom.
         # Encode the pair as a single int for np.unique grouping.
         # Assumption: block_idx per molecule < 100_000 (protein residues cap).
         residue_key = mol_idx_per_atom.astype(np.int64) * 100_000 + block_idx_per_atom.astype(np.int64)
-        masked_keys = residue_key[mlm_mask_np] if mlm_mask_np is not None else residue_key
-        unique_masked_residues = np.unique(masked_keys)
+        unique_masked_residues = np.unique(residue_key[mlm_mask_np])
 
         # Per-residue check: are all masked atoms in this residue correct?
         for rkey in unique_masked_residues:
@@ -363,16 +329,12 @@ class ProteinPerAtomMetricsCallback(Callback):
             # batch-level filter only checks if ANY graph is protein; we still
             # need a per-graph filter so RNA nucleotides don't end up in the
             # UNKNOWN bucket of the protein per-AA table.
-            if graph_dtypes is not None and mol_i < len(graph_dtypes):
-                if str(graph_dtypes[mol_i]).lower() not in PROTEIN_DATASET_TYPES:
-                    continue
+            if str(graph_dtypes[mol_i]).lower() not in PROTEIN_DATASET_TYPES:
+                continue
 
             # Mask for atoms that belong to this residue AND are masked.
             residue_mask = (residue_key == rkey)
             residue_masked_atoms = residue_mask & mlm_mask_np
-
-            if not residue_masked_atoms.any():
-                continue
 
             all_correct = bool(is_correct_element[residue_masked_atoms].all())
 
@@ -384,13 +346,7 @@ class ProteinPerAtomMetricsCallback(Callback):
                 if has_real_masked else False
             )
 
-            # Resolve true AA symbol. Bounds-check both indices.
-            if mol_i >= len(per_mol_symbols):
-                continue
-            mol_syms = per_mol_symbols[mol_i]
-            if block_i >= len(mol_syms):
-                continue
-            true_aa = str(mol_syms[block_i]).upper().strip()
+            true_aa = str(self._block_symbol(per_mol_symbols, mol_i, block_i)).upper().strip()
 
             bucket = true_aa if true_aa in STANDARD_AMINO_ACIDS else 'UNKNOWN'
             aa_stats[bucket]['total'] += 1
@@ -418,26 +374,13 @@ class ProteinPerAtomMetricsCallback(Callback):
         - Block mask (future): residue contributes its full 4 backbone + 10 sidechain
           slot atoms, giving clean per-residue "5/14" style numbers.
         """
-        if not hasattr(batch, 'block_idx') or not hasattr(batch, 'block_symbols'):
-            return
-        if not hasattr(batch, 'batch') or batch.batch is None:
-            return
-
         # Per-graph dtype list — used to skip non-protein graphs (e.g. RNA)
         # in mixed-modality batches. Without this filter RNA residues end up
         # in the UNKNOWN bucket and dominate the protein BLOCK table.
         graph_dtypes = self._graph_dtype_list(batch)
-
-        mol_idx_per_atom = batch.batch.cpu().numpy()
-        block_idx_per_atom = batch.block_idx.cpu().numpy()
-
-        raw_block_symbols = batch.block_symbols
-        if (isinstance(raw_block_symbols, list)
-                and len(raw_block_symbols) > 0
-                and isinstance(raw_block_symbols[0], list)):
-            per_mol_symbols = raw_block_symbols
-        else:
-            per_mol_symbols = [list(raw_block_symbols)]
+        mol_idx_per_atom, block_idx_per_atom, per_mol_symbols = self._block_inputs(
+            batch, flattened_pos_codes, mlm_mask_np, is_correct_element
+        )
 
         # Pre-classify every atom's pos_code → 'bb' / 'sc_slot' (= 'sc_virtual' or 'sc_real').
         # Stored as parallel numpy arrays for masked-AND filtering.
@@ -467,22 +410,13 @@ class ProteinPerAtomMetricsCallback(Callback):
             block_i = int(rkey % 100_000)
 
             # Skip non-protein graphs in mixed-modality batches.
-            if graph_dtypes is not None and mol_i < len(graph_dtypes):
-                if str(graph_dtypes[mol_i]).lower() not in PROTEIN_DATASET_TYPES:
-                    continue
+            if str(graph_dtypes[mol_i]).lower() not in PROTEIN_DATASET_TYPES:
+                continue
 
             residue_mask = (residue_key == rkey)
             masked_in_residue = residue_mask & mlm_mask_np
 
-            if not masked_in_residue.any():
-                continue
-
-            if mol_i >= len(per_mol_symbols):
-                continue
-            mol_syms = per_mol_symbols[mol_i]
-            if block_i >= len(mol_syms):
-                continue
-            true_aa = str(mol_syms[block_i]).upper().strip()
+            true_aa = str(self._block_symbol(per_mol_symbols, mol_i, block_i)).upper().strip()
             bucket = true_aa if true_aa in STANDARD_AMINO_ACIDS else 'UNKNOWN'
 
             # Backbone masked atoms in this residue.
@@ -519,13 +453,15 @@ class ProteinPerAtomMetricsCallback(Callback):
         if trainer.current_epoch % self.log_every_n_epochs != 0:
             return
         if len(self.val_metrics.all_predictions) == 0:
+            self._announce_empty_epoch('validation', pl_module)
             return
 
         metrics = self.val_metrics.compute()
         aa_accuracies = self._finalize_aa_stats(self._val_aa_stats)
         aa_block_accuracies = self._finalize_aa_block_stats(self._val_aa_block_stats)
 
-        self._log_metrics(trainer, metrics, aa_accuracies, aa_block_accuracies, stage='val')
+        self._log_metrics(trainer, metrics, aa_accuracies, aa_block_accuracies, stage='val',
+                          pl_module=pl_module)
 
         # Snapshot for on_train_end. Deep-copy the dicts so subsequent resets
         # don't overwrite it.
@@ -555,13 +491,15 @@ class ProteinPerAtomMetricsCallback(Callback):
         if not self.enabled:
             return
         if len(self.test_metrics.all_predictions) == 0:
+            self._announce_empty_epoch('test', pl_module)
             return
 
         metrics = self.test_metrics.compute()
         aa_accuracies = self._finalize_aa_stats(self._test_aa_stats)
         aa_block_accuracies = self._finalize_aa_block_stats(self._test_aa_block_stats)
 
-        self._log_metrics(trainer, metrics, aa_accuracies, aa_block_accuracies, stage='test')
+        self._log_metrics(trainer, metrics, aa_accuracies, aa_block_accuracies, stage='test',
+                          pl_module=pl_module)
         self._print_summary(
             header=f"PROTEIN TEST METRICS — Epoch {trainer.current_epoch}",
             calculator=self.test_metrics,
@@ -575,7 +513,10 @@ class ProteinPerAtomMetricsCallback(Callback):
 
     def on_train_end(self, trainer, pl_module):
         """Print the final validation snapshot so it's easy to grep in the log."""
-        if not self.enabled or self._last_snapshot is None:
+        if not self.enabled:
+            return
+        if self._last_snapshot is None:
+            print("ℹ️  Protein per-atom metrics: no validation epoch with protein MLM atoms; no final table")
             return
         print("\n" + "=" * 100)
         print(
@@ -618,16 +559,82 @@ class ProteinPerAtomMetricsCallback(Callback):
             mlm_logits = pl_module.pretraining_tasks.mlm_head(node_emb)
             return mlm_logits.argmax(dim=1).detach().cpu().numpy()
 
-    def _log_processing_error(self, stage: str, batch_idx: int, exc: Exception) -> None:
-        if self._processing_error_logged:
-            return
-        self._processing_error_logged = True
-        detail = str(exc).splitlines()[0] if str(exc) else "no detail"
-        print(
-            f"⚠️ Protein metric callback error "
-            f"({stage} batch {batch_idx}): {type(exc).__name__}: {detail}. "
-            f"Further callback errors will be suppressed."
+    @staticmethod
+    def _announce_empty_epoch(stage: str, pl_module) -> None:
+        # Legitimate when the run has no protein domain or MLM is not trained.
+        reason = (
+            "MLM is not a pretraining task"
+            if "mlm" not in pl_module.config.pretraining_tasks
+            else "no protein graph with masked atoms was seen"
         )
+        print(f"ℹ️  Protein per-atom metrics: nothing to log for this {stage} epoch ({reason})")
+
+    @classmethod
+    def _mol_idx_per_atom(cls, batch, n_atoms: int) -> np.ndarray:
+        if getattr(batch, 'batch', None) is None:
+            raise ValueError("batch.batch (graph index per atom) is missing")
+        mol_idx = batch.batch.cpu().numpy()
+        if len(mol_idx) != n_atoms:
+            raise ValueError(
+                f"batch.batch/atom length mismatch ({len(mol_idx)} != {n_atoms})"
+            )
+        num_graphs = len(cls._graph_dtype_list(batch))
+        if len(mol_idx) and int(mol_idx.max()) >= num_graphs:
+            raise ValueError(
+                f"graph index {int(mol_idx.max())} out of range for "
+                f"{num_graphs} dataset_type entries"
+            )
+        return mol_idx
+
+    @classmethod
+    def _block_inputs(cls, batch, flattened_pos_codes, mlm_mask_np, is_correct_element):
+        """Validate and return (mol_idx, block_idx, per-molecule block symbols)."""
+        missing = [
+            name for name in ('block_idx', 'block_symbols')
+            if getattr(batch, name, None) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"Protein per-AA metrics require batch attributes: {', '.join(missing)}"
+            )
+        n_atoms = len(flattened_pos_codes)
+        mol_idx_per_atom = cls._mol_idx_per_atom(batch, n_atoms)
+        block_idx_per_atom = batch.block_idx.cpu().numpy()
+        if not (len(block_idx_per_atom) == len(mlm_mask_np)
+                == len(is_correct_element) == n_atoms):
+            raise ValueError(
+                "block_idx/mlm_mask/prediction/pos_code length mismatch "
+                f"({len(block_idx_per_atom)}, {len(mlm_mask_np)}, "
+                f"{len(is_correct_element)}, {n_atoms})"
+            )
+        if n_atoms and int(block_idx_per_atom.max()) >= 100_000:
+            raise ValueError("block_idx >= 100000 breaks the (graph, residue) key")
+
+        # block_symbols is stored per molecule as a list; PyG collates a list
+        # attribute as a list-of-lists. The flat form is a single molecule.
+        raw_block_symbols = batch.block_symbols
+        per_mol_symbols: List[List[str]]
+        if (isinstance(raw_block_symbols, list)
+                and len(raw_block_symbols) > 0
+                and isinstance(raw_block_symbols[0], list)):
+            per_mol_symbols = raw_block_symbols
+        else:
+            per_mol_symbols = [list(raw_block_symbols)]
+        return mol_idx_per_atom, block_idx_per_atom, per_mol_symbols
+
+    @staticmethod
+    def _block_symbol(per_mol_symbols, mol_i: int, block_i: int) -> str:
+        if mol_i >= len(per_mol_symbols):
+            raise ValueError(
+                f"graph {mol_i} has no block_symbols entry ({len(per_mol_symbols)} graphs)"
+            )
+        mol_syms = per_mol_symbols[mol_i]
+        if block_i >= len(mol_syms):
+            raise ValueError(
+                f"graph {mol_i} block_idx {block_i} exceeds its "
+                f"{len(mol_syms)} block_symbols"
+            )
+        return mol_syms[block_i]
 
     @staticmethod
     def _fresh_aa_stats() -> Dict[str, Dict[str, int]]:
@@ -700,8 +707,8 @@ class ProteinPerAtomMetricsCallback(Callback):
 
     @staticmethod
     def _is_protein_batch(batch) -> bool:
-        if not hasattr(batch, 'dataset_type') or batch.dataset_type is None:
-            return False
+        if getattr(batch, 'dataset_type', None) is None:
+            raise ValueError("Protein metrics require batch.dataset_type to select protein graphs")
         dtypes = batch.dataset_type
         if isinstance(dtypes, (list, tuple)):
             return any(str(dt).lower() in PROTEIN_DATASET_TYPES for dt in dtypes)
@@ -709,13 +716,13 @@ class ProteinPerAtomMetricsCallback(Callback):
 
     @staticmethod
     def _graph_dtype_list(batch):
-        """Per-graph dtype list (len = batch.num_graphs) or None.
+        """Per-graph dtype list (len = batch.num_graphs); raises without dataset_type.
 
         Used by per-AA accumulators to filter out non-protein graphs in
         mixed-modality batches (e.g. PDB + RNA).
         """
-        if not hasattr(batch, 'dataset_type') or batch.dataset_type is None:
-            return None
+        if getattr(batch, 'dataset_type', None) is None:
+            raise ValueError("Protein metrics require batch.dataset_type to select protein graphs")
         dt = batch.dataset_type
         if isinstance(dt, (list, tuple)):
             return list(dt)
@@ -723,10 +730,11 @@ class ProteinPerAtomMetricsCallback(Callback):
         n = getattr(batch, 'num_graphs', 1) or 1
         return [dt] * n
 
-    def _log_metrics(self, trainer, metrics, aa_accuracies, aa_block_accuracies, stage: str):
+    def _log_metrics(self, trainer, metrics, aa_accuracies, aa_block_accuracies, stage: str,
+                     pl_module=None):
         """Push per-atom + per-AA (binary) + per-AA-block (atom-level) metrics to W&B."""
-        wandb_logger = next(
-            (lg for lg in trainer.loggers if isinstance(lg, WandbLogger)), None
+        wandb_logger = require_wandb_logger_or_announce(
+            self, trainer, pl_module, 'Protein per-atom metrics'
         )
         if wandb_logger is None:
             return

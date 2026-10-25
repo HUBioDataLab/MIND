@@ -1,3 +1,5 @@
+from collections import Counter
+
 import torch
 
 from torch import nn
@@ -40,6 +42,21 @@ class PretrainingTasks(nn.Module):
         self.distance_head = self._create_distance_head()  # short-range, output = short_range_distance_bins
         self.mlm_head = self._create_mlm_head()
         self.coordinate_denoising_head = self._create_coordinate_denoising_head()
+        # Legitimate empty cases return a graph-connected zero loss and are
+        # counted here; the model drains and logs them as loss_skipped/*.
+        self._pending_loss_skips = Counter()
+
+    def record_loss_skip(self, task: str, reason: str, scope: str = "batch") -> None:
+        self._pending_loss_skips[f"{scope}_{task}_{reason}"] += 1
+
+    def pop_loss_skips(self) -> Counter:
+        skips = self._pending_loss_skips
+        self._pending_loss_skips = Counter()
+        return skips
+
+    def _skipped_zero_loss(self, node_embeddings, task, reason, scope):
+        self.record_loss_skip(task, reason, scope)
+        return node_embeddings.sum() * 0.0
 
     def _create_coordinate_denoising_head(self):
         """Predict 3D noise vector from node embeddings (invariant head; loss is SE(3)-invariant).
@@ -165,15 +182,18 @@ class PretrainingTasks(nn.Module):
             right_parts.append(graph_nodes[upper])
         return torch.cat(left_parts), torch.cat(right_parts)
 
-    def long_range_distance_loss(self, node_embeddings, data):
+    def long_range_distance_loss(self, node_embeddings, data, scope: str = "batch"):
         """
         Long-range distance prediction loss for global 3D structure learning.
 
         Predicts distances between all atom pairs (or sampled pairs for large molecular systems)
         to learn overall molecular geometry. This is completely SE(3) invariant.
+
+        Graphs with fewer than two geometry-valid atoms have no pair; when no
+        graph has one the zero loss is counted as ``long_range_distance_no_pairs``.
         """
-        if not hasattr(data, 'pos') or data.pos is None:
-            return node_embeddings.sum() * 0.0
+        if getattr(data, 'pos', None) is None:
+            raise ValueError("long_range_distance requires data.pos")
 
         pos = data.pos
         num_atoms = pos.size(0)
@@ -217,7 +237,9 @@ class PretrainingTasks(nn.Module):
             batch_mapping, eligible_indices, max_pairs=1000
         )
         if i_indices.numel() == 0:
-            return node_embeddings.sum() * 0.0
+            return self._skipped_zero_loss(
+                node_embeddings, "long_range_distance", "no_pairs", scope
+            )
 
         emb_i = node_embeddings[i_indices]
         emb_j = node_embeddings[j_indices]
@@ -234,15 +256,23 @@ class PretrainingTasks(nn.Module):
         loss = F.cross_entropy(distance_logits, distance_bins, reduction='mean')
         return loss
 
-    def short_range_distance_loss(self, node_embeddings, edge_index, distances, mask):
-        """Short-range loss over finite, selected edges within its distance range."""
+    def short_range_distance_loss(self, node_embeddings, edge_index, distances, mask,
+                                  scope: str = "batch"):
+        """Short-range loss over finite, selected edges within its distance range.
+
+        Training selects a random 15% of edges and random long-range protein
+        edges lie beyond the range, so a small edge set can have no valid
+        edge; that zero loss is counted as ``short_range_distance_no_valid_edges``.
+        """
         valid_mask = (
             torch.isfinite(distances)
             & mask.to(device=distances.device, dtype=torch.bool)
             & (distances <= float(self.config.short_range_max_distance))
         )
         if not bool(valid_mask.any()):
-            return node_embeddings.sum() * 0.0
+            return self._skipped_zero_loss(
+                node_embeddings, "short_range_distance", "no_valid_edges", scope
+            )
 
         valid_edges = edge_index[:, valid_mask]
         valid_distances = distances[valid_mask]
@@ -255,16 +285,28 @@ class PretrainingTasks(nn.Module):
         loss = F.cross_entropy(logits, distance_bins, reduction='mean')
         return loss
 
-    def mlm_loss(self, node_embeddings, data):
-        """Compute masked language modeling loss"""
-        assert hasattr(data, 'mlm_mask') and hasattr(data, 'original_types') and hasattr(data, 'masked_types'), \
-            "MLM data attributes are required for MLM loss"
+    def mlm_loss(self, node_embeddings, data, scope: str = "batch"):
+        """Compute masked language modeling loss.
+
+        A graph can legitimately have no masked atom when none of its blocks
+        is eligible (legacy OXT blocks, non-exact geometry-neutral blocks); a
+        batch or domain with no masked atom returns a counted zero loss
+        (``mlm_no_masked_atoms``).
+        """
+        missing = [
+            name for name in ('mlm_mask', 'original_types', 'masked_types')
+            if getattr(data, name, None) is None
+        ]
+        if missing:
+            raise ValueError(f"MLM loss requires data attributes: {', '.join(missing)}")
 
         mask = data.mlm_mask
         original_types = data.original_types
 
-        if mask is None or mask.sum() == 0:
-            return torch.tensor(0.0, device=node_embeddings.device, requires_grad=True)
+        if mask.sum() == 0:
+            return self._skipped_zero_loss(
+                node_embeddings, "mlm", "no_masked_atoms", scope
+            )
 
         logits = self.mlm_head(node_embeddings)
         masked_logits = logits[mask]
@@ -292,20 +334,24 @@ class PretrainingTasks(nn.Module):
         )
         return real_loss + virtual_weight * virtual_loss
 
-    def coordinate_denoising_loss(self, node_embeddings, data):
+    def coordinate_denoising_loss(self, node_embeddings, data, scope: str = "batch"):
         """
         Coordinate denoising: predict noise (pos - clean_pos) from node embeddings.
         Uses invariant head (scalar -> 3D); loss is MSE on masked nodes, SE(3)-invariant.
         """
-        if not hasattr(data, 'clean_pos') or data.clean_pos is None:
-            return torch.tensor(0.0, device=node_embeddings.device)
-        if not hasattr(data, 'pos') or data.pos is None:
-            return torch.tensor(0.0, device=node_embeddings.device)
-        coord_mask = getattr(data, 'coord_mask', None)
-        if coord_mask is None:
-            coord_mask = torch.ones(node_embeddings.size(0), dtype=torch.bool, device=node_embeddings.device)
+        missing = [
+            name for name in ('pos', 'clean_pos', 'coord_mask')
+            if getattr(data, name, None) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"coordinate_denoising requires data attributes: {', '.join(missing)}"
+            )
+        coord_mask = data.coord_mask
         if coord_mask.sum() == 0:
-            return torch.tensor(0.0, device=node_embeddings.device)
+            return self._skipped_zero_loss(
+                node_embeddings, "coordinate_denoising", "no_masked_atoms", scope
+            )
         true_noise = data.pos - data.clean_pos
         pred_noise = self.coordinate_denoising_head(node_embeddings)
         return F.mse_loss(pred_noise[coord_mask], true_noise[coord_mask], reduction='mean')

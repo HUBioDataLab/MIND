@@ -41,6 +41,13 @@ class VirtualSlotDiagnosticsCallback(Callback):
         self.enabled = enabled
         self._reset()
 
+    def setup(self, trainer, pl_module, stage=None) -> None:
+        # The diagnostic reads MLM predictions; without the MLM task it is
+        # switched off once, visibly, instead of returning on every batch.
+        if self.enabled and "mlm" not in pl_module.config.pretraining_tasks:
+            self.enabled = False
+            print("ℹ️  Virtual-slot diagnostics disabled: MLM is not a pretraining task")
+
     def _reset(self) -> None:
         self._slots = {
             "protein": defaultdict(_new_slot_record),
@@ -58,14 +65,21 @@ class VirtualSlotDiagnosticsCallback(Callback):
         batch_idx,
         dataloader_idx=0,
     ) -> None:
-        if not self.enabled or not isinstance(outputs, dict):
+        if not self.enabled:
             return
-        predictions = outputs.get("mlm_preds_atomic_num")
-        if predictions is None:
-            return
+        if not isinstance(outputs, dict) or outputs.get("mlm_preds_atomic_num") is None:
+            raise ValueError(
+                "virtual-slot diagnostics require validation_step outputs with "
+                "'mlm_preds_atomic_num'"
+            )
+        predictions = outputs["mlm_preds_atomic_num"]
         required = ("original_types", "mlm_mask", "target_slot_mask")
-        if any(getattr(batch, name, None) is None for name in required):
-            return
+        missing = [name for name in required if getattr(batch, name, None) is None]
+        if missing:
+            raise ValueError(
+                "virtual-slot diagnostics require batch attributes: "
+                + ", ".join(missing)
+            )
 
         predictions = torch.as_tensor(predictions).long().cpu()
         targets = batch.original_types.detach().long().cpu()
@@ -218,6 +232,7 @@ class VirtualSlotDiagnosticsCallback(Callback):
         if not self.enabled:
             return
         if not any(self._slots[domain] for domain in ("protein", "rna")):
+            print("ℹ️  Virtual-slot diagnostics: no masked protein/RNA target slot in this validation epoch")
             self._reset()
             return
 

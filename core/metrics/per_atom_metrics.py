@@ -13,6 +13,7 @@ Uses scikit-learn for metric computation.
 from typing import Dict, List, Tuple, Optional, Union
 import numpy as np
 import torch
+from pytorch_lightning.loggers import WandbLogger
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.metrics import classification_report, confusion_matrix
 from collections import defaultdict
@@ -66,6 +67,8 @@ class PerAtomMetricsCalculator:
         self.all_predictions: List[np.ndarray] = []
         self.all_targets: List[np.ndarray] = []
         self.all_atoms: List[str] = []
+        self.all_predicted_elements: List[np.ndarray] = []
+        self.all_target_elements: List[np.ndarray] = []
         
         # Aggregated metrics
         self.per_atom_metrics: Dict[str, Dict[str, float]] = {}
@@ -77,6 +80,8 @@ class PerAtomMetricsCalculator:
         self.all_predictions = []
         self.all_targets = []
         self.all_atoms = []
+        self.all_predicted_elements = []
+        self.all_target_elements = []
         self.per_atom_metrics = {}
         self.per_group_metrics = {}
         self.overall_metrics = {}
@@ -84,7 +89,9 @@ class PerAtomMetricsCalculator:
     def update(self,
                predictions: Union[torch.Tensor, np.ndarray],
                targets: Union[torch.Tensor, np.ndarray],
-               atom_names: Optional[Union[List[str], np.ndarray]] = None):
+               atom_names: Optional[Union[List[str], np.ndarray]] = None,
+               predicted_elements: Optional[np.ndarray] = None,
+               target_elements: Optional[np.ndarray] = None):
         """
         Update metrics with new batch predictions.
         
@@ -92,6 +99,12 @@ class PerAtomMetricsCalculator:
             predictions: Model predictions (logits or class indices). Shape: (batch_size,) or (batch_size, num_classes)
             targets: Ground truth atom types. Shape: (batch_size,)
             atom_names: Optional list of atom names for filtering/analysis
+            predicted_elements / target_elements: element-aware mode. The MLM
+                head predicts an element, not a position class, so a wrong
+                prediction has no position class. When given, Precision for a
+                row is computed over the predicted element: of all atoms
+                predicted as the row's element, the fraction whose true element
+                is that element. Recall and Accuracy still use the class labels.
         """
         # Convert to numpy
         if isinstance(predictions, torch.Tensor):
@@ -104,6 +117,28 @@ class PerAtomMetricsCalculator:
         if isinstance(targets, torch.Tensor):
             targets = targets.cpu().numpy()
         
+        if (predicted_elements is None) != (target_elements is None):
+            raise ValueError(
+                "predicted_elements and target_elements must be given together"
+            )
+        element_mode = predicted_elements is not None
+        if self.all_predictions and element_mode != bool(self.all_predicted_elements):
+            raise ValueError(
+                "cannot mix element-aware and label-only updates in one calculator"
+            )
+        if element_mode:
+            predicted_elements = np.asarray(predicted_elements)
+            target_elements = np.asarray(target_elements)
+            if not (len(predicted_elements) == len(target_elements)
+                    == len(predictions) == len(targets)):
+                raise ValueError(
+                    "predictions, targets and element arrays must have equal length "
+                    f"({len(predictions)}, {len(targets)}, "
+                    f"{len(predicted_elements)}, {len(target_elements)})"
+                )
+            self.all_predicted_elements.append(predicted_elements)
+            self.all_target_elements.append(target_elements)
+
         # Store
         self.all_predictions.append(predictions.astype(int))
         self.all_targets.append(targets.astype(int))
@@ -128,16 +163,28 @@ class PerAtomMetricsCalculator:
         # Concatenate all batches
         y_pred = np.concatenate(self.all_predictions)
         y_true = np.concatenate(self.all_targets)
+        if self.all_predicted_elements:
+            elements = (
+                np.concatenate(self.all_predicted_elements),
+                np.concatenate(self.all_target_elements),
+            )
+        else:
+            elements = None
         
         # Compute per-atom metrics
-        self.per_atom_metrics = self._compute_per_atom_metrics(y_pred, y_true)
+        self.per_atom_metrics = self._compute_per_atom_metrics(y_pred, y_true, elements)
         
         # Compute grouped metrics if enabled
         if self.compute_groups:
-            self.per_group_metrics = self._compute_group_metrics(y_pred, y_true)
+            self.per_group_metrics = self._compute_group_metrics(y_pred, y_true, elements)
         
         # Compute overall metrics
-        self.overall_metrics = self._compute_overall_metrics(y_pred, y_true)
+        if elements is None:
+            self.overall_metrics = self._compute_overall_metrics(y_pred, y_true)
+        else:
+            self.overall_metrics = self._compute_overall_metrics_from_rows(
+                y_pred, y_true, self.per_atom_metrics
+            )
         
         return {
             'per_atom': self.per_atom_metrics,
@@ -145,7 +192,25 @@ class PerAtomMetricsCalculator:
             'overall': self.overall_metrics,
         }
     
-    def _compute_per_atom_metrics(self, y_pred: np.ndarray, y_true: np.ndarray) -> Dict[str, Dict[str, float]]:
+    @staticmethod
+    def _element_precision(predicted_elements: np.ndarray,
+                           target_elements: np.ndarray,
+                           element_set) -> float:
+        predicted_in_set = np.isin(predicted_elements, list(element_set))
+        n_predicted = int(predicted_in_set.sum())
+        if n_predicted == 0:
+            return 0.0
+        hits = predicted_in_set & np.isin(target_elements, list(element_set))
+        return float(hits.sum()) / n_predicted
+
+    @staticmethod
+    def _f1(precision: float, recall: float) -> float:
+        if precision + recall == 0.0:
+            return 0.0
+        return 2.0 * precision * recall / (precision + recall)
+
+    def _compute_per_atom_metrics(self, y_pred: np.ndarray, y_true: np.ndarray,
+                                  elements=None) -> Dict[str, Dict[str, float]]:
         metrics = {}
         for idx, atom in enumerate(self.atom_types):
             y_pred_binary = (y_pred == idx).astype(int)
@@ -158,9 +223,17 @@ class PerAtomMetricsCalculator:
                 continue 
             
             acc = accuracy_score(y_true_binary, y_pred_binary)
-            prec = precision_score(y_true_binary, y_pred_binary, zero_division=0)
             rec = recall_score(y_true_binary, y_pred_binary, zero_division=0)
-            f1 = f1_score(y_true_binary, y_pred_binary, zero_division=0)
+            if elements is None:
+                prec = precision_score(y_true_binary, y_pred_binary, zero_division=0)
+                f1 = f1_score(y_true_binary, y_pred_binary, zero_division=0)
+            else:
+                predicted_elements, target_elements = elements
+                row_elements = set(target_elements[y_true_binary.astype(bool)].tolist())
+                prec = self._element_precision(
+                    predicted_elements, target_elements, row_elements
+                )
+                f1 = self._f1(prec, rec)
             
             metrics[atom] = {
                 'Accuracy': float(acc),
@@ -171,7 +244,8 @@ class PerAtomMetricsCalculator:
             }
         return metrics
     
-    def _compute_group_metrics(self, y_pred: np.ndarray, y_true: np.ndarray) -> Dict[str, Dict[str, float]]:
+    def _compute_group_metrics(self, y_pred: np.ndarray, y_true: np.ndarray,
+                               elements=None) -> Dict[str, Dict[str, float]]:
         """Compute metrics for atom groups (Backbone, SideChain, etc.)."""
         metrics = {}
         
@@ -197,9 +271,17 @@ class PerAtomMetricsCalculator:
                 continue
             
             acc = accuracy_score(y_true_binary, y_pred_binary)
-            prec = precision_score(y_true_binary, y_pred_binary, zero_division=self.zero_division)
             rec = recall_score(y_true_binary, y_pred_binary, zero_division=self.zero_division)
-            f1 = f1_score(y_true_binary, y_pred_binary, zero_division=self.zero_division)
+            if elements is None:
+                prec = precision_score(y_true_binary, y_pred_binary, zero_division=self.zero_division)
+                f1 = f1_score(y_true_binary, y_pred_binary, zero_division=self.zero_division)
+            else:
+                predicted_elements, target_elements = elements
+                group_elements = set(target_elements[y_true_binary.astype(bool)].tolist())
+                prec = self._element_precision(
+                    predicted_elements, target_elements, group_elements
+                )
+                f1 = self._f1(prec, rec)
             support = y_true_binary.sum()
             
             metrics[group_name] = {
@@ -234,6 +316,38 @@ class PerAtomMetricsCalculator:
             'Total_Samples': int(len(y_true)),
         }
     
+    @staticmethod
+    def _compute_overall_metrics_from_rows(y_pred: np.ndarray, y_true: np.ndarray,
+                                           per_atom_metrics) -> Dict[str, float]:
+        """Macro/weighted averages over the vocabulary rows with support.
+
+        Element-aware predictions use an out-of-vocabulary label for wrong
+        elements; averaging with sklearn would add that label as an extra
+        zero-recall class, so the averages are taken over the real rows.
+        """
+        rows = list(per_atom_metrics.values())
+        supports = np.array([row['Support'] for row in rows], dtype=float)
+        total = supports.sum()
+
+        def macro(name):
+            return float(np.mean([row[name] for row in rows])) if rows else 0.0
+
+        def weighted(name):
+            if total == 0:
+                return 0.0
+            return float(sum(row[name] * row['Support'] for row in rows) / total)
+
+        return {
+            'Accuracy': float(accuracy_score(y_true, y_pred)),
+            'Precision_Macro': macro('Precision'),
+            'Recall_Macro': macro('Recall'),
+            'F1_Macro': macro('F1'),
+            'Precision_Weighted': weighted('Precision'),
+            'Recall_Weighted': weighted('Recall'),
+            'F1_Weighted': weighted('F1'),
+            'Total_Samples': int(len(y_true)),
+        }
+
     def get_wandb_logs(self, prefix: str = '', namespace: str = 'atom_metrics') -> Dict[str, float]:
         """
         Format metrics for WandB logging.
@@ -396,6 +510,25 @@ class BatchPerAtomMetricsCalculator:
         calc = PerAtomMetricsCalculator(atom_types=self.atom_types)
         calc.update(predictions, targets)
         return calc.compute()
+
+
+def require_wandb_logger_or_announce(callback, trainer, pl_module, label: str):
+    """Return the WandbLogger, raise if W&B is configured but absent.
+
+    Without W&B (use_wandb=false) the tables are printed only; this is said
+    once instead of skipping silently.
+    """
+    wandb_logger = next(
+        (lg for lg in trainer.loggers if isinstance(lg, WandbLogger)), None
+    )
+    if wandb_logger is not None:
+        return wandb_logger
+    if pl_module is not None and getattr(pl_module.config, 'use_wandb', False):
+        raise RuntimeError(f"{label}: use_wandb=true but the trainer has no WandbLogger")
+    if not callback._no_wandb_announced:
+        callback._no_wandb_announced = True
+        print(f"ℹ️  {label}: no W&B logger (use_wandb=false); metrics are printed only")
+    return None
 
 
 # =============================================================================

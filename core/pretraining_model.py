@@ -7,7 +7,7 @@ import bitsandbytes as bnb
 from torch import nn
 from torch.nn import functional as F
 from torch_geometric.utils import to_dense_batch
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Optional, List, Dict
 
 from esa.utils.norm_layers import BN, LN
@@ -190,6 +190,7 @@ class PretrainingESAModel(pl.LightningModule):
 
         # Pretraining tasks (all loss heads)
         self.pretraining_tasks = PretrainingTasks(config)
+        self._loss_skip_totals = Counter()
 
         self.equivariant_requested = bool(config.use_equivariant_features)
         self.equivariant_effective = bool(
@@ -900,27 +901,28 @@ class PretrainingESAModel(pl.LightningModule):
             total_loss += self.config.task_weights['long_range_distance'] * losses['long_range_distance']
 
         if "short_range_distance" in self.config.pretraining_tasks:
-            if hasattr(batch, 'edge_index') and hasattr(batch, 'pos'):
-                edge_index = getattr(
-                    batch, 'physical_edge_index', batch.edge_index
+            if getattr(batch, 'edge_index', None) is None or getattr(batch, 'pos', None) is None:
+                raise ValueError("short_range_distance requires batch.edge_index and batch.pos")
+            edge_index = getattr(
+                batch, 'physical_edge_index', batch.edge_index
+            )
+            pos = batch.pos
+            distances = torch.norm(pos[edge_index[1]] - pos[edge_index[0]], dim=1)
+            if is_training:
+                mask = (torch.rand(edge_index.size(1)) < 0.15).to(distances.device)
+            else:
+                mask = torch.ones(edge_index.size(1), dtype=torch.bool, device=distances.device)
+            template_nodes = getattr(batch, 'template_node_mask', None)
+            if template_nodes is not None:
+                mask = mask & ~(
+                    template_nodes[edge_index[0]]
+                    | template_nodes[edge_index[1]]
                 )
-                pos = batch.pos
-                distances = torch.norm(pos[edge_index[1]] - pos[edge_index[0]], dim=1)
-                if is_training:
-                    mask = (torch.rand(edge_index.size(1)) < 0.15).to(distances.device)
-                else:
-                    mask = torch.ones(edge_index.size(1), dtype=torch.bool, device=distances.device)
-                template_nodes = getattr(batch, 'template_node_mask', None)
-                if template_nodes is not None:
-                    mask = mask & ~(
-                        template_nodes[edge_index[0]]
-                        | template_nodes[edge_index[1]]
-                    )
-                dist_loss = self.pretraining_tasks.short_range_distance_loss(
-                    node_embeddings, edge_index, distances, mask
-                )
-                losses['short_range_distance'] = dist_loss
-                total_loss += self.config.task_weights['short_range_distance'] * dist_loss
+            dist_loss = self.pretraining_tasks.short_range_distance_loss(
+                node_embeddings, edge_index, distances, mask
+            )
+            losses['short_range_distance'] = dist_loss
+            total_loss += self.config.task_weights['short_range_distance'] * dist_loss
 
         if "mlm" in self.config.pretraining_tasks:
             losses['mlm'] = self.pretraining_tasks.mlm_loss(node_embeddings, batch)
@@ -940,8 +942,8 @@ class PretrainingESAModel(pl.LightningModule):
         Returns:
             Dict[str, Dict[str, float]]: {dtype: {task: loss_value}}
         """
-        if not hasattr(batch, 'dataset_type'):
-            return {}
+        if getattr(batch, 'dataset_type', None) is None:
+            raise ValueError("compute_per_type_losses requires batch.dataset_type")
 
         type_losses = {}
         unique_types = set(batch.dataset_type) if isinstance(batch.dataset_type, (list, tuple)) else {batch.dataset_type}
@@ -963,126 +965,172 @@ class PretrainingESAModel(pl.LightningModule):
             dtype_total = 0.0
 
             if "short_range_distance" in self.config.pretraining_tasks:
-                if hasattr(batch, 'edge_index') and batch.edge_index is not None and hasattr(batch, 'pos') and batch.pos is not None:
-                    source_edge_index = getattr(
-                        batch, 'physical_edge_index', batch.edge_index
+                if getattr(batch, 'edge_index', None) is None or getattr(batch, 'pos', None) is None:
+                    raise ValueError("short_range_distance requires batch.edge_index and batch.pos")
+                source_edge_index = getattr(
+                    batch, 'physical_edge_index', batch.edge_index
+                )
+                edge_mask = node_mask[source_edge_index[0]] & node_mask[source_edge_index[1]]
+                if edge_mask.sum() == 0:
+                    # Legitimate when every graph of this domain in the batch
+                    # has no physical edge (e.g. single-atom molecules).
+                    self.pretraining_tasks.record_loss_skip(
+                        "short_range_distance", "no_edges", scope=dtype
                     )
-                    edge_mask = node_mask[source_edge_index[0]] & node_mask[source_edge_index[1]]
-                    if edge_mask.sum() > 0:
-                        masked_edge_index = source_edge_index[:, edge_mask]
-                        masked_pos = batch.pos[node_mask]
-                        node_mapping = torch.zeros(batch.num_nodes, dtype=torch.long, device=device)
-                        node_mapping[node_mask] = torch.arange(node_mask.sum(), device=device)
-                        remapped_edge_index = node_mapping[masked_edge_index]
-                        distances = torch.norm(
-                            masked_pos[remapped_edge_index[1]] - masked_pos[remapped_edge_index[0]], dim=1
+                else:
+                    masked_edge_index = source_edge_index[:, edge_mask]
+                    masked_pos = batch.pos[node_mask]
+                    node_mapping = torch.zeros(batch.num_nodes, dtype=torch.long, device=device)
+                    node_mapping[node_mask] = torch.arange(node_mask.sum(), device=device)
+                    remapped_edge_index = node_mapping[masked_edge_index]
+                    distances = torch.norm(
+                        masked_pos[remapped_edge_index[1]] - masked_pos[remapped_edge_index[0]], dim=1
+                    )
+                    if is_training:
+                        random_mask = (torch.rand(remapped_edge_index.size(1)) < 0.15).to(distances.device)
+                    else:
+                        random_mask = torch.ones(remapped_edge_index.size(1), dtype=torch.bool, device=distances.device)
+                    template_nodes = getattr(batch, 'template_node_mask', None)
+                    if template_nodes is not None:
+                        global_edges = masked_edge_index
+                        random_mask = random_mask & ~(
+                            template_nodes[global_edges[0]]
+                            | template_nodes[global_edges[1]]
                         )
-                        if is_training:
-                            random_mask = (torch.rand(remapped_edge_index.size(1)) < 0.15).to(distances.device)
-                        else:
-                            random_mask = torch.ones(remapped_edge_index.size(1), dtype=torch.bool, device=distances.device)
-                        template_nodes = getattr(batch, 'template_node_mask', None)
-                        if template_nodes is not None:
-                            global_edges = masked_edge_index
-                            random_mask = random_mask & ~(
-                                template_nodes[global_edges[0]]
-                                | template_nodes[global_edges[1]]
-                            )
-                        masked_node_emb = node_embeddings[node_mask]
-                        dist_loss = self.pretraining_tasks.short_range_distance_loss(
-                            masked_node_emb, remapped_edge_index, distances, random_mask
-                        )
-                        dtype_losses['short_range_distance'] = dist_loss
-                        dtype_total += self.config.task_weights['short_range_distance'] * dist_loss
+                    masked_node_emb = node_embeddings[node_mask]
+                    dist_loss = self.pretraining_tasks.short_range_distance_loss(
+                        masked_node_emb, remapped_edge_index, distances, random_mask,
+                        scope=dtype,
+                    )
+                    dtype_losses['short_range_distance'] = dist_loss
+                    dtype_total += self.config.task_weights['short_range_distance'] * dist_loss
 
             if "long_range_distance" in self.config.pretraining_tasks:
-                if hasattr(batch, 'pos') and batch.pos is not None:
+                if getattr(batch, 'pos', None) is None:
+                    raise ValueError("long_range_distance requires batch.pos")
+                masked_batch = batch.__class__()
+                if hasattr(batch, 'x') and batch.x is not None:
+                    masked_batch.x = batch.x[node_mask]
+                masked_batch.pos = batch.pos[node_mask]
+                _, compact_graph_ids = torch.unique(
+                    batch.batch[node_mask], sorted=True, return_inverse=True
+                )
+                masked_batch.batch = compact_graph_ids
+                masked_batch.num_graphs = int(
+                    compact_graph_ids.max().item()
+                ) + 1
+                if getattr(batch, 'template_node_mask', None) is not None:
+                    masked_batch.template_node_mask = batch.template_node_mask[node_mask]
+                if getattr(batch, 'geometry_valid_mask', None) is not None:
+                    masked_batch.geometry_valid_mask = batch.geometry_valid_mask[node_mask]
+                masked_node_emb = node_embeddings[node_mask]
+                long_range_loss = self.pretraining_tasks.long_range_distance_loss(
+                    masked_node_emb, masked_batch, scope=dtype
+                )
+                dtype_losses['long_range_distance'] = long_range_loss
+                dtype_total += self.config.task_weights['long_range_distance'] * long_range_loss
+
+            # Per-type MLM tracking is enabled for ALL dataset types — including
+            # protein/pdb. When `protein_block_mlm` / `rna_block_mlm` is active
+            # the loss is logged under the `block_mlm` task key so W&B shows
+            # e.g. `val_pdb_block_mlm_loss` distinctly from atom-level runs.
+            if "mlm" in self.config.pretraining_tasks:
+                if getattr(batch, 'mlm_mask', None) is None:
+                    raise ValueError("per-type MLM loss requires batch.mlm_mask")
+                masked_mlm = batch.mlm_mask[node_mask]
+                if masked_mlm.sum() == 0:
+                    # Legitimate when no block of this domain's graphs was
+                    # eligible for masking; the key is not logged as 0.0.
+                    self.pretraining_tasks.record_loss_skip(
+                        "mlm", "no_masked_atoms", scope=dtype
+                    )
+                else:
                     masked_batch = batch.__class__()
                     if hasattr(batch, 'x') and batch.x is not None:
                         masked_batch.x = batch.x[node_mask]
-                    masked_batch.pos = batch.pos[node_mask]
-                    _, compact_graph_ids = torch.unique(
-                        batch.batch[node_mask], sorted=True, return_inverse=True
-                    )
-                    masked_batch.batch = compact_graph_ids
-                    masked_batch.num_graphs = int(
-                        compact_graph_ids.max().item()
-                    ) + 1
-                    if getattr(batch, 'template_node_mask', None) is not None:
-                        masked_batch.template_node_mask = batch.template_node_mask[node_mask]
-                    if getattr(batch, 'geometry_valid_mask', None) is not None:
-                        masked_batch.geometry_valid_mask = batch.geometry_valid_mask[node_mask]
+                    if hasattr(batch, 'z') and batch.z is not None:
+                        masked_batch.z = batch.z[node_mask]
+                    masked_batch.mlm_mask = masked_mlm
+                    if getattr(batch, 'original_types', None) is not None:
+                        masked_batch.original_types = batch.original_types[node_mask]
+                    if getattr(batch, 'masked_types', None) is not None:
+                        masked_batch.masked_types = batch.masked_types[node_mask]
+                    if (
+                        hasattr(batch, 'domain_local_slot_ids')
+                        and batch.domain_local_slot_ids is not None
+                    ):
+                        masked_batch.domain_local_slot_ids = (
+                            batch.domain_local_slot_ids[node_mask]
+                        )
                     masked_node_emb = node_embeddings[node_mask]
-                    long_range_loss = self.pretraining_tasks.long_range_distance_loss(masked_node_emb, masked_batch)
-                    dtype_losses['long_range_distance'] = long_range_loss
-                    dtype_total += self.config.task_weights['long_range_distance'] * long_range_loss
-
-            # Per-type MLM tracking is enabled for ALL dataset types — including
-            # protein/pdb. The previous protein skip was a leftover from older
-            # protein-loss experiments. When `protein_block_mlm` is active and
-            # the dtype is a protein, the loss is logged under the `block_mlm`
-            # task key so W&B shows e.g. `val_pdb_block_mlm_loss` or
-            # `val_rna_block_mlm_loss` distinctly from atom-level runs.
-            if "mlm" in self.config.pretraining_tasks:
-                if hasattr(batch, 'mlm_mask') and batch.mlm_mask is not None:
-                    masked_mlm = batch.mlm_mask[node_mask]
-                    if masked_mlm.sum() > 0:
-                        masked_batch = batch.__class__()
-                        if hasattr(batch, 'x') and batch.x is not None:
-                            masked_batch.x = batch.x[node_mask]
-                        if hasattr(batch, 'z') and batch.z is not None:
-                            masked_batch.z = batch.z[node_mask]
-                        masked_batch.mlm_mask = masked_mlm
-                        if hasattr(batch, 'original_types') and batch.original_types is not None:
-                            masked_batch.original_types = batch.original_types[node_mask]
-                        if hasattr(batch, 'masked_types') and batch.masked_types is not None:
-                            masked_batch.masked_types = batch.masked_types[node_mask]
-                        if (
-                            hasattr(batch, 'domain_local_slot_ids')
-                            and batch.domain_local_slot_ids is not None
-                        ):
-                            masked_batch.domain_local_slot_ids = (
-                                batch.domain_local_slot_ids[node_mask]
-                            )
-                        masked_node_emb = node_embeddings[node_mask]
-                        try:
-                            mlm_loss = self.pretraining_tasks.mlm_loss(masked_node_emb, masked_batch)
-                            normalized_dtype = dtype.lower()
-                            protein_block_active = (
-                                normalized_dtype in ('protein', 'pdb')
-                                and getattr(self.config, 'protein_block_mlm', False)
-                            )
-                            rna_block_active = (
-                                normalized_dtype == 'rna'
-                                and getattr(self.config, 'rna_block_mlm', False)
-                            )
-                            key = (
-                                'block_mlm'
-                                if protein_block_active or rna_block_active
-                                else 'mlm'
-                            )
-                            dtype_losses[key] = mlm_loss
-                            dtype_total += self.config.task_weights['mlm'] * mlm_loss
-                        except (AssertionError, AttributeError):
-                            pass
+                    mlm_loss = self.pretraining_tasks.mlm_loss(
+                        masked_node_emb, masked_batch, scope=dtype
+                    )
+                    normalized_dtype = dtype.lower()
+                    protein_block_active = (
+                        normalized_dtype in ('protein', 'pdb')
+                        and getattr(self.config, 'protein_block_mlm', False)
+                    )
+                    rna_block_active = (
+                        normalized_dtype == 'rna'
+                        and getattr(self.config, 'rna_block_mlm', False)
+                    )
+                    key = (
+                        'block_mlm'
+                        if protein_block_active or rna_block_active
+                        else 'mlm'
+                    )
+                    dtype_losses[key] = mlm_loss
+                    dtype_total += self.config.task_weights['mlm'] * mlm_loss
 
             if "coordinate_denoising" in self.config.pretraining_tasks:
-                if hasattr(batch, 'clean_pos') and batch.clean_pos is not None and getattr(batch, 'coord_mask', None) is not None:
-                    masked_coord = batch.coord_mask[node_mask]
-                    if masked_coord.sum() > 0:
-                        masked_batch = batch.__class__()
-                        masked_batch.clean_pos = batch.clean_pos[node_mask]
-                        masked_batch.pos = batch.pos[node_mask]
-                        masked_batch.coord_mask = masked_coord
-                        masked_node_emb = node_embeddings[node_mask]
-                        coord_loss = self.pretraining_tasks.coordinate_denoising_loss(masked_node_emb, masked_batch)
-                        dtype_losses['coordinate_denoising'] = coord_loss
-                        dtype_total += self.config.task_weights.get('coordinate_denoising', 1.0) * coord_loss
+                if getattr(batch, 'clean_pos', None) is None or getattr(batch, 'coord_mask', None) is None:
+                    raise ValueError(
+                        "per-type coordinate_denoising requires batch.clean_pos and batch.coord_mask"
+                    )
+                masked_coord = batch.coord_mask[node_mask]
+                if masked_coord.sum() == 0:
+                    self.pretraining_tasks.record_loss_skip(
+                        "coordinate_denoising", "no_masked_atoms", scope=dtype
+                    )
+                else:
+                    masked_batch = batch.__class__()
+                    masked_batch.clean_pos = batch.clean_pos[node_mask]
+                    masked_batch.pos = batch.pos[node_mask]
+                    masked_batch.coord_mask = masked_coord
+                    masked_node_emb = node_embeddings[node_mask]
+                    coord_loss = self.pretraining_tasks.coordinate_denoising_loss(
+                        masked_node_emb, masked_batch, scope=dtype
+                    )
+                    dtype_losses['coordinate_denoising'] = coord_loss
+                    dtype_total += self.config.task_weights.get('coordinate_denoising', 1.0) * coord_loss
 
             dtype_losses['total'] = dtype_total
             type_losses[dtype] = dtype_losses
 
         return type_losses
+
+    def _log_loss_skips(self, stage: str) -> None:
+        """Log the legitimate empty-loss cases counted by the task heads.
+
+        Train values are cumulative since process start (robust to the
+        log_every_n_steps cadence); val/test values are per-epoch sums.
+        """
+        skips = self.pretraining_tasks.pop_loss_skips()
+        for key, count in sorted(skips.items()):
+            name = f"loss_skipped/{stage}_{key}"
+            if name not in self._loss_skip_totals:
+                print(
+                    f"ℹ️  {name}: legitimate empty loss case (zero loss, or "
+                    "per-type key omitted); counted under this W&B key"
+                )
+            self._loss_skip_totals[name] += count
+            if stage == "train":
+                self.log(name, float(self._loss_skip_totals[name]), on_step=True,
+                         on_epoch=False, logger=True, batch_size=1)
+            else:
+                self.log(name, float(count), on_step=False, on_epoch=True,
+                         reduce_fx="sum", logger=True, batch_size=1)
 
     def _audit_representation_gradient_norms(
         self,
@@ -1254,6 +1302,7 @@ class PretrainingESAModel(pl.LightningModule):
                     loss_str = " | ".join([f"{k}: {v:.4f}" for k, v in dtype_losses.items() if k != 'total'])
                     print(f"    {dtype.upper():12s}: {loss_str} | Total: {dtype_losses['total']:.4f}")
 
+        self._log_loss_skips("train")
         return total_loss
 
     @staticmethod
@@ -1431,6 +1480,7 @@ class PretrainingESAModel(pl.LightningModule):
             for dtype, dtype_losses in type_losses.items():
                 for task_name, loss_value in dtype_losses.items():
                     self.log(f"val_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True, sync_dist=True)
+        self._log_loss_skips("val")
 
         outputs = {'loss': total_loss}
         if "mlm" in self.config.pretraining_tasks:
@@ -1471,6 +1521,7 @@ class PretrainingESAModel(pl.LightningModule):
             for dtype, dtype_losses in type_losses.items():
                 for task_name, loss_value in dtype_losses.items():
                     self.log(f"test_{dtype}_{task_name}_loss", loss_value, on_epoch=True, logger=True)
+        self._log_loss_skips("test")
 
         outputs = {'loss': total_loss}
         if "mlm" in self.config.pretraining_tasks:
