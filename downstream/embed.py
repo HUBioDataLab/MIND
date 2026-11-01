@@ -1,6 +1,7 @@
 """Extract and cache chain embeddings for a downstream task (GPU workload; user-run via Make).
 
     python -m downstream.embed --task ec --model current_best --device cuda:0
+    python -m downstream.embed --task lba --model current_best --device cuda:0 [--representation joint]
     python -m downstream.embed --task ec --model current_best --random-init --device cuda:0
     python -m downstream.embed --task ec --model esm2_t12_35M_UR50D --hf-cache-dir DIR --device cuda:0
 
@@ -27,12 +28,10 @@ from downstream.common import encoder as mind_encoder
 from downstream.common.registry import (
     RANDOM_INIT_SUFFIX, embeddings_path, git_commit, resolve_model, sha256_file,
 )
-from downstream.tasks.ec.dataset import TASK_YAML, ProcessedSplit, load_task_config, processed_dir
-
-TASK_CONFIGS = {"ec": TASK_YAML}
+from downstream.tasks import TASKS, load_task
 
 
-def batches_by_atoms(split: ProcessedSplit, model_config, *, seed: int, max_atoms: int):
+def batches_by_atoms(split, model_config, *, seed: int, max_atoms: int):
     """Yield ``(indices, samples)`` in stored order with at most ``max_atoms`` nodes per batch."""
     indices, samples, atoms = [], [], 0
     for index, sample in split.iter_runtime(model_config, seed=seed):
@@ -46,7 +45,7 @@ def batches_by_atoms(split: ProcessedSplit, model_config, *, seed: int, max_atom
         yield indices, samples
 
 
-def embed_split_mind(model, split: ProcessedSplit, device, *, seed: int, poolings: Sequence[str],
+def embed_split_mind(model, split, device, *, seed: int, poolings: Sequence[str],
                      max_atoms: int) -> Dict[str, np.ndarray]:
     """Chain embeddings ``{pooling: [num_chains, D]}`` for one processed split."""
     per_sample = {mode: [None] * len(split) for mode in poolings}
@@ -60,7 +59,7 @@ def embed_split_mind(model, split: ProcessedSplit, device, *, seed: int, pooling
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--task", required=True, choices=sorted(TASK_CONFIGS))
+    parser.add_argument("--task", required=True, choices=sorted(TASKS))
     parser.add_argument("--model", required=True, help="snapshot name/alias, or an ESM-2 name")
     parser.add_argument("--random-init", action="store_true", help="same architecture, untrained weights")
     parser.add_argument("--init-seed", type=int, default=0)
@@ -72,12 +71,32 @@ def main(argv=None) -> int:
     parser.add_argument("--hf-local-files-only", action="store_true")
     parser.add_argument("--esm-batch-size", type=int, default=8)
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
+    parser.add_argument("--split-tag", default=None, help="LBA only: identity30 (default) | identity60")
+    parser.add_argument("--representation", default=None, help="LBA only: joint (default) | separate")
     args = parser.parse_args(argv)
     if args.threads < 1:
         parser.error("--threads must be at least 1")
     torch.set_num_threads(args.threads)
 
-    config = load_task_config(TASK_CONFIGS[args.task], data_root=args.data_root)
+    task = load_task(args.task)
+    if args.task != "lba" and (args.split_tag or args.representation):
+        parser.error("--split-tag and --representation apply to the lba task only")
+    config = task.load_task_config(task.TASK_YAML, data_root=args.data_root)
+    ProcessedSplit = task.ProcessedSplit
+    split_kwargs, embedding_prefix = {}, ""
+    if args.task == "lba":
+        split_tag = args.split_tag or config["primary_split_tag"]
+        representation = args.representation or config["representation"]
+        if representation not in config["representations"]:
+            parser.error(f"--representation must be one of {config['representations']}")
+        split_kwargs = {"representation": representation}
+        # Split tag and representation change the data, so they must not share
+        # an embeddings directory with another combination.
+        embedding_prefix = f"{split_tag}.{representation}."
+        processed_dir = lambda cfg: task.processed_dir(cfg, split_tag)  # noqa: E731
+    else:
+        representation = None
+        processed_dir = task.processed_dir
     device = torch.device(args.device)
     if device.type == "cuda":
         enable_deterministic_algorithms()
@@ -106,15 +125,17 @@ def main(argv=None) -> int:
         if args.random_init:
             model_id += RANDOM_INIT_SUFFIX + (f"_s{args.init_seed}" if args.init_seed else "")
         poolings = list(config["embedding"]["poolings"])
+        if args.task == "lba" and representation == "separate":
+            poolings = list(config["embedding"]["poolings_separate"])
         provenance.update(model_ref=args.model, snapshot=resolved.model_id, sha256=resolved.card["sha256"],
                           random_init=args.random_init, init_seed=args.init_seed)
 
     for split_name in args.splits or config["splits"]:
-        out = embeddings_path(args.task, model_id, split_name, root=args.outputs_root)
+        out = embeddings_path(args.task, model_id, f"{embedding_prefix}{split_name}", root=args.outputs_root)
         if out.exists():
             raise FileExistsError(f"refusing to overwrite {out}")
         source = processed_dir(config) / f"{split_name}.pt"
-        split = ProcessedSplit(source)
+        split = ProcessedSplit(source, **split_kwargs)
         started = time.monotonic()
         if is_esm:
             arrays = {esm2.POOLING: esm2.embed_sequences(tokenizer, model, split.sequences, device,
@@ -123,9 +144,10 @@ def main(argv=None) -> int:
             arrays = embed_split_mind(model, split, device, seed=seed, poolings=poolings,
                                       max_atoms=int(config["embedding"]["max_atoms_per_batch"]))
         out.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(out, chains=np.array(split.chains), labels=split.labels,
+        np.savez(out, chains=np.array(split.chains), labels=np.asarray(split.labels),
                  **{f"emb_{mode}": value for mode, value in arrays.items()})
-        record = dict(provenance, split=split_name, model_id=model_id, processed=str(source),
+        record = dict(provenance, split=split_name, split_tag=args.split_tag, representation=representation,
+                      model_id=model_id, processed=str(source),
                       processed_sha256=sha256_file(source), chains=len(split.chains),
                       poolings=sorted(arrays), dim=int(next(iter(arrays.values())).shape[1]),
                       seconds=round(time.monotonic() - started, 1))

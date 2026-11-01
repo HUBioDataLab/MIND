@@ -158,6 +158,15 @@ status:
 	@echo "=== MIND Training (all users) ==="
 	@ps -eo user:12,pid,etime,args | grep '[t]rain_pretrain\|core[./]train' | grep -v grep || echo "  (no MIND training running)"
 	@echo ""
+	@echo "=== MIND Downstream / Evaluation (all users) ==="
+	@out=$$(ps -eo user:12,pid,etime,args | grep '[d]ownstream\.\(embed\|probe\|finetune\|report\)\|[c]ore\.evaluate_pretrain' | \
+		sed -E 's/--threads [0-9]+ //' | cut -c1-150); \
+		[ -n "$$out" ] && echo "$$out" || echo "  (none)"
+	@echo ""
+	@echo "=== Chain scripts (run_*_chain.sh, run_*_finetune.sh) ==="
+	@out=$$(ps -eo user:12,pid,etime,args | grep '[r]un_[a-z_]*\.sh' | cut -c1-120); \
+		[ -n "$$out" ] && echo "$$out" || echo "  (none)"
+	@echo ""
 	@echo "=== MIND Data Processing (all users) ==="
 	@ps -eo user:12,pid,args | grep '[c]ache_to_pyg\|create_chunk' | grep -v grep | \
 		awk '{print $$1}' | sort | uniq -c | \
@@ -218,10 +227,13 @@ eval-pretrain:
 # overrides it).
 #   make ds-snapshot CKPT=<ckpt> NAME=<snapshot> [ALIAS=current_best]
 #   make ds-download TASK=ec            make ds-process TASK=ec WORKERS=16
+#   make ds-download TASK=lba           make ds-process TASK=lba [TAGS="identity30 identity60"]
 #   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
 #   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]
 #   make ds-report TASK=ec
+# LBA adds SPLIT_TAG=identity30|identity60 and REPRESENTATION=joint|separate to
+# ds-embed and ds-probe (ds-finetune takes SPLIT_TAG only; it is joint-only).
 # ===================================================================
 
 TASK ?= ec
@@ -233,7 +245,19 @@ DS_THREADS ?= 8
 DS_ENV := OMP_NUM_THREADS=$(DS_THREADS) OPENBLAS_NUM_THREADS=$(DS_THREADS) MKL_NUM_THREADS=$(DS_THREADS)
 DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
 DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
+# Fine-tune overrides: a random-init encoder needs a far larger LR than a pretrained one.
+FT_ARGS ?=
 DS_HF_ARGS := $(if $(filter esm2_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
+# LBA-only selectors; empty for every other task so their CLIs never see them.
+SPLIT_TAG ?=
+REPRESENTATION ?=
+TAGS ?=
+DS_SPLIT_TAG_ARGS := $(if $(strip $(SPLIT_TAG)),--split-tag $(SPLIT_TAG),)
+DS_LBA_ARGS := $(DS_SPLIT_TAG_ARGS) $(if $(strip $(REPRESENTATION)),--representation $(REPRESENTATION),)
+# ec prepare parallelizes structure parsing with --workers; lba reads one LMDB
+# sequentially and only bounds its torch threads.
+DS_PROCESS_ARGS = $(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS))
+DS_DOWNLOAD_ARGS = $(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),)
 
 .PHONY: ds-snapshot ds-download ds-process ds-embed ds-probe ds-finetune ds-report test-downstream
 
@@ -244,8 +268,8 @@ ds-snapshot:
 
 ds-download ds-process:
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(TASK).prepare $(patsubst ds-%,%,$@) \
-		$(if $(filter ds-process,$@),--workers $(WORKERS),) 2>&1 | tee $(call DS_LOG,$(patsubst ds-%,%,$@))
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(TASK).prepare $(patsubst ds-%,%,$@) \
+		$(if $(filter ds-process,$@),$(DS_PROCESS_ARGS),$(DS_DOWNLOAD_ARGS)) 2>&1 | tee $(call DS_LOG,$(patsubst ds-%,%,$@))
 
 ds-embed ds-finetune:
 	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name, alias or ESM-2 name)"; exit 1; }
@@ -253,7 +277,7 @@ ds-embed ds-finetune:
 	@mkdir -p $(LOG_MONTH_DIR)
 	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -u -m downstream.$(patsubst ds-%,%,$@) \
 		--threads $(DS_THREADS) --task $(TASK) --model "$(MODEL)" --device cuda:0 $(DS_RANDOM_INIT_ARGS) \
-		$(if $(filter ds-embed,$@),$(DS_HF_ARGS),--seeds $(SEEDS)) \
+		$(if $(filter ds-embed,$@),$(DS_HF_ARGS) $(DS_LBA_ARGS),--seeds $(SEEDS) $(DS_SPLIT_TAG_ARGS) $(FT_ARGS)) \
 		> $(call DS_LOG,$(patsubst ds-%,%,$@)) 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Log: $(call DS_LOG,$(patsubst ds-%,%,$@))"
 
@@ -261,7 +285,7 @@ ds-probe:
 	@test -n "$(MODEL_ID)" || { echo "ERROR: set MODEL_ID (snapshot, <snapshot>.random_init or ESM-2 name)"; exit 1; }
 	@mkdir -p $(LOG_MONTH_DIR)
 	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --threads $(DS_THREADS) --task $(TASK) --model-id "$(MODEL_ID)" \
-		--head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) \
+		--head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) $(DS_LBA_ARGS) \
 		2>&1 | tee $(call DS_LOG,probe_$(HEAD))
 
 ds-report:
@@ -295,6 +319,9 @@ help:
 	@echo "    make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp"
 	@echo "    make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id>   (GPU, long)"
 	@echo "    make ds-report TASK=ec / make test-downstream"
+	@echo "    LBA: make ds-download TASK=lba / ds-process TASK=lba"
+	@echo "         make ds-embed TASK=lba MODEL=<snapshot> GPU=<id> [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
+	@echo "         make ds-probe TASK=lba MODEL_ID=<id> HEAD=mlp [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"
 	@echo "    make logs                            List recent log files"

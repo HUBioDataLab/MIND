@@ -85,3 +85,68 @@ def evaluate(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
         "subset_accuracy@0.5": subset_accuracy(labels, scores),
         "num_proteins": int(len(labels)),
     }
+
+
+# ---------------------------------------------------------------------------
+# Regression metrics (ATOM3D LBA: pK). RMSE is the primary number.
+# ---------------------------------------------------------------------------
+
+def _check_regression(targets: np.ndarray, predictions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    targets = np.asarray(targets, dtype=np.float64).reshape(-1)
+    predictions = np.asarray(predictions, dtype=np.float64).reshape(-1)
+    if targets.shape != predictions.shape:
+        raise ValueError(f"targets {targets.shape} and predictions {predictions.shape} differ")
+    if targets.size == 0:
+        raise ValueError("regression metrics need at least one sample")
+    if not np.isfinite(targets).all():
+        raise ValueError("targets contain NaN or inf")
+    if not np.isfinite(predictions).all():
+        raise ValueError("predictions contain NaN or inf")
+    return targets, predictions
+
+
+def rmse(targets: np.ndarray, predictions: np.ndarray) -> float:
+    targets, predictions = _check_regression(targets, predictions)
+    return float(np.sqrt(np.mean((targets - predictions) ** 2)))
+
+
+def mae(targets: np.ndarray, predictions: np.ndarray) -> float:
+    targets, predictions = _check_regression(targets, predictions)
+    return float(np.mean(np.abs(targets - predictions)))
+
+
+def pearson_r(targets: np.ndarray, predictions: np.ndarray) -> float:
+    """Pearson correlation; a constant prediction or target has no correlation."""
+    targets, predictions = _check_regression(targets, predictions)
+    if targets.size < 2:
+        raise ValueError("Pearson r needs at least two samples")
+    if targets.std() == 0 or predictions.std() == 0:
+        raise ValueError("Pearson r is undefined for a constant target or prediction")
+    from scipy.stats import pearsonr
+
+    return float(pearsonr(targets, predictions)[0])
+
+
+def spearman_rho(targets: np.ndarray, predictions: np.ndarray) -> float:
+    targets, predictions = _check_regression(targets, predictions)
+    if targets.size < 2:
+        raise ValueError("Spearman rho needs at least two samples")
+    from scipy.stats import spearmanr
+
+    value = float(spearmanr(targets, predictions).statistic)
+    if not np.isfinite(value):
+        raise ValueError("Spearman rho is undefined (constant target or prediction)")
+    return value
+
+
+def evaluate_regression(targets: np.ndarray, predictions: np.ndarray) -> Dict[str, float]:
+    checked_targets, checked_predictions = _check_regression(targets, predictions)
+    return {
+        "rmse": rmse(checked_targets, checked_predictions),
+        "mae": mae(checked_targets, checked_predictions),
+        "pearson_r": pearson_r(checked_targets, checked_predictions),
+        "spearman_rho": spearman_rho(checked_targets, checked_predictions),
+        "num_samples": int(checked_targets.size),
+        "target_mean": float(checked_targets.mean()),
+        "target_std": float(checked_targets.std()),
+    }

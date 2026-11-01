@@ -1,11 +1,19 @@
-"""Train probe heads on cached chain embeddings (CPU is enough).
+"""Train probe heads on cached embeddings (CPU is enough).
 
-    python -m downstream.probe --task ec --model-id <snapshot|snapshot.random_init|esm2_...> --head linear
+    python -m downstream.probe --task ec  --model-id <snapshot|snapshot.random_init|esm2_...> --head linear
+    python -m downstream.probe --task lba --model-id <snapshot> --head mlp [--split-tag identity30]
 
-Per seed: features are standardized with train statistics, the head is trained
-with BCE, the epoch with the best validation Fmax is kept (early stopping on
-``patience``), and the test split is evaluated overall and per identity cutoff.
-Results go to ``outputs/downstream/<task>/<model_id>/<head>_probe.<pooling>/seed<k>/``.
+Per seed: features are standardized with train statistics, the head is trained,
+the epoch with the best validation metric is kept (early stopping on
+``patience``), and the test split is evaluated.
+
+``ec``  multi-label, BCE loss, validation Fmax maximized, test also evaluated
+        per sequence-identity cutoff.
+``lba`` single-value regression, MSE (or Huber) loss, validation **RMSE
+        minimized** (lower is better), test reported as RMSE / Pearson r /
+        Spearman rho.
+
+Results go to ``outputs/downstream/<task>/<model_id>/<protocol>.<pooling>/seed<k>/``.
 """
 
 from __future__ import annotations
@@ -21,11 +29,9 @@ import torch
 from torch import nn
 
 from downstream.common.heads import HEADS, build_head
-from downstream.common.metrics import evaluate, protein_fmax
+from downstream.common.metrics import evaluate, evaluate_regression, protein_fmax, rmse
 from downstream.common.registry import embeddings_path, new_results_dir
-from downstream.tasks.ec.dataset import TASK_YAML, load_task_config, test_subsets
-
-TASK_CONFIGS = {"ec": TASK_YAML}
+from downstream.tasks import TASKS, load_task
 
 
 def load_embeddings(task: str, model_id: str, split: str, pooling: str, root=None):
@@ -45,19 +51,45 @@ def evaluate_with_cutoffs(labels: np.ndarray, scores: np.ndarray, subsets: Dict[
 
 
 @torch.no_grad()
-def predict(head: nn.Module, features: torch.Tensor) -> np.ndarray:
+def predict(head: nn.Module, features: torch.Tensor, *, kind: str = "multilabel") -> np.ndarray:
     head.eval()
-    return torch.sigmoid(head(features)).numpy()
+    output = head(features)
+    if kind == "multilabel":
+        return torch.sigmoid(output).numpy()
+    return output.squeeze(-1).numpy()
 
 
-def train_probe(train_x, train_y, val_x, val_y, *, head_kind, settings, seed, log):
+def build_loss(kind: str, settings: dict) -> nn.Module:
+    if kind == "multilabel":
+        return nn.BCEWithLogitsLoss()
+    loss = settings.get("loss", "mse")
+    if loss == "mse":
+        return nn.MSELoss()
+    if loss == "huber":
+        return nn.HuberLoss(delta=float(settings["huber_delta"]))
+    raise ValueError(f"unknown regression loss {loss!r}; choose from mse, huber")
+
+
+def validation_score(kind: str, targets: np.ndarray, predictions: np.ndarray) -> float:
+    """Higher is better, so one early-stopping rule covers both task kinds.
+
+    EC maximizes Fmax directly; LBA minimizes RMSE, so the negative RMSE is
+    returned. Never compare these two numbers across tasks.
+    """
+    if kind == "multilabel":
+        return protein_fmax(targets, predictions)["fmax"]
+    return -rmse(targets.reshape(-1), predictions.reshape(-1))
+
+
+def train_probe(train_x, train_y, val_x, val_y, *, head_kind, settings, seed, log, kind="multilabel"):
     torch.manual_seed(seed)
-    head = build_head(head_kind, train_x.shape[1], train_y.shape[1],
+    out_dim = 1 if kind == "regression" else train_y.shape[1]
+    head = build_head(head_kind, train_x.shape[1], out_dim,
                       hidden_dim=settings["mlp_hidden"], dropout=settings["mlp_dropout"])
     optimizer = torch.optim.AdamW(head.parameters(), lr=settings["lr"], weight_decay=settings["weight_decay"])
-    loss_fn = nn.BCEWithLogitsLoss()
+    loss_fn = build_loss(kind, settings)
     generator = torch.Generator().manual_seed(seed)
-    best = {"fmax": -1.0, "epoch": -1, "state": None}
+    best = {"score": -float("inf"), "epoch": -1, "state": None}
     for epoch in range(settings["epochs"]):
         head.train()
         order = torch.randperm(len(train_x), generator=generator)
@@ -65,63 +97,98 @@ def train_probe(train_x, train_y, val_x, val_y, *, head_kind, settings, seed, lo
         for start in range(0, len(order), settings["batch_size"]):
             rows = order[start:start + settings["batch_size"]]
             optimizer.zero_grad()
-            loss = loss_fn(head(train_x[rows]), train_y[rows])
+            output = head(train_x[rows])
+            target = train_y[rows]
+            loss = (loss_fn(output.squeeze(-1), target.reshape(-1)) if kind == "regression"
+                    else loss_fn(output, target))
             loss.backward()
             optimizer.step()
             total += float(loss) * len(rows)
-        val_fmax = protein_fmax(val_y.numpy(), predict(head, val_x))["fmax"]
-        log(f"epoch {epoch} train_bce {total / len(order):.5f} val_fmax {val_fmax:.4f}")
-        if val_fmax > best["fmax"]:
-            best = {"fmax": val_fmax, "epoch": epoch, "state": copy.deepcopy(head.state_dict())}
+        score = validation_score(kind, val_y.numpy(), predict(head, val_x, kind=kind))
+        label, shown = ("val_fmax", score) if kind == "multilabel" else ("val_rmse", -score)
+        log(f"epoch {epoch} train_loss {total / len(order):.5f} {label} {shown:.4f}")
+        if score > best["score"]:
+            best = {"score": score, "epoch": epoch, "state": copy.deepcopy(head.state_dict())}
         elif epoch - best["epoch"] >= settings["patience"]:
             log(f"early stop at epoch {epoch}; best epoch {best['epoch']}")
             break
+    if best["state"] is None:
+        raise RuntimeError("probe training produced no validated epoch")
     head.load_state_dict(best["state"])
+    best["fmax"] = best["score"]  # kept for the EC callers that read this key
     return head, best
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--task", required=True, choices=sorted(TASK_CONFIGS))
+    parser.add_argument("--task", required=True, choices=sorted(TASKS))
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--head", required=True, choices=HEADS)
     parser.add_argument("--pooling", default=None, help="default: probe.pooling in task.yaml")
     parser.add_argument("--seeds", type=int, nargs="+", default=None)
     parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--outputs-root", type=Path, default=None)
+    parser.add_argument("--split-tag", default=None, help="LBA only: identity30 (default) | identity60")
+    parser.add_argument("--representation", default=None, help="LBA only: joint (default) | separate")
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
     args = parser.parse_args(argv)
     if args.threads < 1:
         parser.error("--threads must be at least 1")
     torch.set_num_threads(args.threads)
-    config = load_task_config(TASK_CONFIGS[args.task], data_root=args.data_root)
+    task = load_task(args.task)
+    kind = task.KIND
+    if args.task != "lba" and (args.split_tag or args.representation):
+        parser.error("--split-tag and --representation apply to the lba task only")
+    config = task.load_task_config(task.TASK_YAML, data_root=args.data_root)
     settings = config["probe"]
     pooling = args.pooling or settings["pooling"]
     protocol = f"{args.head}_probe"
+    train_split, val_split, test_split = config["splits"]
+    prefix = ""
+    if args.task == "lba":
+        split_tag = args.split_tag or config["primary_split_tag"]
+        representation = args.representation or config["representation"]
+        prefix = f"{split_tag}.{representation}."
+        protocol = f"{protocol}.{split_tag}.{representation}"
 
-    data = {s: load_embeddings(args.task, args.model_id, s, pooling, args.outputs_root) for s in ("train", "valid", "test")}
-    mean = data["train"][2].mean(axis=0)
-    std = data["train"][2].std(axis=0).clip(min=1e-6)
-    tensors = {s: (torch.from_numpy((x - mean) / std), torch.from_numpy(y)) for s, (_, y, x, _) in data.items()}
-    subsets = test_subsets(config, data["test"][0])
+    data = {name: load_embeddings(args.task, args.model_id, prefix + name, pooling, args.outputs_root)
+            for name in (train_split, val_split, test_split)}
+    mean = data[train_split][2].mean(axis=0)
+    std = data[train_split][2].std(axis=0).clip(min=1e-6)
+    tensors = {name: (torch.from_numpy((x - mean) / std), torch.from_numpy(y))
+               for name, (_, y, x, _) in data.items()}
+    subsets = task.test_subsets(config, data[test_split][0]) if kind == "multilabel" else {}
     for seed in args.seeds or settings["seeds"]:
-        out = new_results_dir(args.task, args.model_id, protocol, seed, pooling=pooling, root=args.outputs_root)
+        out = new_results_dir(args.task, args.model_id, protocol, seed, pooling=pooling,
+                              root=args.outputs_root)
         log_handle = open(out / "run.log", "w")
 
         def log(message):
             print(message, file=log_handle, flush=True)
 
-        head, best = train_probe(*tensors["train"], *tensors["valid"], head_kind=args.head,
-                                 settings=settings, seed=seed, log=log)
-        test_scores = predict(head, tensors["test"][0])
-        val_scores = predict(head, tensors["valid"][0])
+        head, best = train_probe(*tensors[train_split], *tensors[val_split], head_kind=args.head,
+                                 settings=settings, seed=seed, log=log, kind=kind)
+        test_scores = predict(head, tensors[test_split][0], kind=kind)
+        val_scores = predict(head, tensors[val_split][0], kind=kind)
+        if kind == "multilabel":
+            metrics_val = evaluate(data[val_split][1], val_scores)
+            metrics_test = evaluate_with_cutoffs(data[test_split][1], test_scores, subsets)
+            headline = f"val fmax {metrics_val['fmax']:.4f} test fmax {metrics_test['all']['fmax']:.4f}"
+        else:
+            metrics_val = evaluate_regression(data[val_split][1].reshape(-1), val_scores)
+            metrics_test = {"all": evaluate_regression(data[test_split][1].reshape(-1), test_scores)}
+            headline = (f"val rmse {metrics_val['rmse']:.4f} test rmse {metrics_test['all']['rmse']:.4f} "
+                        f"pearson {metrics_test['all']['pearson_r']:.4f} "
+                        f"spearman {metrics_test['all']['spearman_rho']:.4f}")
         metrics = {
-            "task": args.task, "model_id": args.model_id, "protocol": protocol, "pooling": pooling,
-            "seed": seed, "best_epoch": best["epoch"], "val": evaluate(data["valid"][1], val_scores),
-            "test": evaluate_with_cutoffs(data["test"][1], test_scores, subsets),
+            "task": args.task, "kind": kind, "model_id": args.model_id, "protocol": protocol,
+            "pooling": pooling, "seed": seed, "best_epoch": best["epoch"],
+            "split_tag": args.split_tag, "representation": args.representation,
+            "val": metrics_val, "test": metrics_test,
         }
-        np.savez_compressed(out / "predictions.npz", test_chains=np.array(data["test"][0]),
-                            test_scores=test_scores.astype(np.float32), test_labels=data["test"][1].astype(np.uint8),
+        np.savez_compressed(out / "predictions.npz", test_chains=np.array(data[test_split][0]),
+                            test_scores=test_scores.astype(np.float32),
+                            test_labels=data[test_split][1].astype(np.float32),
                             valid_scores=val_scores.astype(np.float32))
         torch.save({"state_dict": head.state_dict(), "feature_mean": mean, "feature_std": std,
                     "head": args.head, "in_dim": int(mean.shape[0])}, out / "head.pt")
@@ -131,7 +198,7 @@ def main(argv=None) -> int:
                                                      "probe": settings, "embeddings": provenance}, indent=1))
         (out / "metrics.json").write_text(json.dumps(metrics, indent=1))
         log_handle.close()
-        print(f"seed {seed}: val fmax {metrics['val']['fmax']:.4f} test fmax {metrics['test']['all']['fmax']:.4f} -> {out}")
+        print(f"seed {seed}: {headline} -> {out}")
     return 0
 
 

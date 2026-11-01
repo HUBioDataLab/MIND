@@ -1,6 +1,7 @@
 """Collect downstream ``metrics.json`` files into one table (markdown + json).
 
-    python -m downstream.report --task ec [--outputs-root DIR]
+    python -m downstream.report --task ec  [--outputs-root DIR]
+    python -m downstream.report --task lba [--outputs-root DIR]
 
 Rows are (model_id, protocol.pooling) with mean +- std over seeds. Literature
 numbers are appended and labelled; they come from fine-tuned models under
@@ -26,8 +27,20 @@ LITERATURE = {
         ("ESM-2 650M", 0.868),
         ("SaProt", 0.882),
     ],
+    "lba": [  # ATOM3D LBA, 30 % sequence-identity split, test RMSE (lower is better)
+        ("ATOM3D 3DCNN", 1.416),
+        ("ATOM3D ENN", 1.568),
+        ("ATOM3D GNN", 1.601),
+        ("ProNet", 1.463),
+    ],
 }
 LITERATURE_NOTE = "literature, fine-tuned, different protocol"
+LBA_LITERATURE_NOTE = (
+    "ATOM3D LBA 30 % split, test RMSE from the authors' own training protocols; "
+    "GET and EPT report the current state of the art on this task. Not comparable "
+    "to a frozen-encoder probe."
+)
+REGRESSION_TASKS = ("lba",)
 
 
 def _stat(values):
@@ -45,6 +58,17 @@ def collect(task: str, root=None) -> list:
         groups[(path.parents[2].name, path.parents[1].name)].append(metrics)
     rows = []
     for (model_id, protocol), runs in sorted(groups.items()):
+        if all(run.get("kind") == "regression" for run in runs):
+            rows.append({
+                "model_id": model_id, "protocol": protocol,
+                "seeds": sorted(run["seed"] for run in runs),
+                "val_rmse": _stat([run["val"]["rmse"] for run in runs]),
+                "test_rmse": _stat([run["test"]["all"]["rmse"] for run in runs]),
+                "test_pearson_r": _stat([run["test"]["all"]["pearson_r"] for run in runs]),
+                "test_spearman_rho": _stat([run["test"]["all"]["spearman_rho"] for run in runs]),
+                "test_mae": _stat([run["test"]["all"]["mae"] for run in runs]),
+            })
+            continue
         cutoffs = sorted({k for run in runs for k in run["test"] if k.startswith("cutoff_")},
                          key=lambda k: int(k.split("_")[1]))
         rows.append({
@@ -62,7 +86,22 @@ def _fmt(stat):
     return "-" if stat is None else f"{stat['mean']:.3f} ± {stat['std']:.3f} (n={stat['n']})"
 
 
+def regression_markdown(task: str, rows: list) -> str:
+    header = ["model_id", "protocol", "val RMSE", "test RMSE", "Pearson r", "Spearman rho", "test MAE"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    for row in rows:
+        lines.append("| " + " | ".join([
+            row["model_id"], row["protocol"], _fmt(row.get("val_rmse")), _fmt(row.get("test_rmse")),
+            _fmt(row.get("test_pearson_r")), _fmt(row.get("test_spearman_rho")), _fmt(row.get("test_mae")),
+        ]) + " |")
+    for name, value in LITERATURE.get(task, []):
+        lines.append("| " + " | ".join([name, "literature", "-", f"{value:.3f}"] + ["-"] * 3) + " |")
+    return "\n".join(lines) + "\n\n" + LBA_LITERATURE_NOTE + "\n"
+
+
 def to_markdown(task: str, rows: list) -> str:
+    if task in REGRESSION_TASKS:
+        return regression_markdown(task, rows)
     columns = sorted({k for row in rows for k in row if k.startswith("test_fmax_cutoff")},
                      key=lambda k: int(k.rsplit("_", 1)[1]))
     header = ["model_id", "protocol", "val Fmax", "test Fmax", "pair AUPR", "top-1 acc"] + [
@@ -90,7 +129,11 @@ def main(argv=None) -> int:
     (base / "results.md").write_text(markdown)
     (base / "results.json").write_text(json.dumps({
         "rows": rows,
-        "literature": [{"model": n, "test_fmax": v, "note": LITERATURE_NOTE} for n, v in LITERATURE.get(args.task, [])],
+        "literature": [
+            {"model": n, ("test_rmse" if args.task in REGRESSION_TASKS else "test_fmax"): v,
+             "note": LBA_LITERATURE_NOTE if args.task in REGRESSION_TASKS else LITERATURE_NOTE}
+            for n, v in LITERATURE.get(args.task, [])
+        ],
     }, indent=1))
     print(markdown)
     return 0

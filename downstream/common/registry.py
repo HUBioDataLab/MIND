@@ -205,9 +205,16 @@ def embeddings_path(task: str, model_id: str, split: str, *, root: Optional[Path
 def results_dir(
     task: str, model_id: str, protocol: str, seed: int, *, pooling: str, root: Optional[Path] = None
 ) -> Path:
-    """``<protocol>.<pooling>/seed<k>``; the pooling suffix keeps pooling variants apart."""
-    if protocol not in PROTOCOLS:
-        raise ValueError(f"protocol must be one of {PROTOCOLS}, got {protocol!r}")
+    """``<protocol>.<pooling>/seed<k>``; the pooling suffix keeps pooling variants apart.
+
+    A task may qualify the protocol with dotted parts (LBA uses
+    ``mlp_probe.identity30.joint``); only the leading component names the protocol.
+    """
+    head, *qualifiers = protocol.split(".")
+    if head not in PROTOCOLS:
+        raise ValueError(f"protocol must start with one of {PROTOCOLS}, got {protocol!r}")
+    for qualifier in qualifiers:
+        _check_name("protocol qualifier", qualifier)
     return (outputs_root(root) / "downstream" / _check_name("task", task) / _check_name("model id", model_id)
             / f"{protocol}.{_check_name('pooling', pooling)}" / f"seed{int(seed)}")
 

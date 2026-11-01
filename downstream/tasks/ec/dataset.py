@@ -31,6 +31,7 @@ from downstream.common.missing_atoms import MissingAtomError, apply_policy, pars
 from downstream.common.structure_io import THREE_TO_ONE, read_chains
 
 TASK_YAML = Path(__file__).with_name("task.yaml")
+KIND = "multilabel"
 REQUIRED_KEYS = (
     "task", "modality", "data_root", "source", "sources", "splits", "label_count", "test_cutoffs",
     "structure", "missing_atoms", "max_residues", "length_policy", "min_residues", "qc", "graph",
