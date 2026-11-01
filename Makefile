@@ -18,7 +18,7 @@
 SHELL := /bin/bash
 CONDA_ROOT ?= /opt/miniconda3
 MIND_CONDA_ENV ?= /home/yusuf/.conda/envs/mind_esa3d
-MIND_HF_HOME ?= /home/yusuf/.cache/huggingface
+MIND_HF_HOME ?= /home/yusuf/models/huggingface
 CONDA_RUN := source "$(CONDA_ROOT)/etc/profile.d/conda.sh" && conda activate "$(MIND_CONDA_ENV)" && export PATH="$(MIND_CONDA_ENV)/bin:$$PATH" HF_HOME="$(MIND_HF_HOME)" HUGGINGFACE_HUB_CACHE="$(MIND_HF_HOME)/hub" TRANSFORMERS_CACHE="$(MIND_HF_HOME)/hub" &&
 
 GPU ?= auto
@@ -218,7 +218,7 @@ eval-pretrain:
 # overrides it).
 #   make ds-snapshot CKPT=<ckpt> NAME=<snapshot> [ALIAS=current_best]
 #   make ds-download TASK=ec            make ds-process TASK=ec WORKERS=16
-#   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D> GPU=<id> [RANDOM_INIT=1]
+#   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D|saprot_650m_pdb> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
 #   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]
 #   make ds-report TASK=ec
@@ -233,7 +233,7 @@ DS_THREADS ?= 8
 DS_ENV := OMP_NUM_THREADS=$(DS_THREADS) OPENBLAS_NUM_THREADS=$(DS_THREADS) MKL_NUM_THREADS=$(DS_THREADS)
 DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
 DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
-DS_HF_ARGS := $(if $(filter esm2_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
+DS_HF_ARGS := $(if $(filter esm2_% saprot_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
 
 .PHONY: ds-snapshot ds-download ds-process ds-embed ds-probe ds-finetune ds-report test-downstream
 

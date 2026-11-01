@@ -13,11 +13,20 @@ split: 538 EC terms, 15,550 / 1,729 / 1,919 chains, test cutoffs 30/40/50/70/95 
 | snapshot | `python -m downstream.common.registry snapshot <ckpt> <name>` and `... alias current_best <name>` | file copy, CPU |
 | embed | `python -m downstream.embed --task ec --model <snapshot> [--random-init]` | GPU inference |
 | ESM-2 | `python -m downstream.embed --task ec --model esm2_t12_35M_UR50D --hf-cache-dir DIR` | GPU inference |
+| Foldseek 3Di | `python -m downstream.baselines.foldseek_3di --task ec --foldseek BIN --threads 16` | data processing, CPU |
+| SaProt | `python -m downstream.embed --task ec --model saprot_650m_pdb --hf-cache-dir DIR` | GPU inference |
 | probe | `python -m downstream.probe --task ec --model-id <id> --head linear\|mlp [--pooling P]` | CPU training |
 | fine-tune | `python -m downstream.finetune --task ec --model <snapshot> [--random-init]` | GPU training |
 | report | `python -m downstream.report --task ec` | CPU |
 
 Training-like steps (embed, probe, fine-tune) are user-run through Make targets.
+
+SaProt (`saprot_650m_pdb`, `saprot_650m_af2`, `saprot_35m_af2`) sees the residues
+MIND kept, one `<AA><3Di>` token each; the 3Di state comes from Foldseek on the
+same structure file, aligned to the kept residues without mismatches (rules in
+`downstream/baselines/foldseek_3di.py`). Residues MIND masks for an incomplete
+sidechain, and residues without a Foldseek state, get SaProt's unknown-structure
+letter `#`; the amino acid is kept.
 
 ## Contracts
 
@@ -55,5 +64,5 @@ downstream/<task>/<model_id>/<protocol>.<pooling>/seed<k>/{metrics.json,predicti
 ```
 
 `model_id` is the snapshot name, `<snapshot>.random_init` for the untrained
-control, or the ESM-2 name. Literature EC numbers in the report are fine-tuned
+control, or the ESM-2 / SaProt name. Literature EC numbers in the report are fine-tuned
 results under other protocols and are labelled as such.
