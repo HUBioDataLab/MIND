@@ -26,7 +26,13 @@ from core.pretraining_model import PretrainingESAModel
 from downstream.common.graph_builder import MASK_TOKEN
 
 POOLINGS = ("mean_atoms", "ca", "mean_residues")
+# Complex (protein + ligand) poolings. They need ``batch.entity_idx`` and are
+# never requested by the single-entity protein tasks, so EC is unaffected.
+COMPLEX_POOLINGS = ("mean_pocket", "mean_ligand", "concat_pocket_ligand")
+ALL_POOLINGS = POOLINGS + COMPLEX_POOLINGS
 CA_ANCHOR_ORDER = 1  # attach_runtime_template_metadata: N=0, CA=1, C=2
+PROTEIN_ENTITY = 0
+LIGAND_ENTITY = 1
 
 
 def _check_config(config) -> None:
@@ -101,13 +107,36 @@ def _masked_mean(values: torch.Tensor, groups: torch.Tensor, mask: torch.Tensor,
     return sums / counts.clamp_min(1).unsqueeze(-1), counts
 
 
+def _entity_mask(batch: Batch, entity: int) -> torch.Tensor:
+    entity_idx = getattr(batch, "entity_idx", None)
+    if entity_idx is None or entity_idx.numel() != batch.z.numel():
+        raise ValueError("complex pooling requires batch.entity_idx with one value per node")
+    return entity_idx.long() == int(entity)
+
+
 def pool(node_embeddings: torch.Tensor, batch: Batch, pool_mask: torch.Tensor, modes: Iterable[str]) -> Dict[str, torch.Tensor]:
     """Chain embeddings ``{mode: [num_graphs, D]}``; fails if a chain has nothing to pool."""
     num_graphs = int(batch.num_graphs)
     graph = batch.batch.long()
     out = {}
     for mode in modes:
-        if mode == "mean_atoms":
+        if mode == "mean_pocket":
+            pooled, counts = _masked_mean(
+                node_embeddings, graph, pool_mask & _entity_mask(batch, PROTEIN_ENTITY), num_graphs)
+        elif mode == "mean_ligand":
+            pooled, counts = _masked_mean(
+                node_embeddings, graph, pool_mask & _entity_mask(batch, LIGAND_ENTITY), num_graphs)
+        elif mode == "concat_pocket_ligand":
+            # The protein part outnumbers the ligand roughly 9:1, so a single
+            # mean over the complex would drown the ligand. Both parts are
+            # already contextualized by the joint ESA attention.
+            protein, protein_counts = _masked_mean(
+                node_embeddings, graph, pool_mask & _entity_mask(batch, PROTEIN_ENTITY), num_graphs)
+            ligand, ligand_counts = _masked_mean(
+                node_embeddings, graph, pool_mask & _entity_mask(batch, LIGAND_ENTITY), num_graphs)
+            pooled = torch.cat((protein, ligand), dim=-1)
+            counts = torch.minimum(protein_counts, ligand_counts)
+        elif mode == "mean_atoms":
             pooled, counts = _masked_mean(node_embeddings, graph, pool_mask, num_graphs)
         elif mode == "ca":
             ca = pool_mask & (batch.template_anchor_order.long() == CA_ANCHOR_ORDER)
@@ -120,7 +149,7 @@ def pool(node_embeddings: torch.Tensor, batch: Batch, pool_mask: torch.Tensor, m
             residue_graph[residue] = graph
             pooled, counts = _masked_mean(residue_mean, residue_graph, residue_counts > 0, num_graphs)
         else:
-            raise ValueError(f"unknown pooling {mode!r}; choose from {POOLINGS}")
+            raise ValueError(f"unknown pooling {mode!r}; choose from {ALL_POOLINGS}")
         if bool((counts == 0).any()):
             empty = torch.where(counts == 0)[0].tolist()
             raise ValueError(f"pooling {mode!r}: graphs {empty} have no unmasked real atom")

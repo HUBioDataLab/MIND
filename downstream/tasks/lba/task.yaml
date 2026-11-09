@@ -1,0 +1,158 @@
+# ATOM3D Ligand Binding Affinity (LBA): predict pK = -log10(Kd or Ki) of a
+# protein-ligand complex. Source: PDBbind 2019 refined set, 4,463 complexes,
+# packaged by ATOM3D (Zenodo record 4914718).
+#
+# Primary split: split-by-sequence-identity-30 (3507 / 466 / 490).
+# Secondary split: split-by-sequence-identity-60 (3563 / 448 / 452, measured).
+# Primary metric: RMSE (lower is better); Pearson r and Spearman rho are reported too.
+
+task: lba
+modality: complex
+data_root: /home/yusuf/data/downstream/lba/complex   # raw/, processed/, provenance.json
+kind: regression
+
+source: zenodo_4914718
+sources:
+  zenodo_4914718:
+    record: https://zenodo.org/records/4914718
+    doi: 10.5281/zenodo.4914718
+    base_url: https://zenodo.org/api/records/4914718/files/{name}/content
+    # md5 checksums from the Zenodo record API, verified on 2026-10-31.
+    files:
+      identity30:
+        name: LBA-split-by-sequence-identity-30.tar.gz
+        md5: 578ef179947bc5e3621bb24db89cbd55
+        bytes: 564839536
+      identity60:
+        name: LBA-split-by-sequence-identity-60.tar.gz
+        md5: 67cb0e830e76792b1aa1f361ed7611bb
+        bytes: 564840364
+      readme:
+        name: README.md
+        md5: c3764ac3f04455f2250ac0f5fc740ec4
+        bytes: 2537
+    # Each tarball holds split-by-sequence-identity-<id>/data/{train,val,test},
+    # LMDB directories whose values are gzip-compressed JSON. Read directly with
+    # the `lmdb` package: no `atom3d` dependency. One value is a dict with
+    # atoms_protein / atoms_pocket / atoms_ligand / bonds serialized as
+    # pandas `to_dict(orient="split")` ({columns, index, data}), plus
+    # id, seq, smiles and scores.neglog_aff (the pK target).
+    lmdb_value_format: gzip_json_dataframe_split
+
+split_tags: [identity30, identity60]
+primary_split_tag: identity30
+splits: [train, val, test]
+# Measured from the LMDB `num_examples` keys of this Zenodo release on 2026-10-31.
+# identity30 reproduces the published 3507 / 466 / 490. identity60 is
+# 3563 / 448 / 452 here; the 3678 / 460 / 460 figure sometimes quoted sums to
+# 4598, not to this dataset's 4463 complexes, so it does not describe this release.
+expected_counts:
+  identity30: {train: 3507, val: 466, test: 490}
+  identity60: {train: 3563, val: 448, test: 452}
+
+metric: rmse            # primary; lower is better
+metric_direction: min
+
+# ---------------------------------------------------------------------------
+# Representation
+# ---------------------------------------------------------------------------
+# joint     one graph: pocket (14-slot protein blocks) + ligand atoms, labelled
+#           dataset_type=protein so the geometry-neutral view drops visible V
+#           padding and rebuilds the radius graph over every node, which is what
+#           creates the protein-ligand interface edges. ATOM3D's own setting.
+# separate  pocket graph and ligand graph encoded apart, pooled vectors
+#           concatenated. Cheap ablation: it has no interface edges at all, so
+#           the gap to `joint` measures how much the model uses the interaction.
+representation: joint
+representations: [joint, separate]
+
+pocket_cutoff: 6.0        # Angstrom, ATOM3D appendix
+pocket_mode: whole_residues
+contact_atoms: all        # all | heavy
+# `all` measures the 6 A contact with every atom in the ATOM3D frames, hydrogens
+# included. ATOM3D built `atoms_pocket` from hydrogen-bearing PDBbind structures,
+# so `all` reproduces their residue set exactly (checked on 40 val complexes:
+# 0 missing, 0 extra). `heavy` keeps ~10 % fewer residues. Hydrogens are used for
+# the contact test only; they are never stored as graph nodes.
+# whole_residues: every standard residue with at least one heavy atom within
+# pocket_cutoff of a ligand heavy atom is kept IN FULL. Residues then stay
+# complete and the 14-slot adapter never shifts atoms into wrong slots, so no
+# cutoff-induced masking is needed. Atom-level truncation is not offered.
+max_atoms: 600            # ATOM3D cap, counted as real heavy atoms: pocket + ligand
+# When the cap is exceeded, whole residues are dropped farthest-first by
+# (min distance to a ligand heavy atom, chain id, residue index); a residue is
+# never split. The ligand is never truncated. Measured on the 30 % split: no
+# complex reaches the cap (max 595 real atoms, train split), so this path is defensive only.
+
+ligand:
+  hydrogens: drop         # every pretraining adapter (protein, RNA, COCONUT) drops H;
+                          # the ATOM3D ligand frames carry no H either
+  bonds: distance_proxy   # distance_proxy | explicit
+  # distance_proxy: no bond_edge_index is attached, so chemical coordination
+  # comes from the <=1.85 A edge rule, exactly as in protein and UniMol
+  # pretraining. `explicit` would set has_explicit_bonds for the WHOLE graph and
+  # `_compute_chemical_coordination` would then suppress the distance proxy for
+  # every pocket atom too, zeroing their coordination feature. Do not use it for
+  # the joint representation.
+  pos_code: sm            # the pos_code every UniMol pretraining atom carries
+  block: one_atom_per_block  # guarantees a ligand block is never 14 nodes, which
+                             # would otherwise claim protein slot embedding ids 1..14
+  dataset_type_when_separate: unimol
+
+structure:
+  mse_to_met: true        # MSE (selenomethionine) -> MET, SE -> SD; counted per complex
+  keep_hetero: false      # hetero records (waters, ions, SEP/TPO, ...) are not pocket residues
+
+# Pocket residues are complete far more often than full chains, but PDB entries
+# still have unmodelled sidechain atoms. Same policy as EC.
+missing_atoms:
+  policy: drop_residue_missing_backbone
+  incomplete_sidechain: mask
+
+min_residues: 2
+min_ligand_atoms: 2
+
+qc:
+  max_failed_complex_fraction: 0.02   # per split; above it the processed file is not written, exit 1
+
+graph:
+  sequence_neighbors_k: 3   # stored in the schema; must equal the model config at load time
+  # Block ids are sequence-faithful: chain_ordinal * 1_000_000 + residue index
+  # inside that chain. Tier-1 CA edges therefore only join residues that really
+  # are sequence neighbours, never two pocket residues 40 positions apart.
+
+embedding:
+  seed: 0                 # fixes the per-complex random long-range edges
+  poolings: [mean_atoms, ca, mean_residues, mean_pocket, mean_ligand, concat_pocket_ligand]
+  poolings_separate: [mean_atoms]
+  max_atoms_per_batch: 30000
+
+probe:
+  pooling: concat_pocket_ligand
+  seeds: [0, 1, 2]
+  epochs: 300
+  patience: 30
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+  loss: mse               # mse | huber; RMSE is the reported metric and MSE is its
+                          # proper surrogate. Huber would down-weight exactly the
+                          # high- and low-affinity tails that drive RMSE.
+  huber_delta: 1.0
+
+finetune:
+  pooling: concat_pocket_ligand
+  head: mlp
+  seeds: [0]
+  epochs: 50
+  patience: 10
+  max_atoms_per_batch: 15000
+  lr_encoder: 0.00001
+  lr_head: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+  loss: mse
+  huber_delta: 1.0

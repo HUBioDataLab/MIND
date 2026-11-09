@@ -18,7 +18,7 @@
 SHELL := /bin/bash
 CONDA_ROOT ?= /opt/miniconda3
 MIND_CONDA_ENV ?= /home/yusuf/.conda/envs/mind_esa3d
-MIND_HF_HOME ?= /home/yusuf/.cache/huggingface
+MIND_HF_HOME ?= /home/yusuf/models/huggingface
 CONDA_RUN := source "$(CONDA_ROOT)/etc/profile.d/conda.sh" && conda activate "$(MIND_CONDA_ENV)" && export PATH="$(MIND_CONDA_ENV)/bin:$$PATH" HF_HOME="$(MIND_HF_HOME)" HUGGINGFACE_HUB_CACHE="$(MIND_HF_HOME)/hub" TRANSFORMERS_CACHE="$(MIND_HF_HOME)/hub" &&
 
 GPU ?= auto
@@ -158,6 +158,15 @@ status:
 	@echo "=== MIND Training (all users) ==="
 	@ps -eo user:12,pid,etime,args | grep '[t]rain_pretrain\|core[./]train' | grep -v grep || echo "  (no MIND training running)"
 	@echo ""
+	@echo "=== MIND Downstream / Evaluation (all users) ==="
+	@out=$$(ps -eo user:12,pid,etime,args | grep '[d]ownstream\.\(embed\|probe\|finetune\|report\)\|[c]ore\.evaluate_pretrain' | \
+		sed -E 's/--threads [0-9]+ //' | cut -c1-150); \
+		[ -n "$$out" ] && echo "$$out" || echo "  (none)"
+	@echo ""
+	@echo "=== Chain scripts (run_*_chain.sh, run_*_finetune.sh) ==="
+	@out=$$(ps -eo user:12,pid,etime,args | grep '[r]un_[a-z_]*\.sh' | cut -c1-120); \
+		[ -n "$$out" ] && echo "$$out" || echo "  (none)"
+	@echo ""
 	@echo "=== MIND Data Processing (all users) ==="
 	@ps -eo user:12,pid,args | grep '[c]ache_to_pyg\|create_chunk' | grep -v grep | \
 		awk '{print $$1}' | sort | uniq -c | \
@@ -244,10 +253,21 @@ eval-counterfactual:
 # overrides it).
 #   make ds-snapshot CKPT=<ckpt> NAME=<snapshot> [ALIAS=current_best]
 #   make ds-download TASK=ec            make ds-process TASK=ec WORKERS=16
-#   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D> GPU=<id> [RANDOM_INIT=1]
+#   make ds-download TASK=lba           make ds-process TASK=lba [TAGS="identity30 identity60"]
+#   make ds-download TASK=go_mf         (the three GO branches share one download and one processed file;
+#   make ds-validate TASK=go_mf          ds-process TASK=go_mf WORKERS=16 builds all of them; validate is read-only)
+#   make ds-download TASK=fold         (GearNet Fold3D, Zenodo 7593591, 670,898,225 B; md5 and size are pinned)
+#   make ds-validate TASK=fold          ds-process TASK=fold WORKERS=16     (probe: one accuracy per test split)
+#   make ds-download TASK=reaction      (IEConv ProtFunct; Google Drive archive, size/md5 not published: the first
+#   make ds-validate TASK=reaction       download stops until archive_sha256/archive_bytes are pinned in task.yaml)
+#   make ds-leakage LEAK_TASK=go REFERENCE=protein_1m NAMESPACE=pdb_chain PROVENANCE=<task dir>/provenance.json \
+#        QUERIES="valid=<dir>/splits/valid.txt test=<dir>/splits/test.txt" [ID_MAP=<pdb_chain->uniprot tsv>]
+#   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D|saprot_650m_pdb> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
 #   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]
 #   make ds-report TASK=ec
+# LBA adds SPLIT_TAG=identity30|identity60 and REPRESENTATION=joint|separate to
+# ds-embed and ds-probe (ds-finetune takes SPLIT_TAG only; it is joint-only).
 # ===================================================================
 
 TASK ?= ec
@@ -259,19 +279,47 @@ DS_THREADS ?= 8
 DS_ENV := OMP_NUM_THREADS=$(DS_THREADS) OPENBLAS_NUM_THREADS=$(DS_THREADS) MKL_NUM_THREADS=$(DS_THREADS)
 DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
 DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
-DS_HF_ARGS := $(if $(filter esm2_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
+# Fine-tune overrides: a random-init encoder needs a far larger LR than a pretrained one.
+FT_ARGS ?=
+DS_HF_ARGS := $(if $(filter esm2_% saprot_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
+# LBA-only selectors; empty for every other task so their CLIs never see them.
+SPLIT_TAG ?=
+REPRESENTATION ?=
+TAGS ?=
+DS_SPLIT_TAG_ARGS := $(if $(strip $(SPLIT_TAG)),--split-tag $(SPLIT_TAG),)
+DS_LBA_ARGS := $(DS_SPLIT_TAG_ARGS) $(if $(strip $(REPRESENTATION)),--representation $(REPRESENTATION),)
+# ec prepare parallelizes structure parsing with --workers; lba reads one LMDB
+# sequentially and only bounds its torch threads.
+# GO branches (go_mf, go_bp, go_cc) share one prepare module.
+DS_PREPARE_MODULE = $(if $(filter go_%,$(TASK)),go,$(TASK))
+DS_PROCESS_ARGS = $(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS))
+DS_DOWNLOAD_ARGS = $(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),)
 
-.PHONY: ds-snapshot ds-download ds-process ds-embed ds-probe ds-finetune ds-report test-downstream
+.PHONY: ds-snapshot ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream
 
 ds-snapshot:
 	@test -n "$(CKPT)" -a -n "$(NAME)" || { echo "ERROR: set CKPT and NAME"; exit 1; }
 	$(CONDA_RUN) python -m downstream.common.registry snapshot "$(CKPT)" "$(NAME)"
 	$(if $(strip $(ALIAS)),$(CONDA_RUN) python -m downstream.common.registry alias "$(ALIAS)" "$(NAME)" --repoint,)
 
+# `set -o pipefail`: without it the pipeline exit status is tee's (always 0) and a failed prepare/probe looks like success.
 ds-download ds-process:
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(TASK).prepare $(patsubst ds-%,%,$@) \
-		$(if $(filter ds-process,$@),--workers $(WORKERS),) 2>&1 | tee $(call DS_LOG,$(patsubst ds-%,%,$@))
+	set -o pipefail; $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare $(patsubst ds-%,%,$@) \
+		$(if $(filter ds-process,$@),$(DS_PROCESS_ARGS),$(DS_DOWNLOAD_ARGS)) 2>&1 | tee $(call DS_LOG,$(patsubst ds-%,%,$@))
+
+# Read-only: re-checks labels and split lists against task.yaml (go, fold, reaction).
+ds-validate:
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare validate
+
+# Leakage registry: compares task split ids with a pretraining reference (CPU, read-only on the references;
+# appends a record to the task's provenance.json and writes a per-id TSV next to it).
+ds-leakage:
+	@test -n "$(LEAK_TASK)" -a -n "$(REFERENCE)" -a -n "$(NAMESPACE)" -a -n "$(PROVENANCE)" -a -n "$(QUERIES)" || \
+		{ echo "ERROR: set LEAK_TASK, REFERENCE, NAMESPACE, PROVENANCE and QUERIES"; exit 1; }
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.common.leakage --task "$(LEAK_TASK)" \
+		--reference "$(REFERENCE)" --query-namespace "$(NAMESPACE)" --provenance "$(PROVENANCE)" \
+		$(foreach q,$(QUERIES),--query $(q)) $(if $(strip $(ID_MAP)),--id-map $(ID_MAP),)
 
 ds-embed ds-finetune:
 	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name, alias or ESM-2 name)"; exit 1; }
@@ -279,15 +327,15 @@ ds-embed ds-finetune:
 	@mkdir -p $(LOG_MONTH_DIR)
 	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -u -m downstream.$(patsubst ds-%,%,$@) \
 		--threads $(DS_THREADS) --task $(TASK) --model "$(MODEL)" --device cuda:0 $(DS_RANDOM_INIT_ARGS) \
-		$(if $(filter ds-embed,$@),$(DS_HF_ARGS),--seeds $(SEEDS)) \
+		$(if $(filter ds-embed,$@),$(DS_HF_ARGS) $(DS_LBA_ARGS),--seeds $(SEEDS) $(DS_SPLIT_TAG_ARGS) $(FT_ARGS)) \
 		> $(call DS_LOG,$(patsubst ds-%,%,$@)) 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Log: $(call DS_LOG,$(patsubst ds-%,%,$@))"
 
 ds-probe:
 	@test -n "$(MODEL_ID)" || { echo "ERROR: set MODEL_ID (snapshot, <snapshot>.random_init or ESM-2 name)"; exit 1; }
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --threads $(DS_THREADS) --task $(TASK) --model-id "$(MODEL_ID)" \
-		--head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) \
+	set -o pipefail; $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --threads $(DS_THREADS) --task $(TASK) --model-id "$(MODEL_ID)" \
+		--head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) $(DS_LBA_ARGS) \
 		2>&1 | tee $(call DS_LOG,probe_$(HEAD))
 
 ds-report:
@@ -322,6 +370,9 @@ help:
 	@echo "    make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp"
 	@echo "    make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id>   (GPU, long)"
 	@echo "    make ds-report TASK=ec / make test-downstream"
+	@echo "    LBA: make ds-download TASK=lba / ds-process TASK=lba"
+	@echo "         make ds-embed TASK=lba MODEL=<snapshot> GPU=<id> [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
+	@echo "         make ds-probe TASK=lba MODEL_ID=<id> HEAD=mlp [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"
 	@echo "    make logs                            List recent log files"

@@ -7,7 +7,8 @@
 and re-hashed; new files are written to ``*.partial`` and renamed when
 complete. Every run appends a record (URLs, sha256/md5, counts, failures with
 reasons) to ``provenance.json`` and exits 1 when the structure failure
-fraction exceeds ``qc.max_download_failure_fraction``.
+fraction exceeds ``qc.max_download_failure_fraction``. ``process`` appends its own record (command, config
+and input/output sha256, QC summaries) to ``provenance.json``.
 """
 
 from __future__ import annotations
@@ -27,9 +28,10 @@ from typing import Optional
 
 import requests
 
+from downstream.common.provenance import append_run as _append_provenance, record_process_run
 from downstream.common.registry import git_commit, sha256_file
 from downstream.tasks.ec.dataset import (
-    TASK_YAML, build_processed, load_task_config, read_annotations, read_split, read_test_cutoffs,
+    TASK_YAML, build_processed, load_task_config, processed_dir, read_annotations, read_split, read_test_cutoffs,
     split_chain_id, task_paths,
 )
 
@@ -174,14 +176,6 @@ def validate_metadata(config: dict, paths: dict) -> dict:
     return {"terms": len(terms), "split_counts": counts, "test_cutoff_counts": {c: len(s) for c, s in subsets.items()}}
 
 
-def _append_provenance(path: Path, record: dict) -> None:
-    runs = json.loads(path.read_text())["runs"] if path.exists() else []
-    runs.append(record)
-    partial = path.with_name(path.name + ".partial")
-    partial.write_text(json.dumps({"runs": runs}, indent=1))
-    os.replace(partial, path)
-
-
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("command", choices=("download", "process"))
@@ -193,7 +187,14 @@ def main(argv: Optional[list] = None) -> int:
     config = load_task_config(args.config, data_root=args.data_root)
     paths = task_paths(config)
     if args.command == "process":
-        return build_processed(config, splits=args.splits or config["splits"], workers=args.workers)
+        splits = args.splits or config["splits"]
+        started = datetime.now(timezone.utc).isoformat()
+        exit_code = build_processed(config, splits=splits, workers=args.workers)
+        record_process_run(
+            paths["provenance"], started_utc=started, config_path=args.config, processed_dir=processed_dir(config),
+            splits=splits, exit_code=exit_code,
+            inputs=[paths["raw"] / "annotations.tsv", *(paths["splits"] / f"{s}.txt" for s in splits)])
+        return exit_code
 
     paths["raw"].mkdir(parents=True, exist_ok=True)
     started = datetime.now(timezone.utc).isoformat()

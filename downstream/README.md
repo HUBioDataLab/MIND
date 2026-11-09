@@ -1,23 +1,44 @@
 # Downstream evaluation
 
 Frozen-encoder probes, fine-tuning, a random-init control and ESM-2 baselines
-for MIND encoders. The first task is EC number prediction (DeepFRI/GearNet
-split: 538 EC terms, 15,550 / 1,729 / 1,919 chains, test cutoffs 30/40/50/70/95 %).
+for MIND encoders.
+
+| Task | Kind | Data | Primary metric |
+|---|---|---|---|
+| `ec` | multi-label, 538 EC terms | DeepFRI/GearNet split, 15,550 / 1,729 / 1,919 chains, test cutoffs 30/40/50/70/95 % | Fmax (higher) |
+| `go_mf` / `go_bp` / `go_cc` | multi-label, 489 / 1,943 / 320 GO terms (counts UNVERIFIED until download) | DeepFRI nrPDB-GO split as packaged by TorchDrug (Zenodo 6622158 GeneOntology.zip), test cutoffs 30/40/50/70/95 % | Fmax (higher) |
+| `fold` | multi-class, 1,195 SCOPe 1.75 folds | GearNet Fold3D (Zenodo 7593591, fold3d.zip, CC BY 4.0), 12,312 / 736 / 718 / 1,272 / 1,254 (train / valid / test_fold / test_family / test_superfamily) | accuracy, one per test split |
+| `reaction` | multi-class, 384 EC numbers | IEConv ProtFunct (github.com/phermosilla/IEConv_proteins, Google Drive archive), 29,215 / 2,562 / 5,651 | accuracy |
+| `lba` | regression, pK | ATOM3D LBA (PDBbind 2019 refined, 4,463 complexes), 30 % split 3507/466/490, 60 % split 3563/448/452 | RMSE (lower) |
 
 ## Pipeline
 
 | Step | Command | Kind |
 |---|---|---|
-| download | `python -m downstream.tasks.ec.prepare download` | data processing, CPU, network |
-| process | `python -m downstream.tasks.ec.prepare process --workers 16` | data processing, CPU |
+| download | `python -m downstream.tasks.<task>.prepare download` | data processing, CPU, network |
+| process | `python -m downstream.tasks.ec.prepare process --workers 16` / `...lba.prepare process --threads 8` | data processing, CPU |
 | snapshot | `python -m downstream.common.registry snapshot <ckpt> <name>` and `... alias current_best <name>` | file copy, CPU |
-| embed | `python -m downstream.embed --task ec --model <snapshot> [--random-init]` | GPU inference |
+| embed | `python -m downstream.embed --task <task> --model <snapshot> [--random-init]` | GPU inference |
 | ESM-2 | `python -m downstream.embed --task ec --model esm2_t12_35M_UR50D --hf-cache-dir DIR` | GPU inference |
-| probe | `python -m downstream.probe --task ec --model-id <id> --head linear\|mlp [--pooling P]` | CPU training |
-| fine-tune | `python -m downstream.finetune --task ec --model <snapshot> [--random-init]` | GPU training |
-| report | `python -m downstream.report --task ec` | CPU |
+| Foldseek 3Di | `python -m downstream.baselines.foldseek_3di --task ec --foldseek BIN --threads 16` | data processing, CPU |
+| SaProt | `python -m downstream.embed --task ec --model saprot_650m_pdb --hf-cache-dir DIR` | GPU inference |
+| probe | `python -m downstream.probe --task <task> --model-id <id> --head linear\|mlp [--pooling P]` | CPU training |
+| fine-tune | `python -m downstream.finetune --task <task> --model <snapshot> [--random-init]` | GPU training |
+| report | `python -m downstream.report --task <task>` | CPU |
+
+For `lba`, `embed`, `probe` and `finetune` also take `--split-tag identity30|identity60`;
+`embed` and `probe` additionally take `--representation joint|separate`. Each
+combination writes its own embeddings and results directory.
 
 Training-like steps (embed, probe, fine-tune) are user-run through Make targets.
+
+SaProt (`saprot_650m_pdb`, `saprot_650m_af2`, `saprot_35m_af2`) sees the residues
+MIND kept, one `<AA><3Di>` token each; the 3Di state comes from Foldseek on the
+same structure file, aligned to the kept residues without mismatches (rules in
+`downstream/baselines/foldseek_3di.py`). Residues MIND masks for an incomplete
+sidechain, and residues without a Foldseek state, get SaProt's unknown-structure
+letter `#`; the amino acid is kept. The 3Di cache lives in `<data_root>/foldseek_3di_<processed_revision>/`
+and is valid for that processed revision only.
 
 ## Contracts
 
@@ -44,6 +65,10 @@ Training-like steps (embed, probe, fine-tune) are user-run through Make targets.
 ## Layout
 
 Data (outside Git): `/home/yusuf/data/downstream/<task>/<modality>/{raw,processed,splits,provenance.json}`.
+`processed_revision` in `task.yaml` (EC and GO: `v2`) is appended to the processed directory name; v2 reads PDB
+chain ids of two or three characters (EC v1 lost 46 chains, GO v1 lost 1,171 as `parse_error`). Every `process`
+run appends its own record (command, config/input/output sha256, QC summaries) to `provenance.json`.
+EC test chains missing from `test_cutoffs.csv` raise, except the documented `test_cutoff_unlisted_chains`.
 
 Models and results (under `outputs/`, or `$MIND_OUTPUTS_ROOT`):
 
@@ -55,5 +80,108 @@ downstream/<task>/<model_id>/<protocol>.<pooling>/seed<k>/{metrics.json,predicti
 ```
 
 `model_id` is the snapshot name, `<snapshot>.random_init` for the untrained
-control, or the ESM-2 name. Literature EC numbers in the report are fine-tuned
+control, or the ESM-2 / SaProt name. Literature EC numbers in the report are fine-tuned
 results under other protocols and are labelled as such.
+
+
+## LBA (ATOM3D ligand binding affinity)
+
+Target: pK = -log10(Kd or Ki) of a protein-ligand complex. Source: Zenodo record
+4914718, md5-pinned in `downstream/tasks/lba/task.yaml`. The LMDB values are
+gzip-compressed JSON with `to_dict(orient="split")` DataFrames, read with the
+`lmdb` package only; the `atom3d` package is not a dependency. An LMDB's real
+length is its `num_examples` key: `stat()["entries"]` is three too large because
+of the `id_to_idx` / `num_examples` / `serialization_format` metadata keys.
+
+### Representation
+
+`joint` (default) is the ATOM3D setting: one graph with the pocket and the
+ligand, `dataset_type="protein"` so `build_geometry_neutral_graph_view` removes
+the visible V padding and rebuilds the radius graph over **every** node of the
+graph. That rebuild is what produces the protein-ligand interface edges; the
+stored edges are CA-only and cross none of them. Protein and ligand are told
+apart by `entity_idx` (0 / 1) and by their node features: pocket atoms sit in
+14-slot residue blocks and receive domain-local slot ids 1..14, while each
+ligand atom is its own block and therefore receives slot id 0 ("no reliable
+fixed slot"), the embedding's padding index. The encoder does **not** read
+`entity_idx`; it is used by the LBA poolings and by the QC.
+
+`separate` encodes the pocket (`dataset_type="protein"`) and the ligand
+(`dataset_type="unimol"`, radius edges, `pos_code="sm"`) as two graphs and
+concatenates the pooled vectors. It has no interface edges, so the gap to
+`joint` measures how much the model uses the interaction. Probe-only;
+fine-tuning is `joint` only.
+
+### Contracts
+
+- Pocket = every standard residue with at least one atom within 6 A of a ligand
+  atom, kept **in full**. Hydrogens count for the contact test and are never
+  stored as nodes; that reproduces ATOM3D's own `atoms_pocket` residue set
+  exactly. Whole residues mean the 14-slot adapter never shifts atoms into
+  wrong slots, so the cutoff itself needs no masking.
+- The 600-atom cap counts real heavy atoms (pocket + ligand) and drops whole
+  residues farthest-first; it never splits a residue and never truncates the
+  ligand. It does not bind on this dataset (max 458 real atoms measured).
+- Block ids are sequence-faithful (`chain_ordinal * 1_000_000 + residue index in
+  that chain`), so Tier-1 CA edges only join real sequence neighbours and never
+  cross chains.
+- No explicit ligand bonds. `resolve_bond_sources` reports explicit bonds per
+  *graph*, so attaching them would make `_compute_chemical_coordination` drop
+  the <=1.85 A distance proxy for every pocket atom too. Pretraining has no
+  explicit bonds for proteins or for UniMol, so the proxy is the in-distribution
+  choice. `ligand.bonds: explicit` is refused by the config loader.
+- Missing atoms use the EC policy: residues missing a backbone atom are dropped,
+  a residue with an incomplete sidechain keeps its backbone and has its whole
+  14-slot block masked.
+- Regression, not multi-label: the head outputs one value, the loss is MSE
+  (`probe.loss`, `huber` available), early stopping minimizes validation RMSE,
+  and the report prints RMSE / Pearson r / Spearman rho. The shared
+  `validation_score` helper returns a higher-is-better number for both kinds
+  (`-RMSE` for LBA), so one early-stopping rule covers EC and LBA.
+
+
+## GO (go_mf, go_bp, go_cc)
+
+One task family, three tasks, one processed file per split holding all three label matrices
+(`downstream/tasks/go/`; `task.yaml` is the single config, `mf.py`/`bp.py`/`cc.py` select the branch).
+
+- Source: Zenodo record 6622158, `GeneOntology.zip` (md5 and size pinned in `task.yaml`), the same record that
+  holds EC's archive. Shared raw data lives once in `/home/yusuf/data/downstream/deepfri/raw/`;
+  splits, processed files and `provenance.json` are task-specific under `deepfri/go/`.
+- Annotation file: per ontology a 4-row block (terms, names) in the order MF, BP, CC, then one row per chain.
+  `read_go_annotations` rejects any deviation (header text, GO id shape, duplicate terms or chains, term
+  counts, terms outside the branch's list).
+- Chains with no term in a branch are excluded from that branch's train/valid/test
+  (`unannotated_policy: exclude`, counts in `GoProcessedSplit.report`). The CAFA Fmax in
+  `downstream/common/metrics.py` raises on a protein without a true term; TorchDrug instead keeps them as
+  all-zero rows, so GearNet-style numbers can differ slightly. `keep_zero_rows` is refused by the loader.
+- Missing atoms: same policy and code path as EC (`process_entry`); the adapter's V-padding/slot shift (G5)
+  is never reached with an incomplete residue.
+- Commands: `make ds-download TASK=go_mf`, `make ds-validate TASK=go_mf` (read-only),
+  `make ds-process TASK=go_mf WORKERS=16`; embed/probe/finetune take `--task go_mf|go_bp|go_cc`.
+
+## Leakage registry
+
+`downstream/common/leakage.py` + `downstream/leakage_references.yaml` compare the ids of a task's splits with the
+pretraining plans (protein 1M plan, protein 40k manifest, RNA full plan) and write a `leakage` record into the
+task's `provenance.json` plus a per-id TSV. Categories: `seen_train`, `seen_val` (used for checkpoint
+selection), `seen_test` (pretraining hold-out), `unseen`, `unmapped`. PDB ids against the AFDB (UniProt) set are
+refused unless a `pdb_chain -> uniprot` map is given; it never reports "0 leaked" for incomparable namespaces.
+Id matching does not detect homologs. `make ds-leakage ...` (see the Makefile header).
+
+
+## Fold and Reaction (multiclass)
+
+`downstream/tasks/{fold,reaction}/` (`task.yaml`, `dataset.py`, `prepare.py`) on top of `downstream/tasks/multiclass.py`.
+
+- Structures are the archives' own `.hdf5` files (`structure_io.read_hdf5_chain`, needs `h5py`, installed in
+  `mind_esa3d` as 3.16.0 and required to process Fold and Reaction). Atom elements come from atom names; `atom_types` is not used. Chains go through the EC/GO code path
+  (`process_entry` + missing-atom policy), so a CA-only domain is dropped and counted, never kept. `ProcessedSplit.report`
+  and `qc_<split>.json` carry listed / kept / dropped counts.
+- Source and unverified items are written at the top of each `task.yaml`. Reaction's Google Drive archive has no published
+  size or md5: `download` stops until `archive_sha256` / `archive_bytes` are pinned after reviewing `provenance.json`.
+- Probe: cross-entropy head, validation accuracy, one accuracy per test split in `metrics.json`; `downstream.report`
+  adds the GearNet-paper literature rows. Fine-tuning refuses multiclass tasks (not implemented).
+- Commands: `make ds-download|ds-validate|ds-process TASK=fold` (same for `reaction`).
+- Leakage: Fold ids are SCOPe domain ids (`scop_domain`, no map to the AFDB UniProt reference, so the tool refuses);
+  Reaction ids are `4xi6.A` (`pdb_chain`, needs `--id-map`). See `queries:` in `leakage_references.yaml`.

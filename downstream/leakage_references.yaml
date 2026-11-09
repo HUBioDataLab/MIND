@@ -1,0 +1,66 @@
+# Pretraining identity sets used by downstream/common/leakage.py.
+# plan:     chunk-build plan CSV (id,split,chunk,position); split is the pretraining split.
+# manifest: plain id list (no split information; every id counts as seen_train).
+# Paths are Atum-local data locations (outside Git); sizes verified on 2026-11-08.
+
+references:
+  protein_1m:
+    description: AFDB 1M pretraining plan (1,117,868 UniProt accessions, split by structure-id hash)
+    kind: plan
+    path: /home/yusuf/data/proteins/processed_14atom_1m_edgefree_plan.csv
+    namespace: uniprot
+    id_column: id
+    split_column: split
+  protein_1m_manifest:
+    description: AFDB 1M cluster-representative manifest (same ids as protein_1m, no split)
+    kind: manifest
+    path: /home/yusuf/data/protein_1m/afdb_clusters/manifest_hq_1m_1024.csv
+    namespace: uniprot
+    id_column: repId
+  protein_40k_manifest:
+    description: AFDB 40k baseline manifest (chunks 0-9 of the 40k baseline)
+    kind: manifest
+    path: /home/yusuf/data/proteins/afdb_clusters/manifest_hq_40k_len512.csv
+    namespace: uniprot
+    id_column: repId
+  rna_full:
+    description: Full RNA corpus plan (12,869 PDB chains, 5,057 entries, split by PDB entry)
+    kind: plan
+    path: /home/yusuf/data/rna/processed_23slot_full_edgefree_plan.csv
+    namespace: pdb_chain
+    id_column: id
+    split_column: split
+
+# Downstream task identity formats and the references they can be compared with (documentation read by
+# leakage.load_task_queries; the CLI still takes --query-namespace explicitly). `compare_with` lists what the tool can
+# compare today; a combination that is not listed raises NamespaceMismatchError instead of reporting "0 leaked".
+# Verified 2026-11-08 from the lists of the source repositories (IEConv_proteins commit cc067a2, GearNet commit 28bf75f).
+queries:
+  fold:
+    namespace: scop_domain
+    id_example: d1v4wb_
+    id_source: SCOPe 1.75 domain id (d + PDB entry + chain character + domain character), first column of the Fold3D label files
+    compare_with: []          # protein_1m / protein_40k are UniProt (AFDB); no scop_domain -> uniprot map exists. RNA is unrelated.
+    note: >-
+      Every reference currently raises NamespaceMismatchError (scop_domain vs uniprot / pdb_chain). The Fold test sets are
+      remote-homology sets by construction, so an id check is the weak test anyway; the meaningful check is sequence
+      identity screening (MMseqs2) of the stored sequences against the pretraining sequences. A SCOP-domain -> PDB-chain ->
+      UniProt (SIFTS) derivation is possible but domains with '.' (several chains) or '_' (no chain) stay unmapped; not implemented.
+  reaction:
+    namespace: pdb_chain
+    id_example: 4xi6.A
+    id_source: PDB entry + '.' + chain, entries of training.txt / validation.txt / testing.txt
+    compare_with: [protein_1m, protein_1m_manifest, protein_40k_manifest]   # only with --id-map (pdb_chain -> uniprot, e.g. SIFTS)
+    note: >-
+      Without --id-map the tool raises NamespaceMismatchError against the AFDB (UniProt) references. Against rna_full the
+      comparison would be entry-level but meaningless (protein vs RNA corpus), so it is not listed.
+  ec:
+    namespace: pdb_chain
+    id_example: 1ABC-A
+    id_source: DeepFRI/GearNet chain ids
+    compare_with: [protein_1m, protein_1m_manifest, protein_40k_manifest]   # only with --id-map
+  go:
+    namespace: pdb_chain
+    id_example: 1ABC-A
+    id_source: DeepFRI/GearNet chain ids
+    compare_with: [protein_1m, protein_1m_manifest, protein_40k_manifest]   # only with --id-map
