@@ -47,6 +47,15 @@ def natural_plan_counts(config, epochs: int) -> tuple[int | None, list[dict]]:
     return fixed, rows
 
 
+def plan_summary_line(summary: dict, ok: bool) -> str:
+    """One greppable line; the Makefile target prints only this one to the terminal."""
+    return (
+        f"PLAN_SUMMARY: config={summary['config']} seed={summary['seed']} "
+        f"epoch_num_batches={summary['epoch_num_batches']} natural_max={summary['natural_max']} "
+        f"margin={summary['margin_batches']} status={'OK' if ok else 'FAIL'}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config-yaml-path", required=True)
@@ -75,7 +84,9 @@ def main() -> int:
         "epochs": rows,
     }
     print(json.dumps(summary, indent=2))
-    if fixed is not None and max(counts) > fixed:
+    ok = fixed is None or max(counts) <= fixed
+    print(plan_summary_line(summary, ok))
+    if not ok:
         print(f"FAIL: natural plan needs up to {max(counts)} batches, above epoch_num_batches={fixed}", file=sys.stderr)
         return 1
     return 0
