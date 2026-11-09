@@ -176,13 +176,12 @@ status:
 	@nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || true
 	@echo ""
 	@echo "=== GPU Processes ==="
-	@nvidia-smi --query-compute-apps=gpu_name,pid,used_gpu_memory,process_name --format=csv,noheader 2>/dev/null | \
-		while IFS=, read gpu pid mem name; do \
-		usr=$$(ps -o user= -p $$(echo $$pid | tr -d ' ') 2>/dev/null | tr -d ' '); \
-		idx=$$(nvidia-smi --query-compute-apps=gpu_bus_id,pid --format=csv,noheader 2>/dev/null | \
-			grep "$$(echo $$pid | tr -d ' ')" | head -1 | cut -d, -f1 | tr -d ' '); \
+	@nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_gpu_memory --format=csv,noheader 2>/dev/null | \
+		while IFS=, read bus pid mem; do \
+		bus=$$(echo $$bus | tr -d ' '); pid=$$(echo $$pid | tr -d ' '); \
+		usr=$$(ps -o user= -p $$pid 2>/dev/null | tr -d ' '); \
 		gpuidx=$$(nvidia-smi --query-gpu=index,gpu_bus_id --format=csv,noheader 2>/dev/null | \
-			grep "$$idx" | head -1 | cut -d, -f1 | tr -d ' '); \
+			grep -F "$$bus" | head -1 | cut -d, -f1 | tr -d ' '); \
 		printf "  GPU %-2s | %-14s | PID %-8s |%s\n" "$${gpuidx:-?}" "$${usr:-?}" "$$pid" "$$mem"; \
 	done 2>/dev/null || true
 

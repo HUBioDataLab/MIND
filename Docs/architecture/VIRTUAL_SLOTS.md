@@ -47,14 +47,16 @@ post-ESA slot state
 ```
 
 The owner readout is differentiable and domain-local: each protein sidechain
-slot reads its own residue’s four backbone states; each RNA base slot reads its
+slot reads its own residue’s four backbone states (`N`, `CA`, `C`, `O`); each RNA base slot reads its
 own nucleotide’s twelve backbone states. The readout edge list is never passed
 to ESA attention, RBF aggregation, equivariant vectors, or distance targets.
 Full-index scatter restores 10 or 11 latent states for the existing MLM head.
 
 Coordinates for removed real slots are kept only for optional supervision code;
 the current active task set does not add a masked-slot distance objective. `V`
-slots never create physical distance targets.
+slots never create physical distance targets: the distance objectives use
+geometry-valid nodes only, and retained masked backbone coordinates still provide
+physical input.
 
 ## Graph and centering invariants
 
@@ -72,8 +74,8 @@ MLM has learned chemically informative residue context.
 
 ## What is not enabled
 
-`masked_slot_template` is a deprecated synthetic-coordinate experiment and is
-off in the production multidomain config. Do not describe it as part of the
+`masked_slot_template` is a deprecated synthetic-coordinate experiment. It is a
+config field with default off (the production YAMLs no longer list it). Do not describe it as part of the
 current representation. The current system also has no occupancy head, residue
 classifier, or BoltzGen-style coordinate decoder.
 
