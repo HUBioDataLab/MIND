@@ -10,6 +10,7 @@ for MIND encoders.
 | `fold` | multi-class, 1,195 SCOPe 1.75 folds | GearNet Fold3D (Zenodo 7593591, fold3d.zip, CC BY 4.0), 12,312 / 736 / 718 / 1,272 / 1,254 (train / valid / test_fold / test_family / test_superfamily) | accuracy, one per test split |
 | `reaction` | multi-class, 384 EC numbers | IEConv ProtFunct (github.com/phermosilla/IEConv_proteins, Google Drive archive), 29,215 / 2,562 / 5,651 | accuracy |
 | `lba` | regression, pK | ATOM3D LBA (PDBbind 2019 refined, 4,463 complexes), 30 % split 3507/466/490, 60 % split 3563/448/452 | RMSE (lower) |
+| `mn_bbbp` ... `mn_qm8` (14 MoleculeNet tasks, QM9 excluded) | `multilabel_masked` (BBBP, BACE, ClinTox, Tox21, ToxCast, SIDER, HIV, PCBA, MUV) or `multitarget_regression` (ESOL, FreeSolv, Lipo, QM7, QM8) | Uni-Mol LMDB release, scaffold split as shipped; first conformer, hydrogens dropped, no cropping | ROC-AUC + PRC-AUC (classification); RMSE + MAE (regression; primary: RMSE for ESOL/FreeSolv/Lipo, MAE for QM7/QM8) |
 
 ## Pipeline
 
@@ -31,6 +32,20 @@ For `lba`, `embed`, `probe` and `finetune` also take `--split-tag identity30|ide
 combination writes its own embeddings and results directory.
 
 Training-like steps (embed, probe, fine-tune) are user-run through Make targets.
+
+### MoleculeNet (`mn_*`)
+
+`make ds-process TASK=mn_esol` (and `ds-validate`, a read-only dry run) reads the already extracted Uni-Mol LMDB files; there is
+no download step. Output: `<source_root>/<task>/processed/<revision>/{train,valid,test}.pt` plus `qc_<split>.json/.tsv`
+and a `provenance.json`. Rules (`downstream/tasks/molnet/task.yaml`): first of the 11 conformers; hydrogens dropped;
+no atom-count cropping; molecules are never dropped for chemistry reasons but flagged and counted (flat conformers,
+rare elements mapped to id 119, one heavy atom, no heavy atom, more than 256 heavy atoms). A molecule left with no
+heavy atom is kept but cannot be embedded: loading its graph raises. Missing classification labels (-1 in the LMDB) become
+NaN with a mask. The ligand graph is the one of the LBA "separate" ligand path (`dataset_type="unimol"`, 5 A radius, 64
+neighbours). The probe trains a masked BCE head (classification) or a masked MSE head on train-standardized targets
+(regression), selects the epoch by the primary metric and also reports the QC-flagged subsets of the test set.
+`downstream.finetune` refuses these kinds. Embedding with a MIND checkpoint requires CUDA and a checkpoint trained with
+`geometry_neutral_virtual_slots` (protein flag set); this path has not been run on GPU.
 
 SaProt (`saprot_650m_pdb`, `saprot_650m_af2`, `saprot_35m_af2`) sees the residues
 MIND kept, one `<AA><3Di>` token each; the 3Di state comes from Foldseek on the
@@ -64,7 +79,7 @@ and is valid for that processed revision only.
 
 ## Layout
 
-Data (outside Git): `/home/yusuf/data/downstream/<task>/<modality>/{raw,processed,splits,provenance.json}`.
+Data (outside Git): `<data_root>/downstream/<task>/<modality>/{raw,processed,splits,provenance.json}`.
 `processed_revision` in `task.yaml` (EC and GO: `v2`) is appended to the processed directory name; v2 reads PDB
 chain ids of two or three characters (EC v1 lost 46 chains, GO v1 lost 1,171 as `parse_error`). Every `process`
 run appends its own record (command, config/input/output sha256, QC summaries) to `provenance.json`.
@@ -146,7 +161,7 @@ One task family, three tasks, one processed file per split holding all three lab
 (`downstream/tasks/go/`; `task.yaml` is the single config, `mf.py`/`bp.py`/`cc.py` select the branch).
 
 - Source: Zenodo record 6622158, `GeneOntology.zip` (md5 and size pinned in `task.yaml`), the same record that
-  holds EC's archive. Shared raw data lives once in `/home/yusuf/data/downstream/deepfri/raw/`;
+  holds EC's archive. Shared raw data lives once in `<data_root>/downstream/deepfri/raw/`;
   splits, processed files and `provenance.json` are task-specific under `deepfri/go/`.
 - Annotation file: per ontology a 4-row block (terms, names) in the order MF, BP, CC, then one row per chain.
   `read_go_annotations` rejects any deviation (header text, GO id shape, duplicate terms or chains, term
