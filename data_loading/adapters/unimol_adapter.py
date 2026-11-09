@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 import lmdb
 from tqdm import tqdm
 
-from data_loading.adapters.base_adapter import BaseAdapter
+from data_loading.adapters.base_adapter import BaseAdapter, report_skipped_items
 from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 
 
@@ -40,21 +40,22 @@ class UniMolAdapter(BaseAdapter):
             raise FileNotFoundError(f"No .lmdb file found in directory: {data_path}")
         return data_path
 
-    def _load_lmdb_item(self, value: bytes) -> Optional[Dict[str, Any]]:
+    def _load_lmdb_item(self, value: bytes) -> Dict[str, Any]:
+        """Decode one LMDB record; raise ``ValueError(reason)`` for a record that cannot be used."""
         try:
             item = pickle.loads(value)
-        except Exception:
-            return None
+        except Exception as exc:
+            raise ValueError("not a pickle") from exc
 
         if not isinstance(item, dict):
-            return None
+            raise ValueError("not a dict")
 
         atoms = item.get("atoms") or item.get("atom_symbols") or item.get("elements")
         coordinates = item.get("coordinates") or item.get("coords") or item.get("positions")
         smiles = item.get("smi") or item.get("smiles") or item.get("smile")
 
         if atoms is None or coordinates is None:
-            return None
+            raise ValueError("missing atoms or coordinates")
 
         try:
             atom_list = [str(atom).strip() for atom in atoms]
@@ -69,11 +70,11 @@ class UniMolAdapter(BaseAdapter):
                 coord_source = coord_source.tolist()
 
             coord_list = [tuple(map(float, coord[:3])) for coord in coord_source]
-        except Exception:
-            return None
+        except Exception as exc:
+            raise ValueError("unreadable coordinates") from exc
 
         if len(atom_list) != len(coord_list):
-            return None
+            raise ValueError("atom and coordinate counts differ")
 
         return {
             "atoms": atom_list,
@@ -131,9 +132,10 @@ class UniMolAdapter(BaseAdapter):
                     if row_idx >= end_idx:
                         break
 
-                    item = self._load_lmdb_item(value)
-                    if item is None:
-                        continue
+                    try:
+                        item = self._load_lmdb_item(value)
+                    except ValueError as exc:
+                        raise ValueError(f"{lmdb_path} row {row_idx}: {exc}") from exc
 
                     raw_items.append(item)
                     if max_samples is not None and len(raw_items) >= max_samples:
@@ -167,7 +169,7 @@ class UniMolAdapter(BaseAdapter):
         env = lmdb.open(lmdb_path, subdir=False, readonly=True, lock=False, readahead=False)
         total_written = 0
         total_seen = 0
-        skipped = 0
+        skipped_items: List[tuple] = []
         out_f = None
 
         if cache_path:
@@ -192,9 +194,10 @@ class UniMolAdapter(BaseAdapter):
                         break
 
                     total_seen += 1
-                    item = self._load_lmdb_item(value)
-                    if item is None:
-                        skipped += 1
+                    try:
+                        item = self._load_lmdb_item(value)
+                    except ValueError as exc:
+                        skipped_items.append((f"row {row_idx}", str(exc)))
                         progress.update(1)
                         continue
 
@@ -215,6 +218,8 @@ class UniMolAdapter(BaseAdapter):
             env.close()
 
         print(
-            f"✅ UniMol processing complete: seen={total_seen:,}, written={total_written:,}, skipped={skipped:,}"
+            f"UniMol processing complete: seen={total_seen:,}, written={total_written:,}, "
+            f"skipped={len(skipped_items):,}"
         )
+        report_skipped_items(self.dataset_type, total_seen, skipped_items, cache_path)
         return total_written
