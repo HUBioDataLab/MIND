@@ -16,17 +16,18 @@ pretraining model a drop-in GET model.
 
 ## ESA graph attention
 
-The local code in `esa/masked_layers.py` exposes MAB/SAB/PMA-style components
-and configurable `layer_types`. In the default MIND pretraining config, M/S/P
+The local code in `esa/masked_layers.py` (SAB and PMA components) and
+`esa/mha_flash_varlen.py` (the MAB attention kernel) exposes MAB/SAB/PMA-style
+components and configurable `layer_types`. In the default MIND pretraining config, M/S/P
 semantics are implemented as graph-local M attention, molecule-global S
-attention, and PMA pooling. This is a code-level comparison only. The archived
-`papers/ESA_COMPARISON.md` attributed broader architectural and performance
-claims to an external paper without pinning each claim to a verified source;
-those claims are intentionally not repeated here.
+attention, and PMA pooling. This is a code-level comparison only. Broader
+architectural and performance claims about the external ESA paper are
+intentionally not repeated here because they are not pinned to a verified source.
 
 ## Salad
 
-MIND’s protein cache builder uses a Salad-inspired naming and three-tier idea:
+MIND’s protein graph (built at load time and at runtime; the chunks store no edges)
+uses a Salad-inspired naming and three-tier idea:
 CA sequence neighbors, local spatial neighbors, and CA long-range random edges.
 The exact MIND implementation is in
 [`HYBRID_EDGES.md`](../architecture/HYBRID_EDGES.md), including its different

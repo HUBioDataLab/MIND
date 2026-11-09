@@ -48,12 +48,14 @@ edge index and perform graph-local attention. `S` layers perform global
 self-attention within each molecule. Both tiers and edge types are represented
 to invariant attention primarily by connectivity; the default node path does
 not pass a discrete tier label. The encoder’s RBF and invariant summaries are
-computed from runtime edges, but the chemical-coordination implementation has
-an explicit-bond precedence caveat documented in [the model overview](MODEL_OVERVIEW.md).
+computed from runtime edges. Chemical coordination picks explicit bonds or the
+distance proxy per graph (see [the model overview](MODEL_OVERVIEW.md)); protein
+graphs have no explicit bonds and use the proxy.
 
 This is sparse graph routing, not a claim that every computation is O(NK):
-global S attention and padded intermediate tensors can still scale with the
-largest graph in a batch. An optional distance-bias path exists but is disabled
+global S attention can still scale with the largest graph in a batch, and so do
+the padded intermediate tensors unless `esa_packed_rows: true` is set (both
+four-domain configs), in which case ESA pads only once, before PMA. An optional distance-bias path exists but is disabled
 by default.
 
 ## Configuration reference

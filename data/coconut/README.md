@@ -2,7 +2,7 @@
 
 Scripts written by Ege (HuBioDataLab) to prepare the COCONUT 3D SDF before it is turned into
 training chunks. They were never in this repository; they are copied **unmodified** from the
-Atum archive (`/media/16TB/archive/yusuf/MIND/data/raw/metabolite/coconut/source_ege_hubiodatalab/`)
+project's raw-data archive (`<ARCHIVE_DIR>/metabolite/coconut/source_ege_hubiodatalab/`)
 so that a clone can reproduce the preparation. They stream the SDF with RDKit and take file
 names on the command line (defaults are relative to `data/COCONUT/`).
 
@@ -25,7 +25,7 @@ adapter expects the extracted file as `<data_path>/COCONUT/coconut.sdf` (rename 
 
 ## Open question: which SDF produced the 497 production chunks?
 
-The training chunks (`/home/yusuf/data/metabolites/processed_chunk_*`) hold 2,755,135 graphs
+The training chunks (`<DATA_ROOT>/metabolites/processed_chunk_*`) hold 2,755,135 graphs
 (about 5,549 per chunk, which fits roughly 500 chunks of a ~2.8 M-molecule SDF). Record
 counts of the archived files (10 October): `coconut_min10atoms_allowed_elements_selected_600000.sdf`
 has 600,000 entries and `coconut_min10atoms.sdf` has 5,599,574, so neither is the source;
