@@ -1,0 +1,93 @@
+# MoleculeNet (QM9 excluded): 14 downstream tasks from the Uni-Mol LMDB release, one task family (GO-style),
+# one processed directory per task under <source_root>/<task>/processed/<revision>.
+#
+# Source (Yusuf-approved 2026-11-09): molecular_property_prediction.tar.gz of the Uni-Mol repository (DP Technology),
+# extracted under <source_root>/raw/extracted/molecular_property_prediction/<dataset>/{train,valid,test}.lmdb.
+# The archive was downloaded and verified (md5/sha256) before; see <source_root>/provenance.json. No licence text
+# ships with the data: local use only, no redistribution. The pickles come from a third party and are read with a
+# restricted unpickler (numpy arrays only).
+#
+# Decisions (Yusuf, 2026-11-09):
+#   split          Uni-Mol scaffold split as shipped in the LMDB files (train / valid / test); primary.
+#   conformer      the FIRST conformer (index 0) of the 11 stored per molecule. The last one (index 10) is the flat
+#                  fallback of Uni-Mol and is never used. Molecules whose 11 conformers are all flat (z = 0, RDKit
+#                  failed) are flagged and counted, not dropped; metrics use every molecule, flagged subsets are
+#                  reported in addition.
+#   hydrogens      dropped (Uni-Mol --only-polar 0 and our pretraining data have no H). Counts are in the QC report.
+#   atom count     NO cropping (Uni-Mol crops at 256 atoms; we do not). Molecules above 256 heavy atoms are counted.
+#   rare elements  an element outside the whitelist of data_loading.cache_to_pyg maps to id 119 at graph-build time.
+#                  Such molecules are kept, flagged and counted per element.
+#   empty/single   a molecule left with 0 heavy atoms (ion/salt/H-only) is kept in the processed file, flagged
+#                  `no_heavy_atoms` and counted; it cannot be embedded (the graph needs one atom) and any attempt
+#                  raises, so the embed step must decide on it explicitly. One heavy atom is flagged
+#                  `single_heavy_atom`; its graph has no edge. Inventory of 9 Nov 2026: no molecule of the 14
+#                  data sets has 0 heavy atoms.
+#   labels         the LMDB codes a missing classification label as -1; stored as NaN plus a boolean mask.
+
+family: molnet
+modality: small_molecule
+processed_revision: v1
+source_name: unimol_molnet
+source_root: /home/yusuf/data/downstream/unimol_molnet      # task data_root = <source_root>/<task>
+raw_subdir: raw/extracted/molecular_property_prediction
+
+splits: [train, valid, test]
+conformer: {policy: first, expected_per_molecule: 11}
+hydrogens: drop
+max_atoms_policy: none
+report_atom_threshold: 256        # only a counter in the QC report, never a filter
+
+# Label coding of the LMDB: classification targets are {-1 missing, 0, 1}; regression targets are real values
+# (a NaN marks a missing value there; -1 is a real value).
+missing_classification_code: -1
+
+embedding:
+  seed: 0
+  poolings: [mean_atoms]           # `ca` and `mean_residues` need protein template metadata
+  max_atoms_per_batch: 30000
+
+probe:
+  pooling: mean_atoms
+  seeds: [0, 1, 2]
+  epochs: 300
+  patience: 30
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+# Fine-tuning of these kinds is not implemented (downstream.finetune refuses them); the block is kept so a later
+# implementation reads the same keys as the other tasks.
+finetune:
+  pooling: mean_atoms
+  head: mlp
+  seeds: [0]
+  epochs: 50
+  patience: 10
+  max_atoms_per_batch: 15000
+  lr_encoder: 0.00001
+  lr_head: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+# Counts are the entries of the LMDB files measured on 2026-11-09 (inventory); processing fails on any difference.
+# Classification: ROC-AUC (primary, Uni-Mol protocol) and PRC-AUC, mean over targets, per-target masking of missing
+# labels; targets with one class in a split are skipped and counted. Regression: RMSE and MAE averaged over targets;
+# the primary (early stopping) metric is the one Uni-Mol reports: RMSE for ESOL/FreeSolv/Lipophilicity, MAE for QM7/QM8.
+datasets:
+  bbbp: {task: mn_bbbp, kind: multilabel_masked, num_targets: 1, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1631, valid: 204, test: 204}}
+  bace: {task: mn_bace, kind: multilabel_masked, num_targets: 1, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1210, valid: 151, test: 152}}
+  clintox: {task: mn_clintox, kind: multilabel_masked, num_targets: 2, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1182, valid: 148, test: 148}}
+  tox21: {task: mn_tox21, kind: multilabel_masked, num_targets: 12, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 6264, valid: 783, test: 784}}
+  toxcast: {task: mn_toxcast, kind: multilabel_masked, num_targets: 617, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 6860, valid: 858, test: 858}}
+  sider: {task: mn_sider, kind: multilabel_masked, num_targets: 27, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1141, valid: 143, test: 143}}
+  hiv: {task: mn_hiv, kind: multilabel_masked, num_targets: 1, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 32901, valid: 4113, test: 4113}}
+  pcba: {task: mn_pcba, kind: multilabel_masked, num_targets: 128, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 350343, valid: 43793, test: 43793}}
+  muv: {task: mn_muv, kind: multilabel_masked, num_targets: 17, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 74469, valid: 9309, test: 9309}}
+  esol: {task: mn_esol, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 902, valid: 113, test: 113}}
+  freesolv: {task: mn_freesolv, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 513, valid: 64, test: 65}}
+  lipo: {task: mn_lipo, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 3360, valid: 420, test: 420}}
+  qm7dft: {task: mn_qm7, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: mae, expected_counts: {train: 5464, valid: 685, test: 681}}
+  qm8dft: {task: mn_qm8, kind: multitarget_regression, num_targets: 12, metrics: [rmse, mae], primary_metric: mae, expected_counts: {train: 17428, valid: 2179, test: 2179}}

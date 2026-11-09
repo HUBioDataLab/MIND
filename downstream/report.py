@@ -60,6 +60,14 @@ LBA_LITERATURE_NOTE = (
     "to a frozen-encoder probe."
 )
 REGRESSION_TASKS = ("lba",)
+MASKED_KINDS = ("multilabel_masked", "multitarget_regression")
+MOLNET_NOTE = (
+    "MoleculeNet (Uni-Mol LMDB scaffold split, first conformer, H dropped). Frozen-encoder probes; no literature rows: "
+    "Uni-Mol's published numbers are fully fine-tuned, conformer-averaged and 3-seed, so they are not comparable and "
+    "are not entered here. Classification: mean over targets, per-target masking of missing labels; targets with a "
+    "single class in the split are skipped and counted. Regression: errors in original units, averaged over targets. "
+    "Subset rows (flat conformers, rare elements, ...) are reported in addition to, never instead of, the full test set."
+)
 # Fold has three test sets; GearNet's table adds an "Avg." column over them.
 FOLD_TEST_SPLITS = ("test_fold", "test_superfamily", "test_family")
 
@@ -79,6 +87,9 @@ def collect(task: str, root=None) -> list:
         groups[(path.parents[2].name, path.parents[1].name)].append(metrics)
     rows = []
     for (model_id, protocol), runs in sorted(groups.items()):
+        if all(run.get("kind") in MASKED_KINDS for run in runs):
+            rows.append(_masked_row(model_id, protocol, runs))
+            continue
         if all(run.get("kind") == "multiclass" for run in runs):
             test_splits = sorted({k for run in runs for k in run["test"]})
             row = {
@@ -123,6 +134,53 @@ def collect(task: str, root=None) -> list:
                 [run["test"]["all"].get("macro_aupr_num_terms_skipped") for run in runs]),
         })
     return rows
+
+
+def _masked_row(model_id: str, protocol: str, runs: list) -> dict:
+    """Row of a MoleculeNet probe (``multilabel_masked`` or ``multitarget_regression``) over its seeds."""
+    kinds = {run["kind"] for run in runs}
+    if len(kinds) != 1:
+        raise ValueError(f"{model_id}/{protocol}: runs mix the kinds {sorted(kinds)}")
+    kind = kinds.pop()
+    fields = ("roc_auc", "prc_auc") if kind == "multilabel_masked" else ("rmse", "mae")
+    row = {"model_id": model_id, "protocol": protocol, "kind": kind, "seeds": sorted(run["seed"] for run in runs),
+           **{f"val_{f}": _stat([run["val"][f] for run in runs]) for f in fields},
+           **{f"test_{f}": _stat([run["test"]["all"][f] for run in runs]) for f in fields}}
+    if kind == "multilabel_masked":
+        row["test_num_tasks_evaluated"] = _stat([run["test"]["all"]["num_tasks_evaluated"] for run in runs])
+        row["test_num_tasks_skipped"] = _stat([run["test"]["all"]["num_tasks_skipped"] for run in runs])
+    names = sorted({name for run in runs for name in run["test"].get("subsets", {})})
+    row["test_subsets"] = {}
+    for name in names:
+        entries = [run["test"]["subsets"][name] for run in runs if name in run["test"]["subsets"]]
+        row["test_subsets"][name] = {
+            "molecules": entries[0]["molecules"],
+            "undefined_seeds": sum("undefined" in entry for entry in entries),
+            **{f: _stat([entry.get(f) for entry in entries]) for f in fields},
+        }
+    return row
+
+
+def masked_markdown(rows: list) -> str:
+    classification = rows[0]["kind"] == "multilabel_masked"
+    header = (["model_id", "protocol", "val ROC-AUC", "test ROC-AUC", "test PRC-AUC", "tasks evaluated", "tasks skipped"]
+              if classification else ["model_id", "protocol", "val RMSE", "val MAE", "test RMSE", "test MAE"])
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    for row in rows:
+        cells = ([row["model_id"], row["protocol"], _fmt(row["val_roc_auc"]), _fmt(row["test_roc_auc"]),
+                  _fmt(row["test_prc_auc"]), _fmt(row["test_num_tasks_evaluated"]), _fmt(row["test_num_tasks_skipped"])]
+                 if classification else
+                 [row["model_id"], row["protocol"], _fmt(row["val_rmse"]), _fmt(row["val_mae"]),
+                  _fmt(row["test_rmse"]), _fmt(row["test_mae"])])
+        lines.append("| " + " | ".join(cells) + " |")
+    subset_lines = []
+    for row in rows:
+        for name, entry in sorted(row["test_subsets"].items()):
+            values = ", ".join(f"{f} {_fmt(entry[f])}" for f in (("roc_auc", "prc_auc") if classification else ("rmse", "mae")))
+            subset_lines.append(f"- {row['model_id']} / {row['protocol']} / {name} ({entry['molecules']} test molecules): "
+                                f"{values}; undefined in {entry['undefined_seeds']} of {len(row['seeds'])} seeds")
+    return "\n".join(lines) + "\n\n" + MOLNET_NOTE + "\n" + ("\nFlagged test subsets:\n" + "\n".join(subset_lines) + "\n"
+                                                           if subset_lines else "")
 
 
 def _fold_average_stats(model_id: str, protocol: str, runs: list) -> dict:
@@ -196,6 +254,8 @@ def multiclass_markdown(task: str, rows: list) -> str:
 
 
 def to_markdown(task: str, rows: list) -> str:
+    if rows and rows[0].get("kind") in MASKED_KINDS:
+        return masked_markdown(rows)
     if task in REGRESSION_TASKS:
         return regression_markdown(task, rows)
     if task in MULTICLASS_TASKS:

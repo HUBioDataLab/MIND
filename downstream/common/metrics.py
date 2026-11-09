@@ -345,6 +345,23 @@ def multitarget_regression_errors(targets: np.ndarray, predictions: np.ndarray) 
     }
 
 
+def evaluate_multitask_classification(labels: np.ndarray, scores: np.ndarray) -> Dict[str, object]:
+    """ROC-AUC (Uni-Mol's headline) and PRC-AUC of a multi-task data set in one dict; NaN labels are missing.
+
+    Both metrics skip the same single-class tasks, so ``num_tasks_skipped`` and ``skipped_task_indices`` describe both.
+    """
+    roc = multitask_roc_auc(labels, scores)
+    prc = multitask_prc_auc(labels, scores)
+    if roc["skipped_task_indices"] != prc["skipped_task_indices"]:
+        raise RuntimeError("ROC-AUC and PRC-AUC skipped different tasks")
+    return {
+        "roc_auc": roc["roc_auc"], "prc_auc": prc["prc_auc"], "per_task": roc["per_task"],
+        "per_task_prc_auc": prc["per_task"], "num_tasks": roc["num_tasks"],
+        "num_tasks_evaluated": roc["num_tasks_evaluated"], "num_tasks_skipped": roc["num_tasks_skipped"],
+        "skipped_task_indices": roc["skipped_task_indices"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # RNA metrics (rnaglib core tasks; pure functions, no task code yet).
 #

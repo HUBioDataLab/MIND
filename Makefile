@@ -261,6 +261,9 @@ eval-counterfactual:
 #   make ds-validate TASK=reaction       download stops until archive_sha256/archive_bytes are pinned in task.yaml)
 #   make ds-leakage LEAK_TASK=go REFERENCE=protein_1m NAMESPACE=pdb_chain PROVENANCE=<task dir>/provenance.json \
 #        QUERIES="valid=<dir>/splits/valid.txt test=<dir>/splits/test.txt" [ID_MAP=<pdb_chain->uniprot tsv>]
+#   make ds-process TASK=mn_esol        (MoleculeNet mn_bbbp|bace|clintox|tox21|toxcast|sider|hiv|pcba|muv|esol|freesolv|lipo|qm7|qm8;
+#   make ds-validate TASK=mn_esol        the Uni-Mol LMDB archive is already extracted, so there is no ds-download; validate
+#                                        reads and checks without writing; probe/report work as for the other tasks)
 #   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D|saprot_650m_pdb> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
 #   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]
@@ -290,9 +293,11 @@ DS_LBA_ARGS := $(DS_SPLIT_TAG_ARGS) $(if $(strip $(REPRESENTATION)),--representa
 # ec prepare parallelizes structure parsing with --workers; lba reads one LMDB
 # sequentially and only bounds its torch threads.
 # GO branches (go_mf, go_bp, go_cc) share one prepare module.
-DS_PREPARE_MODULE = $(if $(filter go_%,$(TASK)),go,$(TASK))
-DS_PROCESS_ARGS = $(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS))
-DS_DOWNLOAD_ARGS = $(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),)
+# MoleculeNet tasks (mn_*) share the molnet prepare module, which takes --task and reads the LMDB files serially.
+DS_PREPARE_MODULE = $(if $(filter go_%,$(TASK)),go,$(if $(filter mn_%,$(TASK)),molnet,$(TASK)))
+DS_MOLNET_ARGS = $(if $(filter mn_%,$(TASK)),--task $(TASK),)
+DS_PROCESS_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS)))
+DS_DOWNLOAD_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),))
 
 .PHONY: ds-snapshot ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream
 
@@ -309,7 +314,7 @@ ds-download ds-process:
 
 # Read-only: re-checks labels and split lists against task.yaml (go, fold, reaction).
 ds-validate:
-	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare validate
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare validate $(DS_MOLNET_ARGS)
 
 # Leakage registry: compares task split ids with a pretraining reference (CPU, read-only on the references;
 # appends a record to the task's provenance.json and writes a per-id TSV next to it).
