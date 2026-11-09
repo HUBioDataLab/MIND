@@ -214,8 +214,8 @@ geometry_neutral_virtual_slots:
   gradient_audit_batches: 1
 
 # G1 candidate C (UniMol): a masked UniMol atom keeps only its binary bond topology in the encoder/ESA
-# view; position, distances and distance-derived features are hidden. OFF here: switching it on is a
-# separate decision (training-matched validation by the user). The threshold is the largest distance
+# view; position, distances and distance-derived features are hidden. OFF in this file: the
+# *_unimol_hidden.yaml child of this config switches it on (a separate, user-run decision). The threshold is the largest distance
 # that still counts as a bond (never chosen from the masked element); 2.1 A was picked from a
 # false-bond measurement on real UniMol molecules (tests/test_unimol_geometry_hiding.py).
 unimol_masked_geometry_hiding:

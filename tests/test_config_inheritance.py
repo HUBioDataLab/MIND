@@ -82,3 +82,16 @@ def test_single_domain_config_differs_from_base_only_in_domain_selection(domain)
         k: v for k, v in base["multi_domain"].items() if k not in {"datasets", "atom_sampling"}
     }
     create_pretraining_config(**config)
+
+
+@pytest.mark.parametrize("stem", ["pretraining_config_multidomain_1m", "pretraining_config_multidomain_1m_coconut"])
+def test_unimol_hidden_child_differs_from_its_base_only_in_the_hiding_flag_and_run_name(stem):
+    base = load_config_yaml(REPO_ROOT / "core" / f"{stem}.yaml")
+    child = load_config_yaml(REPO_ROOT / "core" / f"{stem}_unimol_hidden.yaml")
+
+    differing = {key for key in base.keys() | child.keys() if base.get(key) != child.get(key)}
+    assert differing == {"wandb_run_name", "unimol_masked_geometry_hiding"}
+    assert child["wandb_run_name"] != base["wandb_run_name"]
+    assert base["unimol_masked_geometry_hiding"] == {"enabled": False, "bond_threshold_angstrom": 2.1}
+    assert child["unimol_masked_geometry_hiding"] == {"enabled": True, "bond_threshold_angstrom": 2.1}
+    assert create_pretraining_config(**child).unimol_masked_geometry_hiding["enabled"] is True

@@ -1,0 +1,15 @@
+# ===================================================================
+# MIND - G1 trial: pretraining_config_multidomain_1m.yaml with ONE change
+# ===================================================================
+# unimol_masked_geometry_hiding.enabled: true (bond threshold 2.1 A, set in the base file).
+# Masked UniMol atoms then keep only their binary bond topology in the encoder/ESA view
+# (no position, no distances). Everything else, including the data and sampling, comes
+# from the base file. Three domains (protein, RNA, UniMol); not part of the default configs.
+# Usage: make train GPU=<id> CONFIG=pretraining_config_multidomain_1m_unimol_hidden EPOCHS=<n> SEED=42 LOG=<name>
+# ===================================================================
+
+base_config: pretraining_config_multidomain_1m.yaml
+wandb_run_name: "multidomain-1m-edgefree-unimol-hidden-v1"
+
+unimol_masked_geometry_hiding:
+  enabled: true
