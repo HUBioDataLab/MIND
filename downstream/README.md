@@ -61,8 +61,10 @@ and is valid for that processed revision only.
   (`missing_atoms`); the checked-in value `UNDECIDED` stops processing.
   See `downstream/common/missing_atoms.py` for `strict`,
   `drop_residue_missing_backbone` + `mask` / `drop_chain_if_fraction_above`.
-- Experimental structures never reach `ProteinAdapter` unchecked: the adapter
-  pads a missing sidechain atom with V and shifts later atoms into wrong slots.
+- Experimental structures never reach `ProteinAdapter` unchecked: its 14-slot
+  routine pads a missing sidechain atom with V and shifts later atoms into wrong
+  slots. (Its raw-file entry, `convert_to_universal`, used by the pretraining
+  builders, refuses any incomplete or unknown residue with a `ValueError`.)
   Incomplete residues are masked like a pretraining MLM block (all 14 slots,
   mask token 0, sidechain slots latent) or the chain is dropped.
 - Graphs are built with the training functions (`_standardize_residue_to_14_atoms`,

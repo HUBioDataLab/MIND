@@ -21,6 +21,7 @@ from data_loading.adapters.base_adapter import BaseAdapter
 from data_loading.atom_position_vocab import (
     PROTEIN_BACKBONE_ATOMS,
     PROTEIN_SIDECHAIN_ATOM_PRIORITY,
+    PROTEIN_SIDECHAIN_ATOMS_BY_RESIDUE,
     PROTEIN_TERMINAL_ATOMS,
 )
 from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
@@ -146,8 +147,30 @@ class ProteinAdapter(BaseAdapter):
         """
         return VIRTUAL_ATOM
     
+    @staticmethod
+    def _require_complete_residue(atoms: List[UniversalAtom], res_name: str, where: str) -> None:
+        """Refuse a residue whose heavy atoms differ from the canonical list.
+
+        ``_standardize_residue_to_14_atoms`` packs whatever atoms it gets into
+        consecutive slots, so a missing atom would shift later atoms into wrong
+        slots and a missing backbone atom would give a 13-atom block. Experimental
+        structures must pass an explicit policy first (``downstream.common.missing_atoms``).
+        """
+        expected_sidechain = PROTEIN_SIDECHAIN_ATOMS_BY_RESIDUE.get(res_name)
+        if expected_sidechain is None:
+            raise ValueError(f"{where}: no canonical heavy-atom list for residue name {res_name!r}")
+        present = {atom.pos_code for atom in atoms} - TERMINAL_ATOMS
+        expected = list(BACKBONE_ATOMS) + list(expected_sidechain)
+        missing = [name for name in expected if name not in present]
+        unexpected = sorted(present - set(expected))
+        if missing or unexpected:
+            raise ValueError(
+                f"{where}: missing {missing}, unexpected {unexpected}; "
+                "incomplete residues need an explicit missing-atom policy before 14-slot conversion"
+            )
+
     def _standardize_residue_to_14_atoms(
-        self, 
+        self,
         atoms: List[UniversalAtom], 
         res_name: str,
         block_idx: int,
@@ -405,6 +428,11 @@ class ProteinAdapter(BaseAdapter):
                     if block_atoms:
                         # Apply 14-atom standardization for standard amino acids
                         if self.use_14atom_uniform and is_standard_aa:
+                            self._require_complete_residue(
+                                block_atoms, res_name,
+                                f"{raw_item.name} chain {chain_id} residue {res_name}{residue.get_id()[1]}"
+                                f"{residue.get_id()[2].strip()}",
+                            )
                             block_atoms = self._standardize_residue_to_14_atoms(
                                 block_atoms, 
                                 res_name, 

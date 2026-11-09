@@ -181,6 +181,30 @@ END
                     )
 
 
+    def test_protein_adapter_refuses_incomplete_or_unknown_residues(self):
+        """A raw file with a missing heavy atom must fail, not shift atoms into wrong slots."""
+        from downstream_helpers import chain_of, pdb_text, residue_atoms
+
+        cases = {
+            "sidechain": (chain_of(["ALA", "LYS"], drops={1: ("CD",)}), r"LYS\s*2.*missing \['CD'\]"),
+            "backbone": (chain_of(["SER", "ALA"], drops={0: ("O",)}), r"SER\s*1.*missing \['O'\]"),
+            "unknown": ([("UNK", residue_atoms("ALA", 0), "ATOM")], r"UNK"),
+        }
+        adapter = ProteinAdapter(use_14atom_uniform=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (residues, message) in cases.items():
+                path = Path(tmp) / f"{name}.pdb"
+                path.write_text(pdb_text({"A": residues}))
+                with self.subTest(case=name):
+                    with self.assertRaisesRegex(ValueError, message):
+                        adapter.convert_to_universal(path)
+
+            complete = Path(tmp) / "complete.pdb"
+            complete.write_text(pdb_text({"A": chain_of(["ALA", "LYS", "TRP", "GLY"])}))
+            mol = adapter.convert_to_universal(complete)
+        self.assertEqual([len(b.atoms) for b in mol.blocks], [14, 14, 14, 14])
+        self.assertEqual([a.pos_code for a in mol.blocks[1].atoms[4:9]], ["CB", "CG", "CD", "CE", "NZ"])
+
     def test_adapter_fail_loud_on_invalid_path_or_manifest(self):
         """Test fail-loud contract when non-existent path or bad manifest is provided."""
         adapter = ProteinAdapter()

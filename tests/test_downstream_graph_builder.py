@@ -13,12 +13,13 @@ from data_loading.adapters.protein_adapter import ProteinAdapter
 from data_loading.atom_position_vocab import (
     PROTEIN_SIDECHAIN_ATOMS_BY_RESIDUE, VIRTUAL_ATOMIC_NUMBER,
 )
+from data_loading.data_types import UniversalAtom
 from downstream.common import graph_builder as gb
 from downstream.common.encoder import collate, prepare_encoder_batch
 from downstream.common.missing_atoms import apply_policy, parse_policy
 from downstream.common.structure_io import read_chains
 from downstream.tasks.ec.dataset import windows
-from downstream_helpers import chain_of, pdb_text
+from downstream_helpers import chain_of, pdb_text, residue_atoms
 
 MASK = parse_policy({"policy": "drop_residue_missing_backbone", "incomplete_sidechain": "mask"})
 ALL_RESIDUES = sorted(PROTEIN_SIDECHAIN_ATOMS_BY_RESIDUE)
@@ -37,6 +38,12 @@ def _write(tmp_path, name, residues):
 
 
 def _training_node_sample(path):
+    sample, reason = _training_build(path)
+    assert sample is not None, reason
+    return sample
+
+
+def _training_build(path):
     """``build_edge_free_chunks.build_node_sample`` without leaking its CUDA_VISIBLE_DEVICES side effect."""
     saved_env, saved_threads = os.environ.get("CUDA_VISIBLE_DEVICES"), torch.get_num_threads()
     try:
@@ -50,8 +57,7 @@ def _training_node_sample(path):
         else:
             os.environ["CUDA_VISIBLE_DEVICES"] = saved_env
         torch.set_num_threads(saved_threads)
-    assert sample is not None, reason
-    return sample
+    return sample, reason
 
 
 def _downstream_node(path):
@@ -83,9 +89,19 @@ def test_fixed_slot_contract_14_slots_and_v_id(tmp_path):
 def test_adapter_silent_shift_is_caught_by_the_downstream_path(tmp_path):
     path = _write(tmp_path, "lys", chain_of(["LYS"], drops={0: ("CD",)}))
     with contextlib.redirect_stdout(io.StringIO()):
-        block = ProteinAdapter().convert_to_universal(path).blocks[0]
-    codes = [atom.pos_code for atom in block.atoms]
-    # The unguarded adapter quietly packs CE into the CD slot and pads with V.
+        adapter = ProteinAdapter()
+    # The raw-file entry (pretraining builders) refuses the residue ...
+    with pytest.raises(ValueError, match=r"missing \['CD'\]"):
+        adapter.convert_to_universal(path)
+    # ... and the pretraining builder records it as a failed structure instead of a sample.
+    sample, reason = _training_build(path)
+    assert sample is None and "missing ['CD']" in reason
+
+    # The 14-slot routine itself still packs CE into the CD slot and pads with V;
+    # the downstream path calls it only for residues the policy has masked.
+    atoms = [UniversalAtom(element=e, position=xyz, pos_code=n, block_idx=0, atom_idx_in_block=i, entity_idx=0)
+             for i, (n, e, xyz) in enumerate(residue_atoms("LYS", 0, drop=("CD",)))]
+    codes = [atom.pos_code for atom in adapter._standardize_residue_to_14_atoms(atoms, "LYS", 0)]
     assert len(codes) == 14 and codes[6] == "CE" and codes[8] == "V5"
 
     chain = read_chains(path, mse_to_met=True)["A"]
