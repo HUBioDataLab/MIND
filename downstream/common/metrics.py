@@ -150,3 +150,40 @@ def evaluate_regression(targets: np.ndarray, predictions: np.ndarray) -> Dict[st
         "target_mean": float(checked_targets.mean()),
         "target_std": float(checked_targets.std()),
     }
+
+
+# ---------------------------------------------------------------------------
+# Single-label multi-class metrics (Fold, Reaction: accuracy is the primary number).
+# ---------------------------------------------------------------------------
+
+def _check_multiclass(targets: np.ndarray, scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    targets = np.asarray(targets)
+    scores = np.asarray(scores, dtype=np.float64)
+    if targets.ndim != 1 or scores.ndim != 2 or scores.shape[0] != targets.shape[0]:
+        raise ValueError(f"targets {targets.shape} must be 1-D class ids matching scores {scores.shape} (N x classes)")
+    if targets.size == 0:
+        raise ValueError("multi-class metrics need at least one sample")
+    if not np.issubdtype(targets.dtype, np.integer):
+        raise ValueError(f"class targets must be integers, got {targets.dtype}")
+    if targets.min() < 0 or targets.max() >= scores.shape[1]:
+        raise ValueError(f"class ids must lie in [0, {scores.shape[1]}), got [{targets.min()}, {targets.max()}]")
+    if not np.isfinite(scores).all():
+        raise ValueError("scores contain NaN or inf")
+    return targets.astype(np.int64), scores
+
+
+def accuracy(targets: np.ndarray, scores: np.ndarray) -> float:
+    """Fraction of samples whose arg-max class equals the target (GearNet / IEConv headline metric)."""
+    targets, scores = _check_multiclass(targets, scores)
+    return float((scores.argmax(axis=1) == targets).mean())
+
+
+def evaluate_multiclass(targets: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
+    targets, scores = _check_multiclass(targets, scores)
+    top5 = np.argsort(-scores, axis=1)[:, :min(5, scores.shape[1])]
+    return {
+        "accuracy": accuracy(targets, scores),
+        "top5_accuracy": float((top5 == targets[:, None]).any(axis=1).mean()),
+        "num_proteins": int(len(targets)),
+        "num_classes_present": int(len(np.unique(targets))),
+    }

@@ -1,0 +1,96 @@
+# SCOPe 1.75 fold classification (GearNet "Fold3D" = Hou et al. 2018 / Hermosilla et al. 2021 split), 1195 fold classes.
+# Metric: top-1 accuracy, reported separately on three test sets (test_fold, test_superfamily, test_family).
+#
+# Source: Zenodo record 7593591 "Protein Dataset for TorchProtein" (CC BY 4.0; Zuobai Zhang, Minghao Xu), file fold3d.zip.
+# Verified 2026-11-08 [Zenodo API, no data downloaded]: size 670,898,225 B, md5 7b052a94afa4c66f9bebeb9efd769186.
+# Verified from GearNet gearnet/dataset.py (commit 28bf75f, MIT): class Fold3D, splits train/valid/test_fold/test_family/
+# test_superfamily, per-split <split>.zip holding *.hdf5, label files <split>.txt (label = LAST column), class_map.txt,
+# hdf5 keys atom_pos (frame 0 used), atom_types, atom_names, atom_residue_id, atom_residue_names; num_class 1195.
+# Verified from the IEConv repo copies of the lists (Datasets/data/HomologyTAPE, commit cc067a2): 12,312 / 736 / 718 / 1,254 /
+# 1,272 proteins, 1195 classes, no domain in two splits, every test label also occurs in train. The same numbers for the
+# Zenodo archive's own txt files are NOT yet verified (download/validate checks them and fails on a mismatch).
+#
+# Structures: the archive's own hdf5 files (coordinates of PDB-derived SCOP domains). No AFDB structure is needed.
+# UNVERIFIED until download: how many hdf5 files hold only CA atoms (the IEConv loader special-cases "only CA" proteins);
+# with the EC/GO missing-atom policy such domains are dropped and counted (qc), never silently kept.
+
+family: fold
+task: fold
+modality: protein
+source_name: gearnet
+source_root: /home/yusuf/data/downstream/gearnet
+data_root: /home/yusuf/data/downstream/gearnet/fold     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)
+
+source: fold3d_zenodo_zip
+sources:
+  fold3d_zenodo_zip:
+    url: https://zenodo.org/api/records/7593591/files/fold3d.zip/content    # file link given by the Zenodo API
+    record: https://zenodo.org/records/7593591
+    archive_name: fold3d.zip
+    md5: 7b052a94afa4c66f9bebeb9efd769186
+    bytes: 670898225
+    license: cc-by-4.0                   # Zenodo record metadata
+    extract_dir: fold3d                  # extraction target below raw/; the folder holding class_map.txt is searched below it
+    class_map_file: class_map.txt        # UNVERIFIED location inside the archive (GearNet code reads <fold3d>/class_map.txt)
+    label_files: {train: train.txt, valid: valid.txt, test_fold: test_fold.txt,
+                  test_family: test_family.txt, test_superfamily: test_superfamily.txt}
+    inner_archives: {train: train.zip, valid: valid.zip, test_fold: test_fold.zip,
+                     test_family: test_family.zip, test_superfamily: test_superfamily.zip}
+
+label_count: 1195                        # GearNet config num_class and IEConv class_map.txt; checked against the archive
+id_namespace: scop_domain                # ids like d1v4wb_ (SCOPe 1.75 domain ids); see downstream/leakage_references.yaml
+splits: [train, valid, test_fold, test_family, test_superfamily]
+train_split: train
+valid_split: valid
+test_splits: [test_fold, test_family, test_superfamily]
+# IEConv-repo list sizes; download validation fails if the archive's lists differ.
+expected_chain_counts: {train: 12312, valid: 736, test_fold: 718, test_family: 1272, test_superfamily: 1254}
+metric: accuracy
+
+structure:
+  mse_to_met: true
+
+# Same decision as EC/GO (2026-10-25): drop residues missing a backbone atom, mask incomplete sidechains.
+missing_atoms:
+  policy: drop_residue_missing_backbone
+  incomplete_sidechain: mask
+
+max_residues: 1024
+length_policy: skip                      # dropped proteins are counted per split in qc_<split>.json and in ProcessedSplit.report
+min_residues: 2
+
+qc:
+  max_failed_chain_fraction: 0.05        # per split; above it the processed file is not written, exit 1
+  max_download_failure_fraction: 0.0     # archive-based: every listed protein must have its hdf5 file
+
+graph:
+  sequence_neighbors_k: 3
+
+embedding:
+  seed: 0
+  poolings: [mean_atoms, ca, mean_residues]
+  max_atoms_per_batch: 30000
+
+probe:
+  pooling: mean_atoms
+  seeds: [0, 1, 2]
+  epochs: 300
+  patience: 30
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+finetune:
+  pooling: mean_atoms
+  head: mlp
+  seeds: [0]
+  epochs: 50
+  patience: 10
+  max_atoms_per_batch: 15000
+  lr_encoder: 0.00001
+  lr_head: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2

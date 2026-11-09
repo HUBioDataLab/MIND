@@ -1,0 +1,101 @@
+# Enzyme reaction classification ("Reaction", GearNet PR-10; Hermosilla et al. 2021 "ProtFunct"), 384 EC-number classes.
+# Metric: top-1 accuracy on the single test split.
+#
+# Source: official IEConv_proteins repository, https://github.com/phermosilla/IEConv_proteins (commit cc067a2, 2022-01-24).
+# Verified 2026-11-08 [README + files read from the repo, no dataset archive downloaded]:
+#   * code license MIT (LICENSE); the DATA license of the Google Drive archive is NOT stated anywhere -> UNVERIFIED;
+#   * README link "Protein function": Google Drive id 1udP6_90WYkwkvL1LwqIAzf9ibegBJ8rI, "Extract content in
+#     Datasets/data/ProtFunct"; archive size, md5 and format (zip or tar) are NOT stated -> UNVERIFIED (trust on first use:
+#     `download` records sha256/bytes, you review them and pin them below before `process` is allowed);
+#   * the label lists ARE in the repo and are pinned here by sha256: training.txt 29,215, validation.txt 2,562,
+#     testing.txt 5,651 proteins (=37,428, all unique, no overlap), unique_functions.txt 384 EC numbers,
+#     chain_functions.txt `<protein>,<class index>` for all 37,428; every class occurs in every split;
+#   * ids look like 4xi6.A (PDB entry + '.' + chain); the loader reads <name>.hdf5 from <ProtFunct>/data/ (code), the
+#     hdf5 layout is the IEConv one (same keys as Fold3D).
+# Not verified: that the Drive archive contains exactly these 37,428 hdf5 files (download/validate fail if not) and
+# whether Google Drive serves the file to an unauthenticated script (if it returns an HTML page, `download` fails loudly;
+# place the archive manually at raw/<archive_name> and rerun).
+
+family: reaction
+task: reaction
+modality: protein
+source_name: ieconv
+source_root: /home/yusuf/data/downstream/ieconv
+data_root: /home/yusuf/data/downstream/ieconv/reaction     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)
+
+source: ieconv_protfunct
+sources:
+  ieconv_protfunct:
+    repo: https://github.com/phermosilla/IEConv_proteins
+    commit: cc067a2f878f2c3918deae465371a7b708f3647c
+    lists_url: https://raw.githubusercontent.com/phermosilla/IEConv_proteins/{commit}/Datasets/data/ProtFunct/{name}
+    lists:
+      training.txt: b3caaea7bee88412d4297df36ab5c88b36c4c4ed22a88d7976e502f277fd665c
+      validation.txt: a250a08d705a17bb862c652b73fc5c6e00ecf39e5cf4a5d9268ed4852c8b88fb
+      testing.txt: aac62706b774901d2835373df5ceaf41b6596a0223aa2a3ebaf250619eefcad2
+      unique_functions.txt: b612bba0a1b798464c08cc0e6671dee53aa6eb71b0e33580c56e3be0042c08d3
+      chain_functions.txt: 3141f70d99e1577666ab0477ab2f73f7c91b76886178309ef7c125e03e6aab79
+    split_lists: {train: training.txt, valid: validation.txt, test: testing.txt}
+    archive_url: https://drive.usercontent.google.com/download?id=1udP6_90WYkwkvL1LwqIAzf9ibegBJ8rI&export=download&confirm=t
+    archive_readme_url: https://drive.google.com/uc?export=download&id=1udP6_90WYkwkvL1LwqIAzf9ibegBJ8rI   # as printed in the README
+    archive_name: protfunct_drive_archive
+    archive_sha256: null                 # UNPINNED: fill in after the first download (see provenance.json), then rerun
+    archive_bytes: null                  # UNPINNED
+    license: unknown                     # code MIT; dataset license not stated by the authors
+    extract_dir: protfunct
+
+label_count: 384
+id_namespace: pdb_chain                  # 4xi6.A style; the leakage tool accepts the '.' separator
+splits: [train, valid, test]
+train_split: train
+valid_split: valid
+test_splits: [test]
+expected_chain_counts: {train: 29215, valid: 2562, test: 5651}
+metric: accuracy
+
+structure:
+  mse_to_met: true
+
+missing_atoms:
+  policy: drop_residue_missing_backbone
+  incomplete_sidechain: mask
+
+max_residues: 1024
+length_policy: skip
+min_residues: 2
+
+qc:
+  max_failed_chain_fraction: 0.05
+  max_download_failure_fraction: 0.0
+
+graph:
+  sequence_neighbors_k: 3
+
+embedding:
+  seed: 0
+  poolings: [mean_atoms, ca, mean_residues]
+  max_atoms_per_batch: 30000
+
+probe:
+  pooling: mean_atoms
+  seeds: [0, 1, 2]
+  epochs: 300
+  patience: 30
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+finetune:
+  pooling: mean_atoms
+  head: mlp
+  seeds: [0]
+  epochs: 50
+  patience: 10
+  max_atoms_per_batch: 15000
+  lr_encoder: 0.00001
+  lr_head: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2

@@ -6,6 +6,9 @@ for MIND encoders.
 | Task | Kind | Data | Primary metric |
 |---|---|---|---|
 | `ec` | multi-label, 538 EC terms | DeepFRI/GearNet split, 15,550 / 1,729 / 1,919 chains, test cutoffs 30/40/50/70/95 % | Fmax (higher) |
+| `go_mf` / `go_bp` / `go_cc` | multi-label, 489 / 1,943 / 320 GO terms (counts UNVERIFIED until download) | DeepFRI nrPDB-GO split as packaged by TorchDrug (Zenodo 6622158 GeneOntology.zip), test cutoffs 30/40/50/70/95 % | Fmax (higher) |
+| `fold` | multi-class, 1,195 SCOPe 1.75 folds | GearNet Fold3D (Zenodo 7593591, fold3d.zip, CC BY 4.0), 12,312 / 736 / 718 / 1,272 / 1,254 (train / valid / test_fold / test_family / test_superfamily) | accuracy, one per test split |
+| `reaction` | multi-class, 384 EC numbers | IEConv ProtFunct (github.com/phermosilla/IEConv_proteins, Google Drive archive), 29,215 / 2,562 / 5,651 | accuracy |
 | `lba` | regression, pK | ATOM3D LBA (PDBbind 2019 refined, 4,463 complexes), 30 % split 3507/466/490, 60 % split 3563/448/452 | RMSE (lower) |
 
 ## Pipeline
@@ -121,3 +124,50 @@ fine-tuning is `joint` only.
   and the report prints RMSE / Pearson r / Spearman rho. The shared
   `validation_score` helper returns a higher-is-better number for both kinds
   (`-RMSE` for LBA), so one early-stopping rule covers EC and LBA.
+
+
+## GO (go_mf, go_bp, go_cc)
+
+One task family, three tasks, one processed file per split holding all three label matrices
+(`downstream/tasks/go/`; `task.yaml` is the single config, `mf.py`/`bp.py`/`cc.py` select the branch).
+
+- Source: Zenodo record 6622158, `GeneOntology.zip` (md5 and size pinned in `task.yaml`), the same record that
+  holds EC's archive. Shared raw data lives once in `/home/yusuf/data/downstream/deepfri/raw/`;
+  splits, processed files and `provenance.json` are task-specific under `deepfri/go/`.
+- Annotation file: per ontology a 4-row block (terms, names) in the order MF, BP, CC, then one row per chain.
+  `read_go_annotations` rejects any deviation (header text, GO id shape, duplicate terms or chains, term
+  counts, terms outside the branch's list).
+- Chains with no term in a branch are excluded from that branch's train/valid/test
+  (`unannotated_policy: exclude`, counts in `GoProcessedSplit.report`). The CAFA Fmax in
+  `downstream/common/metrics.py` raises on a protein without a true term; TorchDrug instead keeps them as
+  all-zero rows, so GearNet-style numbers can differ slightly. `keep_zero_rows` is refused by the loader.
+- Missing atoms: same policy and code path as EC (`process_entry`); the adapter's V-padding/slot shift (G5)
+  is never reached with an incomplete residue.
+- Commands: `make ds-download TASK=go_mf`, `make ds-validate TASK=go_mf` (read-only),
+  `make ds-process TASK=go_mf WORKERS=16`; embed/probe/finetune take `--task go_mf|go_bp|go_cc`.
+
+## Leakage registry
+
+`downstream/common/leakage.py` + `downstream/leakage_references.yaml` compare the ids of a task's splits with the
+pretraining plans (protein 1M plan, protein 40k manifest, RNA full plan) and write a `leakage` record into the
+task's `provenance.json` plus a per-id TSV. Categories: `seen_train`, `seen_val` (used for checkpoint
+selection), `seen_test` (pretraining hold-out), `unseen`, `unmapped`. PDB ids against the AFDB (UniProt) set are
+refused unless a `pdb_chain -> uniprot` map is given; it never reports "0 leaked" for incomparable namespaces.
+Id matching does not detect homologs. `make ds-leakage ...` (see the Makefile header).
+
+
+## Fold and Reaction (multiclass)
+
+`downstream/tasks/{fold,reaction}/` (`task.yaml`, `dataset.py`, `prepare.py`) on top of `downstream/tasks/multiclass.py`.
+
+- Structures are the archives' own `.hdf5` files (`structure_io.read_hdf5_chain`, needs `h5py`, which is NOT yet in
+  `mind_esa3d`). Atom elements come from atom names; `atom_types` is not used. Chains go through the EC/GO code path
+  (`process_entry` + missing-atom policy), so a CA-only domain is dropped and counted, never kept. `ProcessedSplit.report`
+  and `qc_<split>.json` carry listed / kept / dropped counts.
+- Source and unverified items are written at the top of each `task.yaml`. Reaction's Google Drive archive has no published
+  size or md5: `download` stops until `archive_sha256` / `archive_bytes` are pinned after reviewing `provenance.json`.
+- Probe: cross-entropy head, validation accuracy, one accuracy per test split in `metrics.json`; `downstream.report`
+  adds the GearNet-paper literature rows. Fine-tuning refuses multiclass tasks (not implemented).
+- Commands: `make ds-download|ds-validate|ds-process TASK=fold` (same for `reaction`).
+- Leakage: Fold ids are SCOPe domain ids (`scop_domain`, no map to the AFDB UniProt reference, so the tool refuses);
+  Reaction ids are `4xi6.A` (`pdb_chain`, needs `--id-map`). See `queries:` in `leakage_references.yaml`.

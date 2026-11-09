@@ -108,6 +108,8 @@ def main(argv=None) -> int:
     torch.set_num_threads(args.threads)
     task = load_task(args.task)
     kind = task.KIND
+    if kind == "multiclass":
+        parser.error(f"fine-tuning is not implemented for the multiclass task {args.task!r} (probe only for now)")
     if args.task != "lba" and args.split_tag:
         parser.error("--split-tag applies to the lba task only")
     config = task.load_task_config(task.TASK_YAML, data_root=args.data_root)

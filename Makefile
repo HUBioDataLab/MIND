@@ -228,6 +228,14 @@ eval-pretrain:
 #   make ds-snapshot CKPT=<ckpt> NAME=<snapshot> [ALIAS=current_best]
 #   make ds-download TASK=ec            make ds-process TASK=ec WORKERS=16
 #   make ds-download TASK=lba           make ds-process TASK=lba [TAGS="identity30 identity60"]
+#   make ds-download TASK=go_mf         (the three GO branches share one download and one processed file;
+#   make ds-validate TASK=go_mf          ds-process TASK=go_mf WORKERS=16 builds all of them; validate is read-only)
+#   make ds-download TASK=fold         (GearNet Fold3D, Zenodo 7593591, 670,898,225 B; md5 and size are pinned)
+#   make ds-validate TASK=fold          ds-process TASK=fold WORKERS=16     (probe: one accuracy per test split)
+#   make ds-download TASK=reaction      (IEConv ProtFunct; Google Drive archive, size/md5 not published: the first
+#   make ds-validate TASK=reaction       download stops until archive_sha256/archive_bytes are pinned in task.yaml)
+#   make ds-leakage LEAK_TASK=go REFERENCE=protein_1m NAMESPACE=pdb_chain PROVENANCE=<task dir>/provenance.json \
+#        QUERIES="valid=<dir>/splits/valid.txt test=<dir>/splits/test.txt" [ID_MAP=<pdb_chain->uniprot tsv>]
 #   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
 #   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]
@@ -256,10 +264,12 @@ DS_SPLIT_TAG_ARGS := $(if $(strip $(SPLIT_TAG)),--split-tag $(SPLIT_TAG),)
 DS_LBA_ARGS := $(DS_SPLIT_TAG_ARGS) $(if $(strip $(REPRESENTATION)),--representation $(REPRESENTATION),)
 # ec prepare parallelizes structure parsing with --workers; lba reads one LMDB
 # sequentially and only bounds its torch threads.
+# GO branches (go_mf, go_bp, go_cc) share one prepare module.
+DS_PREPARE_MODULE = $(if $(filter go_%,$(TASK)),go,$(TASK))
 DS_PROCESS_ARGS = $(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS))
 DS_DOWNLOAD_ARGS = $(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),)
 
-.PHONY: ds-snapshot ds-download ds-process ds-embed ds-probe ds-finetune ds-report test-downstream
+.PHONY: ds-snapshot ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream
 
 ds-snapshot:
 	@test -n "$(CKPT)" -a -n "$(NAME)" || { echo "ERROR: set CKPT and NAME"; exit 1; }
@@ -268,8 +278,21 @@ ds-snapshot:
 
 ds-download ds-process:
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(TASK).prepare $(patsubst ds-%,%,$@) \
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare $(patsubst ds-%,%,$@) \
 		$(if $(filter ds-process,$@),$(DS_PROCESS_ARGS),$(DS_DOWNLOAD_ARGS)) 2>&1 | tee $(call DS_LOG,$(patsubst ds-%,%,$@))
+
+# Read-only: re-checks labels and split lists against task.yaml (go, fold, reaction).
+ds-validate:
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare validate
+
+# Leakage registry: compares task split ids with a pretraining reference (CPU, read-only on the references;
+# appends a record to the task's provenance.json and writes a per-id TSV next to it).
+ds-leakage:
+	@test -n "$(LEAK_TASK)" -a -n "$(REFERENCE)" -a -n "$(NAMESPACE)" -a -n "$(PROVENANCE)" -a -n "$(QUERIES)" || \
+		{ echo "ERROR: set LEAK_TASK, REFERENCE, NAMESPACE, PROVENANCE and QUERIES"; exit 1; }
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.common.leakage --task "$(LEAK_TASK)" \
+		--reference "$(REFERENCE)" --query-namespace "$(NAMESPACE)" --provenance "$(PROVENANCE)" \
+		$(foreach q,$(QUERIES),--query $(q)) $(if $(strip $(ID_MAP)),--id-map $(ID_MAP),)
 
 ds-embed ds-finetune:
 	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name, alias or ESM-2 name)"; exit 1; }

@@ -1,0 +1,106 @@
+# Gene Ontology function prediction: GO-MF / GO-BP / GO-CC (DeepFRI nrPDB-GO 2019.06.18 split, GearNet protocol).
+# One task family, three downstream tasks (go_mf, go_bp, go_cc) that share ONE processed file:
+# same chains, same graphs, three label matrices. Each task module (mf.py, bp.py, cc.py) selects its branch.
+#
+# Data sharing with EC (rule of 2026-11-08): both tasks come from the same TorchProtein Zenodo record 6622158
+# (EnzymeCommission.zip + GeneOntology.zip, CC BY 4.0), i.e. the DeepFRI chain sets as packaged by TorchDrug/GearNet.
+#   <source_root>/raw/            archives + extracted chain PDB files, ONE copy per source (shared)
+#   <source_root>/<task>/{splits,processed,provenance.json}   task-specific labels/splits/processed
+# EC still lives in its old place (/home/yusuf/data/downstream/ec/protein); moving it to deepfri/ec is a
+# separate, user-approved data step (see Docs / phase-1 design note).
+#
+# Items marked UNVERIFIED were taken from the TorchDrug/GearNet code or the paper, not from the archive itself;
+# the download/validate step fails loudly if the archive disagrees.
+
+family: go
+modality: protein
+# Suffix of the processed directory name. v2 (2026-11-09): the structure reader now handles two-character PDB chain ids
+# (3J9M-AK); the unsuffixed directory lost 1,171 chains (train 918, valid 99, test 154) as parse_error and has no test.pt.
+processed_revision: v2
+source_name: deepfri
+source_root: /home/yusuf/data/downstream/deepfri
+data_root: /home/yusuf/data/downstream/deepfri/go     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)
+
+source: torchprotein_go_zip
+sources:
+  torchprotein_go_zip:
+    url: https://zenodo.org/records/6622158/files/GeneOntology.zip
+    md5: 376be1f088cd1fe720e1eaafb701b5cb          # Zenodo API, read 2026-11-08
+    bytes: 1691808865                              # Zenodo API, read 2026-11-08
+    license: cc-by-4.0                             # Zenodo record metadata; license of the original DeepFRI data UNVERIFIED
+    extract_dir: GeneOntology                      # UNVERIFIED archive layout (assumed to mirror EnzymeCommission.zip)
+    annotation_file: nrPDB-GO_annot.tsv            # UNVERIFIED name (TorchDrug gene_ontology.py)
+    test_cutoff_file: nrPDB-GO_test.csv            # UNVERIFIED name (TorchDrug gene_ontology.py)
+  deepfri_metadata_reference:                      # not downloaded; documents the upstream origin and sizes
+    commit: 6caa96e086091152e74be5924be1fcde11ce2413
+    files: {annot: nrPDB-GO_2019.06.18_annot.tsv, train: nrPDB-GO_2019.06.18_train.txt,
+            valid: nrPDB-GO_2019.06.18_valid.txt, test: nrPDB-GO_2019.06.18_test.txt,
+            test_cutoffs: nrPDB-GO_2019.06.18_test.csv}   # sizes via GitHub API 2026-11-08: annot 10,325,273 B
+
+# Archive annotation format (DeepFRI load_GO_annot, read 2026-11-08): per ontology a block of 4 rows
+# (### GO-terms (<ont>) / terms / ### GO-names (<ont>) / names) in the order MF, BP, CC, then a
+# ### PDB-chain header and one row per chain: chain<TAB>mf terms<TAB>bp terms<TAB>cc terms (comma separated, may be empty).
+branches:
+  mf: {task: go_mf, ontology: molecular_function, label_count: 489}    # DeepFRI/GearNet counts, UNVERIFIED against archive
+  bp: {task: go_bp, ontology: biological_process, label_count: 1943}
+  cc: {task: go_cc, ontology: cellular_component, label_count: 320}
+
+splits: [train, valid, test]
+# GearNet paper chain counts of the three splits (before our QC); download validation fails on a mismatch. UNVERIFIED.
+expected_chain_counts: {train: 29898, valid: 3322, test: 3415}
+test_cutoffs: [30, 40, 50, 70, 95]     # 95 = the full test set (headline); 30 = the hard, remote-homolog subset
+metric: fmax                            # CAFA protein-centric Fmax (downstream/common/metrics.py); AUPR also reported
+
+# Chains with NO term in a branch. TorchDrug keeps them as all-zero rows; the CAFA/DeepFRI protocol evaluates only
+# annotated proteins and our Fmax raises on an empty row. Decision (pending user confirmation): exclude them per
+# branch from train/valid/test of that branch and record the counts. Only `exclude` is implemented.
+unannotated_policy: exclude
+
+structure:
+  mse_to_met: true
+
+# Same decision as EC (2026-10-25). Experimental PDB structures: the training adapter pads a missing sidechain atom
+# with V and shifts later atoms into wrong slots (G5), so incompleteness is resolved BEFORE conversion.
+missing_atoms:
+  policy: drop_residue_missing_backbone
+  incomplete_sidechain: mask
+
+max_residues: 1024
+length_policy: skip
+min_residues: 2
+
+qc:
+  max_failed_chain_fraction: 0.05
+  max_download_failure_fraction: 0.02
+
+graph:
+  sequence_neighbors_k: 3
+
+embedding:
+  seed: 0
+  poolings: [mean_atoms, ca, mean_residues]
+  max_atoms_per_batch: 30000
+
+probe:
+  pooling: mean_atoms
+  seeds: [0, 1, 2]
+  epochs: 300
+  patience: 30
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+finetune:
+  pooling: mean_atoms
+  head: mlp
+  seeds: [0]
+  epochs: 50
+  patience: 10
+  max_atoms_per_batch: 15000
+  lr_encoder: 0.00001
+  lr_head: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
