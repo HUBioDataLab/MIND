@@ -20,6 +20,7 @@ from core.block_masking import legacy_oxt_eligible_node_mask, select_whole_block
 from core.masked_coordinate_corruption import apply_masked_slot_template_
 from core.masked_slot_mapping import flatten_pos_codes
 from core.counterfactual_eval import apply_counterfactual
+from core.unimol_geometry_hiding import hide_masked_unimol_geometry
 from core.metrics.domain_mlm_metrics import canonical_domain
 from core.molecular_encoder import (
     UniversalMolecularEncoder,
@@ -358,6 +359,11 @@ class PretrainingESAModel(pl.LightningModule):
             has_explicit_bonds = resolve_bond_sources(batch, batch_mapping, len(graph_domains))[1]
         else:
             has_explicit_bonds = encoder_batch.has_explicit_bonds
+        # Graphs whose bond list is the distance-proxy topology of unimol_masked_geometry_hiding
+        # are bond-less in the data: the check below concerns the stored bonds.
+        hidden_graphs = getattr(encoder_batch, "unimol_hidden_graphs", None)
+        if hidden_graphs is not None:
+            has_explicit_bonds = has_explicit_bonds & ~hidden_graphs
         for index, domain in enumerate(graph_domains):
             if domain in settings.domains and bool(has_explicit_bonds[index]):
                 raise ValueError(
@@ -382,7 +388,67 @@ class PretrainingESAModel(pl.LightningModule):
         encoder_batch.edge_index = result.edge_index
         if result.edge_distances is not None:
             encoder_batch.counterfactual_edge_distances = result.edge_distances
+        if settings.mode == "masked_edges_remove" and hidden_graphs is not None:
+            # With geometry hiding the topology of a masked atom lives in the bond list: cut it too,
+            # so that the atom keeps only its mask token and the molecule-global S layers.
+            masked = encoder_batch.unimol_hidden_nodes
+            bonds = encoder_batch.bond_edge_index
+            encoder_batch.bond_edge_index = bonds[:, ~(masked[bonds[0]] | masked[bonds[1]])]
         return result.pos, result.attention_edge_index, encoder_batch
+
+    def _apply_unimol_geometry_hiding(
+        self, batch, pos, edge_index, attention_edge_index, batch_mapping, encoder_batch, active
+    ):
+        """Hide the geometry of masked UniMol atoms from the encoder and ESA (core/unimol_geometry_hiding.py).
+
+        Returns (encoder pos, ESA edges, encoder batch). ``batch.pos`` (frame of the distance losses),
+        ``batch.z`` and the mask stay clean. Called only when the feature is enabled.
+        """
+        mlm_mask = getattr(batch, "mlm_mask", None)
+        if mlm_mask is None:
+            if self.training:
+                raise ValueError(
+                    "unimol_masked_geometry_hiding needs batch.mlm_mask (MLM masking must run before forward in training)"
+                )
+            # evaluation / embedding without any mask: nothing is masked, nothing to hide
+            return pos, attention_edge_index, encoder_batch
+        graph_types = self._graph_dtype_list(batch)
+        if graph_types is None:
+            raise ValueError("unimol_masked_geometry_hiding needs batch.dataset_type")
+        graph_domains = [canonical_domain(value) for value in graph_types]
+        if active is not None:
+            mlm_mask = mlm_mask[active]
+            bond_edge_index = encoder_batch.bond_edge_index
+            has_explicit_bonds = encoder_batch.has_explicit_bonds
+        else:
+            bond_edge_index, has_explicit_bonds = resolve_bond_sources(batch, batch_mapping, len(graph_domains))
+        mol_ids = getattr(batch, "mol_id", None)
+        if not isinstance(mol_ids, (list, tuple)) or len(mol_ids) != len(graph_domains):
+            mol_ids = None
+        view = hide_masked_unimol_geometry(
+            pos=pos,
+            edge_index=edge_index,
+            attention_edge_index=attention_edge_index,
+            batch_mapping=batch_mapping,
+            mlm_mask=mlm_mask.bool(),
+            graph_domains=graph_domains,
+            bond_edge_index=bond_edge_index,
+            has_explicit_bonds=has_explicit_bonds,
+            bond_threshold_angstrom=self.config.unimol_masked_geometry_hiding["bond_threshold_angstrom"],
+            mol_ids=mol_ids,
+        )
+        # Never write into the shared batch: the encoder gets a shallow copy with the hidden view.
+        if isinstance(encoder_batch, SimpleNamespace):
+            encoder_batch = SimpleNamespace(**vars(encoder_batch))
+        else:
+            encoder_batch = copy.copy(encoder_batch)
+        encoder_batch.edge_index = view.edge_index
+        encoder_batch.bond_edge_index = view.bond_edge_index
+        encoder_batch.has_explicit_bonds = view.has_explicit_bonds
+        encoder_batch.unimol_hidden_graphs = view.hidden_graphs
+        encoder_batch.unimol_hidden_nodes = view.hidden_nodes
+        batch.unimol_geometry_hiding_stats = view.stats
+        return view.pos, view.attention_edge_index, encoder_batch
 
     def forward(self, batch, slot_readout_mode: str = "correct"):
         """
@@ -483,10 +549,17 @@ class PretrainingESAModel(pl.LightningModule):
             batch.pos = pos_centered
             encoder_batch = batch
 
+        active_nodes = graph_view.compact_to_full if graph_view is not None else None
+        if (getattr(self.config, "unimol_masked_geometry_hiding", None) or {}).get("enabled", False):
+            pos, attention_edge_index, encoder_batch = self._apply_unimol_geometry_hiding(
+                batch, pos, edge_index, attention_edge_index, batch_mapping, encoder_batch, active_nodes,
+            )
+
         if getattr(self, "counterfactual_eval", None) is not None:
+            # encoder_batch.edge_index is the encoder's edge set (edge_index itself unless hidden above)
             pos, attention_edge_index, encoder_batch = self._apply_counterfactual_eval(
-                batch, pos, edge_index, attention_edge_index, batch_mapping, encoder_batch,
-                graph_view.compact_to_full if graph_view is not None else None,
+                batch, pos, encoder_batch.edge_index, attention_edge_index, batch_mapping, encoder_batch,
+                active_nodes,
             )
 
         # Encode nodes

@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -113,6 +114,64 @@ def normalize_geometry_neutral_virtual_slot_config(
     ):
         raise ValueError(
             "geometry_neutral_virtual_slots.enabled=true requires protein and/or rna"
+        )
+    return normalized
+
+
+UNIMOL_GEOMETRY_HIDING_DEFAULTS = {
+    "enabled": False,
+    # Distance (Angstrom) up to which two UniMol atoms count as bonded. Required when
+    # enabled; the value never depends on an element (G1 candidate C).
+    "bond_threshold_angstrom": None,
+}
+# Lower cut of every distance-proxy bond (core/molecular_encoder.py ignores d <= 0.5 A) and the
+# largest value that still means "bonded": above it ordinary 1,3 contacts become bonds.
+UNIMOL_BOND_THRESHOLD_MIN_EXCLUSIVE = 0.5
+UNIMOL_BOND_THRESHOLD_MAX = 3.0
+
+
+def validate_unimol_bond_threshold(value, name: str = "bond_threshold_angstrom") -> float:
+    """Return ``value`` as a float or raise; shared by the config and the runtime view."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a number in Angstrom, got {value!r}")
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    if not UNIMOL_BOND_THRESHOLD_MIN_EXCLUSIVE < value <= UNIMOL_BOND_THRESHOLD_MAX:
+        raise ValueError(
+            f"{name} must satisfy {UNIMOL_BOND_THRESHOLD_MIN_EXCLUSIVE} < value <= "
+            f"{UNIMOL_BOND_THRESHOLD_MAX} Angstrom, got {value!r}"
+        )
+    return value
+
+
+def normalize_unimol_masked_geometry_hiding_config(
+    value: Optional[Dict[str, object]],
+) -> Dict[str, object]:
+    """Validate ``unimol_masked_geometry_hiding`` (G1 candidate C); absent means disabled."""
+    if value is None:
+        return dict(UNIMOL_GEOMETRY_HIDING_DEFAULTS)
+    if not isinstance(value, dict):
+        raise TypeError("unimol_masked_geometry_hiding must be a mapping")
+    unknown = set(value) - set(UNIMOL_GEOMETRY_HIDING_DEFAULTS)
+    if unknown:
+        raise ValueError(
+            "unknown unimol_masked_geometry_hiding keys: " + ", ".join(sorted(unknown))
+        )
+    normalized = dict(UNIMOL_GEOMETRY_HIDING_DEFAULTS)
+    if "enabled" in value:
+        if type(value["enabled"]) is not bool:
+            raise TypeError("unimol_masked_geometry_hiding.enabled must be boolean")
+        normalized["enabled"] = value["enabled"]
+    threshold = value.get("bond_threshold_angstrom")
+    if threshold is not None:
+        normalized["bond_threshold_angstrom"] = validate_unimol_bond_threshold(
+            threshold, "unimol_masked_geometry_hiding.bond_threshold_angstrom"
+        )
+    elif normalized["enabled"]:
+        raise ValueError(
+            "unimol_masked_geometry_hiding.bond_threshold_angstrom is required when enabled=true "
+            "(there is no default; it must not depend on the masked element)"
         )
     return normalized
 
@@ -282,6 +341,11 @@ class PretrainingConfig:
     # virtual/hidden-slot geometry from protein and RNA message passing.
     geometry_neutral_virtual_slots: Optional[Dict[str, object]] = None
 
+    # UniMol masked atoms keep only their binary bond topology in the encoder/ESA view; their
+    # position, distances and distance-derived features are hidden (G1 candidate C). Off by
+    # default; see core/unimol_geometry_hiding.py.
+    unimol_masked_geometry_hiding: Optional[Dict[str, object]] = None
+
     # Coordinate denoising (predict added noise from node embeddings; SE(3)-invariant loss)
     coordinate_denoising_noise_std: float = 0.1
     coordinate_denoising_mask_ratio: float = 0.15  # fraction of nodes to compute loss on
@@ -331,6 +395,31 @@ def create_pretraining_config(**kwargs) -> PretrainingConfig:
             getattr(config, "geometry_neutral_virtual_slots", None)
         )
     )
+    config.unimol_masked_geometry_hiding = normalize_unimol_masked_geometry_hiding_config(
+        getattr(config, "unimol_masked_geometry_hiding", None)
+    )
+    if config.unimol_masked_geometry_hiding["enabled"]:
+        tasks = getattr(config, "pretraining_tasks", None) or ()
+        if "mlm" not in tasks:
+            raise ValueError("unimol_masked_geometry_hiding hides masked atoms and requires the mlm task")
+        if "coordinate_denoising" in tasks:
+            raise ValueError(
+                "unimol_masked_geometry_hiding is incompatible with coordinate_denoising"
+            )
+        if getattr(config, "apply_attention_on", "node") != "node":
+            raise ValueError("unimol_masked_geometry_hiding currently requires node attention")
+        if not getattr(config, "use_3d_coordinates", True):
+            raise ValueError(
+                "unimol_masked_geometry_hiding requires use_3d_coordinates=true (there is no geometry to hide)"
+            )
+        if getattr(config, "use_distance_bias", False):
+            raise ValueError(
+                "unimol_masked_geometry_hiding is incompatible with pairwise distance attention bias"
+            )
+        if getattr(config, "use_equivariant_features", False):
+            raise ValueError(
+                "unimol_masked_geometry_hiding is incompatible with the equivariant branch"
+            )
     virtual_atom_loss_weight = float(
         getattr(config, "virtual_atom_loss_weight", 1.0)
     )
