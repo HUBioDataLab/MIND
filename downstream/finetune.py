@@ -29,7 +29,9 @@ from torch import nn
 from downstream.common import encoder as mind_encoder
 from downstream.common.heads import HEADS, build_head
 from downstream.common.metrics import evaluate, evaluate_regression
-from downstream.common.registry import RANDOM_INIT_SUFFIX, git_commit, new_results_dir, resolve_model
+from downstream.common.registry import (
+    RANDOM_INIT_SUFFIX, git_commit, new_results_dir, resolve_model, run_record, sha256_file,
+)
 from downstream.embed import embed_split_mind
 from downstream.probe import build_loss, evaluate_with_cutoffs, validation_score
 from downstream.tasks import TASKS, load_task
@@ -101,6 +103,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.threads < 1:
         parser.error("--threads must be at least 1")
+    run = run_record()
     for name in ("lr_encoder", "epochs", "patience"):
         value = getattr(args, name)
         if value is not None and value <= 0:
@@ -143,6 +146,8 @@ def main(argv=None) -> int:
         source_dir = task.processed_dir(config)
     splits = {name: task.ProcessedSplit(source_dir / f"{name}.pt", **split_kwargs)
               for name in (train_split, val_split, test_split)}
+    processed = {name: {"path": str(source_dir / f"{name}.pt"), "sha256": sha256_file(source_dir / f"{name}.pt")}
+                 for name in splits}
     subsets = task.test_subsets(config, splits[test_split].chains) if kind == "multilabel" else {}
     out_dim = 1 if kind == "regression" else int(config["label_count"])
     loss_fn = build_loss(kind, settings)
@@ -210,7 +215,7 @@ def main(argv=None) -> int:
         (out / "config.json").write_text(json.dumps({
             "args": {k: str(v) for k, v in vars(args).items()}, "finetune": settings,
             "snapshot": resolved.model_id, "sha256": resolved.card["sha256"], "git": git_commit(),
-            "eval_seed": eval_seed,
+            "eval_seed": eval_seed, "run": run, "processed": processed,
         }, indent=1))
         (out / "metrics.json").write_text(json.dumps(metrics, indent=1))
         log_handle.close()
