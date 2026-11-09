@@ -580,3 +580,26 @@ def test_results_dir_accepts_qualified_protocols_and_rejects_bad_ones(tmp_path):
     # Qualifiers are name-checked, so a path separator cannot slip in.
     with pytest.raises(ValueError):
         results_dir("lba", "m", "mlp_probe.../etc", 0, pooling="p", root=tmp_path)
+
+
+def test_lba_probe_metrics_name_the_split_tag_and_representation_even_when_defaulted(tmp_path):
+    import json
+
+    from downstream import probe
+
+    rng = np.random.default_rng(0)
+    outputs = tmp_path / "out"
+    for split, count in {"train": 30, "val": 10, "test": 10}.items():
+        features = rng.normal(size=(count, 4)).astype(np.float32)
+        labels = (features[:, :1] * 2 + 6.0).astype(np.float32)
+        path = outputs / "downstream" / "lba" / "toy" / "embeddings" / f"identity30.joint.{split}.npz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(path, chains=np.array([f"{split}{i}" for i in range(count)]), labels=labels,
+                 emb_concat_pocket_ligand=features)
+        path.with_suffix(".json").write_text(json.dumps({"split": split}))
+    args = ["--task", "lba", "--model-id", "toy", "--head", "linear", "--seeds", "0", "--pooling",
+            "concat_pocket_ligand", "--data-root", str(tmp_path / "data"), "--outputs-root", str(outputs)]
+    assert probe.main(args) == 0
+    metrics = json.loads((outputs / "downstream" / "lba" / "toy" /
+                          "linear_probe.identity30.joint.concat_pocket_ligand" / "seed0" / "metrics.json").read_text())
+    assert metrics["split_tag"] == "identity30" and metrics["representation"] == "joint"

@@ -63,3 +63,64 @@ def test_embed_split_mind_on_cpu_matches_chain_count(cpu_flash, tmp_path):
     assert first["mean_atoms"].shape == (len(split.chains), 32)
     for mode in first:
         np.testing.assert_array_equal(first[mode], second[mode])
+
+
+def _lba_task_with_processed_splits(root, tag="identity30"):
+    """LBA config plus tiny processed train/val/test files for one split tag (ESM-readable sequences)."""
+    from downstream.common import complex_graph as cg
+    from downstream.tasks.lba import dataset as lba
+    from test_downstream_lba import SETTINGS, simple_item
+
+    config = lba.load_task_config(data_root=root)
+    out = lba.processed_dir(config, tag)
+    out.mkdir(parents=True)
+    for split in config["splits"]:
+        results = [lba.process_item(simple_item(f"{split}{i}", target=5.0 + i), SETTINGS) for i in range(2)]
+        torch.save({
+            "schema": cg.complex_edge_free_schema(3, {"builder": "tests"}), "policy": "dropbb_masksc",
+            "split": split, "split_tag": tag, "ids": [r.complex_id for r in results],
+            "targets": torch.tensor([r.target for r in results], dtype=torch.float32),
+            "samples": [r.sample for r in results], "ligands": [r.ligand for r in results],
+            "sequences": [r.sequence for r in results], "qc": {},
+        }, out / f"{split}.pt")
+    return config
+
+
+@pytest.mark.parametrize("flags, tag, representation", [
+    ([], "identity30", "joint"),                                       # defaults: record must still name them
+    (["--split-tag", "identity60", "--representation", "joint"], "identity60", "joint"),
+])
+def test_lba_embedding_record_names_the_split_tag_and_representation_even_when_defaulted(
+        tmp_path, tiny_esm, monkeypatch, flags, tag, representation):
+    import json
+
+    from downstream import embed
+    from downstream.common.registry import embeddings_path
+
+    _lba_task_with_processed_splits(tmp_path / "data", tag)
+    monkeypatch.setattr(esm2, "load_esm2", lambda *a, **k: tiny_esm)
+    args = ["--task", "lba", "--model", "esm2_t6_8M_UR50D", "--device", "cpu", "--hf-cache-dir", str(tmp_path),
+            "--data-root", str(tmp_path / "data"), "--outputs-root", str(tmp_path / "out"), "--splits", "val",
+            *flags]
+    assert embed.main(args) == 0
+    out = embeddings_path("lba", "esm2_t6_8M_UR50D", f"{tag}.{representation}.val", root=tmp_path / "out")
+    record = json.loads(out.with_suffix(".json").read_text())
+    assert record["split_tag"] == tag and record["representation"] == representation
+
+
+def test_non_lba_embedding_record_has_no_split_tag(tmp_path, tiny_esm, monkeypatch):
+    import json
+
+    from downstream import embed
+    from downstream.common.registry import embeddings_path
+
+    config = _write_task(tmp_path / "data", max_residues=30)
+    assert dataset.build_processed(config, splits=["valid"], workers=1) == 0
+    monkeypatch.setattr(esm2, "load_esm2", lambda *a, **k: tiny_esm)
+    monkeypatch.setattr(dataset, "load_task_config", lambda *a, **k: config)
+    args = ["--task", "ec", "--model", "esm2_t6_8M_UR50D", "--device", "cpu", "--hf-cache-dir", str(tmp_path),
+            "--outputs-root", str(tmp_path / "out"), "--splits", "valid"]
+    assert embed.main(args) == 0
+    record = json.loads(embeddings_path("ec", "esm2_t6_8M_UR50D", "valid", root=tmp_path / "out")
+                        .with_suffix(".json").read_text())
+    assert record["split_tag"] is None and record["representation"] is None

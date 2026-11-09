@@ -169,6 +169,7 @@ def main(argv=None) -> int:
     train_split, val_split, test_splits = split_roles(config)
     test_split = test_splits[0]
     prefix = ""
+    split_tag = representation = None
     if args.task == "lba":
         split_tag = args.split_tag or config["primary_split_tag"]
         representation = args.representation or config["representation"]
@@ -214,7 +215,7 @@ def main(argv=None) -> int:
         metrics = {
             "task": args.task, "kind": kind, "model_id": args.model_id, "protocol": protocol,
             "pooling": pooling, "seed": seed, "best_epoch": best["epoch"],
-            "split_tag": args.split_tag, "representation": args.representation,
+            "split_tag": split_tag, "representation": representation,
             "val": metrics_val, "test": metrics_test,
         }
         extra = ({f"{name}_{field}": value for name in test_splits[1:] for field, value in (

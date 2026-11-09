@@ -7,7 +7,7 @@
     python -m downstream.embed --task ec --model saprot_650m_pdb --hf-cache-dir DIR --device cuda:0
 
 SaProt reads the Foldseek 3Di cache of ``downstream.baselines.foldseek_3di``
-(``<data_root>/foldseek_3di/<split>.json`` unless ``--foldseek-3di-dir`` is given);
+(``<data_root>/foldseek_3di_<processed_revision>/<split>.json`` unless ``--foldseek-3di-dir`` is given);
 the cache must describe the same processed split (sha256 and chain list).
 
 Writes ``outputs/downstream/<task>/<model_id>/embeddings/<split>.npz`` (chains,
@@ -74,7 +74,7 @@ def main(argv=None) -> int:
     parser.add_argument("--outputs-root", type=Path, default=None)
     parser.add_argument("--hf-cache-dir", default=None, help="required for ESM-2 and SaProt")
     parser.add_argument("--foldseek-3di-dir", type=Path, default=None,
-                        help="SaProt 3Di cache directory (default <data_root>/foldseek_3di)")
+                        help="SaProt 3Di cache directory (default <data_root>/foldseek_3di_<processed_revision>)")
     parser.add_argument("--hf-local-files-only", action="store_true")
     parser.add_argument("--esm-batch-size", type=int, default=8)
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
@@ -104,7 +104,7 @@ def main(argv=None) -> int:
         embedding_prefix = f"{split_tag}.{representation}."
         processed_dir = lambda cfg: task.processed_dir(cfg, split_tag)  # noqa: E731
     else:
-        representation = None
+        split_tag = representation = None
         processed_dir = task.processed_dir
     device = torch.device(args.device)
     if device.type == "cuda":
@@ -184,7 +184,7 @@ def main(argv=None) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         np.savez(out, chains=np.array(split.chains), labels=np.asarray(split.labels),
                  **{f"emb_{mode}": value for mode, value in arrays.items()})
-        record = dict(provenance, **split_provenance, split=split_name, split_tag=args.split_tag,
+        record = dict(provenance, **split_provenance, split=split_name, split_tag=split_tag,
                       representation=representation, model_id=model_id, processed=str(source),
                       processed_sha256=processed_sha256, chains=len(split.chains),
                       poolings=sorted(arrays), dim=int(next(iter(arrays.values())).shape[1]),

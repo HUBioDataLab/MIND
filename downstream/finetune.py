@@ -131,6 +131,7 @@ def main(argv=None) -> int:
     model_id = resolved.model_id + (RANDOM_INIT_SUFFIX if args.random_init else "")
     protocol = "finetune"
     split_kwargs = {}
+    split_tag = None
     if args.task == "lba":
         split_tag = args.split_tag or config["primary_split_tag"]
         if config["representation"] != "joint":
@@ -198,7 +199,7 @@ def main(argv=None) -> int:
         metrics = {
             "task": args.task, "kind": kind, "model_id": model_id, "protocol": protocol,
             "pooling": pooling, "seed": seed, "best_epoch": best["epoch"],
-            "split_tag": args.split_tag, "val": metrics_val, "test": metrics_test,
+            "split_tag": split_tag, "val": metrics_val, "test": metrics_test,
         }
         np.savez_compressed(out / "predictions.npz", test_chains=np.array(splits[test_split].chains),
                             test_scores=scores[test_split],
