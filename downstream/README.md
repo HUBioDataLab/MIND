@@ -37,7 +37,8 @@ MIND kept, one `<AA><3Di>` token each; the 3Di state comes from Foldseek on the
 same structure file, aligned to the kept residues without mismatches (rules in
 `downstream/baselines/foldseek_3di.py`). Residues MIND masks for an incomplete
 sidechain, and residues without a Foldseek state, get SaProt's unknown-structure
-letter `#`; the amino acid is kept.
+letter `#`; the amino acid is kept. The 3Di cache lives in `<data_root>/foldseek_3di_<processed_revision>/`
+and is valid for that processed revision only.
 
 ## Contracts
 
@@ -64,6 +65,10 @@ letter `#`; the amino acid is kept.
 ## Layout
 
 Data (outside Git): `/home/yusuf/data/downstream/<task>/<modality>/{raw,processed,splits,provenance.json}`.
+`processed_revision` in `task.yaml` (EC and GO: `v2`) is appended to the processed directory name; v2 reads PDB
+chain ids of two or three characters (EC v1 lost 46 chains, GO v1 lost 1,171 as `parse_error`). Every `process`
+run appends its own record (command, config/input/output sha256, QC summaries) to `provenance.json`.
+EC test chains missing from `test_cutoffs.csv` raise, except the documented `test_cutoff_unlisted_chains`.
 
 Models and results (under `outputs/`, or `$MIND_OUTPUTS_ROOT`):
 

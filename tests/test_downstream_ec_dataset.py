@@ -56,11 +56,30 @@ def test_annotation_split_and_cutoff_readers(tmp_path):
         dataset.split_chain_id("6KMWaL")
 
 
+def test_task_config_without_a_processed_revision_is_refused(tmp_path):
+    import yaml
+
+    config = yaml.safe_load(dataset.TASK_YAML.read_text())
+    del config["processed_revision"]
+    path = tmp_path / "task.yaml"
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="processed_revision"):
+        dataset.load_task_config(path)
+
+
+def test_checked_in_yaml_marks_the_reprocessed_revision_and_names_the_exceptions():
+    """v2 = chains with 2/3-character ids are read (46 were lost as parse_error); the old directory stays untouched."""
+    config = dataset.load_task_config()
+    assert config["processed_revision"] == "v2"
+    assert dataset.processed_dir(config).name == "torchdrug_zip_dropbb_masksc_skip1024_v2"
+    assert config["test_cutoff_unlisted_chains"] == ["7OA5-A"]
+
+
 def test_build_processed_with_qc_report_and_failure_threshold(tmp_path):
     config = _write_task(tmp_path)
     assert dataset.build_processed(config, splits=["train", "valid", "test"], workers=1) == 1
     out = dataset.processed_dir(config)
-    assert out.name == "deepfri_rcsb_dropbb_masksc_skip20"
+    assert out.name == "deepfri_rcsb_dropbb_masksc_skip20_v2"
     # train: 1BBB file missing -> 1/3 failed (<= 0.4); test: 25-residue chain skipped -> 1/2 (> 0.4)
     assert (out / "train.pt").is_file() and (out / "valid.pt").is_file() and not (out / "test.pt").exists()
     qc_test = json.loads((out / "qc_test.json").read_text())
@@ -77,6 +96,35 @@ def test_build_processed_with_qc_report_and_failure_threshold(tmp_path):
     assert masked.numel() == 9 * 14 and bool(masked[:14].all()) and int(masked.sum()) == 14
     with pytest.raises(FileExistsError):
         dataset.build_processed(config, splits=["train"], workers=1)
+
+
+def _cutoff_config(tmp_path, *, unlisted=()):
+    config = _write_task(tmp_path)
+    config["test_cutoff_unlisted_chains"] = list(unlisted)
+    return config
+
+
+def test_test_subsets_refuse_a_test_chain_that_the_cutoff_table_does_not_list(tmp_path):
+    config = _cutoff_config(tmp_path)
+    subsets = dataset.test_subsets(config, ["3AAA-A", "3AAA-B"])
+    assert subsets[30].tolist() == [False, True] and subsets[95].tolist() == [True, True]
+    with pytest.raises(ValueError, match=r"2 test chains are missing from test_cutoffs.csv: \['9ZZZ-A', '9ZZZ-B'\]"):
+        dataset.test_subsets(config, ["3AAA-A", "9ZZZ-A", "9ZZZ-B"])
+
+
+def test_documented_unlisted_chain_is_excluded_from_every_subset_with_a_warning(tmp_path):
+    config = _cutoff_config(tmp_path, unlisted=["9ZZZ-A"])
+    with pytest.warns(UserWarning, match=r"9ZZZ-A.*counted only in the full-test-set"):
+        subsets = dataset.test_subsets(config, ["3AAA-A", "9ZZZ-A", "3AAA-B"])
+    assert subsets[95].tolist() == [True, False, True] and subsets[30].tolist() == [False, False, True]
+    with pytest.raises(ValueError, match=r"missing from test_cutoffs.csv: \['9ZZZ-B'\]"):
+        dataset.test_subsets(config, ["9ZZZ-A", "9ZZZ-B"])  # only the documented chain is excused
+
+
+def test_stale_exception_for_a_chain_the_table_now_lists_is_refused(tmp_path):
+    config = _cutoff_config(tmp_path, unlisted=["3AAA-A"])
+    with pytest.raises(ValueError, match=r"test_cutoff_unlisted_chains lists \['3AAA-A'\].*now in test_cutoffs.csv"):
+        dataset.test_subsets(config, ["3AAA-A", "3AAA-B"])
 
 
 def test_crop_windows_and_residue_weighted_chain_embeddings(tmp_path):

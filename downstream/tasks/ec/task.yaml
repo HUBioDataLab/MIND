@@ -5,6 +5,10 @@
 
 task: ec
 modality: protein
+# Suffix of the processed directory name. v2 (2026-11-09): the structure reader now handles 2- and 3-character
+# PDB chain ids (4V7G-AA, 4UE3-SSS); the unsuffixed directory lost 46 such chains (train 35, valid 5, test 6) as
+# parse_error. The old directory stays untouched; ds-embed/ds-probe read the v2 one.
+processed_revision: v2
 data_root: /home/yusuf/data/downstream/ec/protein   # raw/, processed/, splits/, provenance.json
 
 # deepfri_rcsb: DeepFRI metadata (pinned commit, sha256 checked) + RCSB mmCIF per PDB entry.
@@ -29,6 +33,10 @@ sources:
 splits: [train, valid, test]
 label_count: 538
 test_cutoffs: [30, 40, 50, 70, 95]
+# Known gap of the DeepFRI cutoff table: test.txt lists 7OA5-A but test_cutoffs.csv has no row for it (it lists
+# 1BVS-A instead, which is not in test.txt). Every other test chain must be listed, otherwise test_subsets raises.
+# Listed chains are counted only in the full-test-set metric ("all") and in no cutoff subset; a warning names them.
+test_cutoff_unlisted_chains: [7OA5-A]
 metric: fmax            # protein-centric Fmax; pair_aupr and accuracies are reported too
 
 structure:

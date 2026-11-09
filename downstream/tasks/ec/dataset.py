@@ -1,6 +1,6 @@
 """EC task data: annotations, splits, chain -> graph processing with QC, and processed splits.
 
-``build_processed`` turns raw structures into ``processed/<policy_tag>/<split>.pt``
+``build_processed`` turns raw structures into ``processed/<source>_<policy_tag>_<length policy><max residues>[_<processed_revision>]/<split>.pt``
 (compact edge-free samples + 538-dim multi-hot labels) and writes a per-chain QC
 report next to it. A split whose failed/dropped fraction exceeds
 ``qc.max_failed_chain_fraction`` (or any strict-policy violation) gets only its
@@ -13,6 +13,7 @@ import csv
 import json
 import math
 import os
+import warnings
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -33,8 +34,8 @@ from downstream.common.structure_io import THREE_TO_ONE, read_chains
 TASK_YAML = Path(__file__).with_name("task.yaml")
 KIND = "multilabel"
 REQUIRED_KEYS = (
-    "task", "modality", "data_root", "source", "sources", "splits", "label_count", "test_cutoffs",
-    "structure", "missing_atoms", "max_residues", "length_policy", "min_residues", "qc", "graph",
+    "task", "modality", "processed_revision", "data_root", "source", "sources", "splits", "label_count",
+    "test_cutoffs", "test_cutoff_unlisted_chains", "structure", "missing_atoms", "max_residues", "length_policy", "min_residues", "qc", "graph",
     "embedding", "probe", "finetune",
 )
 LENGTH_POLICIES = ("skip", "crop_windows")
@@ -368,12 +369,43 @@ class ProcessedSplit:
 
 def processed_dir(config: dict) -> Path:
     policy = parse_policy(config["missing_atoms"])
+    revision = str(config["processed_revision"])
     return task_paths(config)["processed"] / (
         f"{config['source']}_{policy.tag}_{config['length_policy']}{config['max_residues']}"
+        + (f"_{revision}" if revision else "")
     )
 
 
+def read_test_cutoff_chains(path: Path) -> set:
+    """Every chain id that has a row in the cutoff table (the first column)."""
+    with open(path, newline="") as handle:
+        reader = csv.reader(handle)
+        next(reader)
+        return {row[0] for row in reader if row}
+
+
 def test_subsets(config: dict, chains: Sequence[str]) -> Dict[int, np.ndarray]:
-    """Row masks of the processed test split for every identity cutoff."""
-    subsets = read_test_cutoffs(task_paths(config)["splits"] / "test_cutoffs.csv", config["test_cutoffs"])
+    """Row masks of the processed test split for every identity cutoff.
+
+    A test chain that the cutoff table does not list raises (a silent False would drop it from every subset),
+    except the chains named in ``test_cutoff_unlisted_chains``: a documented upstream gap of the DeepFRI table.
+    Those stay in the full-test-set metric and in no cutoff subset, with a warning. An exception for a chain the
+    table does list raises too, so the list cannot go stale.
+    """
+    path = task_paths(config)["splits"] / "test_cutoffs.csv"
+    subsets = read_test_cutoffs(path, config["test_cutoffs"])
+    listed = read_test_cutoff_chains(path)
+    allowed = list(config["test_cutoff_unlisted_chains"])
+    stale = [c for c in allowed if c in listed]
+    if stale:
+        raise ValueError(f"test_cutoff_unlisted_chains lists {stale}, which are now in test_cutoffs.csv; "
+                         "remove them from task.yaml")
+    unlisted = [c for c in chains if c not in listed]
+    unexpected = [c for c in unlisted if c not in allowed]
+    if unexpected:
+        shown = unexpected[:50] + ([f"... +{len(unexpected) - 50} more"] if len(unexpected) > 50 else [])
+        raise ValueError(f"{len(unexpected)} test chains are missing from test_cutoffs.csv: {shown}")
+    if unlisted:
+        warnings.warn(f"{unlisted} not in test_cutoffs.csv (documented in test_cutoff_unlisted_chains): "
+                      "counted only in the full-test-set 'all' metric, in no cutoff subset", stacklevel=2)
     return {cutoff: np.array([c in members for c in chains]) for cutoff, members in subsets.items()}

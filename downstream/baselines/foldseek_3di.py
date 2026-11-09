@@ -313,8 +313,10 @@ def _safe_chain_3di(job):
 # ---------------------------------------------------------------------------
 
 def cache_dir(config: dict) -> Path:
+    """``<data_root>/foldseek_3di[_<processed_revision>]``: a cache belongs to one processed revision."""
     from downstream.tasks.ec.dataset import task_paths
-    return task_paths(config)["root"] / "foldseek_3di"
+    revision = str(config["processed_revision"])
+    return task_paths(config)["root"] / ("foldseek_3di" + (f"_{revision}" if revision else ""))
 
 
 def load_cache(path: Path, chains: Sequence[str], sequences: Sequence[str]) -> Tuple[List[dict], dict]:

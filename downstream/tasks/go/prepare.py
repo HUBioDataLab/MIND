@@ -8,7 +8,8 @@
 ``<source_root>/raw`` (never overwritten; one copy for every task of the DeepFRI source), extracts it,
 writes the three split id lists into ``<data_root>/splits`` and validates annotations against the splits.
 ``validate`` repeats that validation without touching the network. ``process`` builds the processed
-files (one per split, three label matrices) and exits 1 when a split fails QC.
+files (one per split, three label matrices) and exits 1 when a split fails QC; it also appends a
+``process`` record (command, config and input/output sha256, QC summaries) to ``provenance.json``.
 
 Every download/validate run appends a record to ``<data_root>/provenance.json`` (other keys such as the
 leakage records are preserved).
@@ -19,12 +20,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from downstream.common.provenance import append_run as _append_run, record_process_run
 from downstream.common.registry import git_commit, sha256_file
 from downstream.tasks.ec.dataset import read_split, read_test_cutoffs, split_chain_id
 from downstream.tasks.ec.prepare import _copy_once, _fetch, _safe_extract
@@ -38,16 +39,6 @@ def _md5(path: Path) -> str:
         for block in iter(lambda: handle.read(1 << 24), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-def _append_run(path: Path, record: dict) -> None:
-    existing = json.loads(path.read_text()) if path.exists() else {}
-    if not isinstance(existing, dict):
-        raise ValueError(f"{path}: expected a JSON object")
-    existing.setdefault("runs", []).append(record)
-    partial = path.with_name(path.name + ".partial")
-    partial.write_text(json.dumps(existing, indent=1))
-    os.replace(partial, path)
 
 
 def _list_dir(path: Path) -> list:
@@ -128,7 +119,16 @@ def main(argv: Optional[list] = None) -> int:
     config = common.load_task_config(args.config, data_root=args.data_root, branch="mf")
     paths = task_paths(config)
     if args.command == "process":
-        return common.build_processed(config, splits=args.splits or config["splits"], workers=args.workers)
+        splits = args.splits or config["splits"]
+        source = config["sources"][config["source"]]
+        started = datetime.now(timezone.utc).isoformat()
+        exit_code = common.build_processed(config, splits=splits, workers=args.workers)
+        record_process_run(
+            paths["provenance"], started_utc=started, config_path=args.config, processed_dir=common.processed_dir(config),
+            splits=splits, exit_code=exit_code,
+            inputs=[paths["raw"] / source["extract_dir"] / source["annotation_file"],
+                    *(paths["splits"] / f"{s}.txt" for s in splits)])
+        return exit_code
     started = datetime.now(timezone.utc).isoformat()
     result = download(config) if args.command == "download" else {}
     result["validation"] = validate(config)

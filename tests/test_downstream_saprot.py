@@ -257,6 +257,13 @@ def _fake_cache(config, split_name, *, sha=None):
     return split
 
 
+def test_3di_cache_dir_belongs_to_the_processed_revision(tmp_path):
+    config = _write_task(tmp_path / "data", max_residues=30)
+    assert fs.cache_dir(config).name == "foldseek_3di_v2"  # the unsuffixed Oct-25 cache describes the v1 files
+    config["processed_revision"] = ""
+    assert fs.cache_dir(config).name == "foldseek_3di"
+
+
 def test_embed_main_saprot_writes_embeddings(tmp_path, monkeypatch, tiny_saprot):
     config = _write_task(tmp_path / "data", max_residues=30)
     assert dataset.build_processed(config, splits=["valid", "test"], workers=1) == 0

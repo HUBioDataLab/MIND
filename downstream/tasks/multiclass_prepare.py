@@ -7,7 +7,8 @@
 ``download`` is task specific (passed in as ``download_fn``), never overwrites existing raw files, and ends with the
 same validation as ``validate``. Each download/validate run appends a record to ``<data_root>/provenance.json`` (other
 keys such as leakage records are preserved). ``process`` builds one processed file per split and exits 1 when a split
-fails QC.
+fails QC and appends a ``process`` record (command, config and input/output sha256, QC summaries) to
+``provenance.json``.
 """
 
 from __future__ import annotations
@@ -19,10 +20,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from downstream.common.provenance import append_run as _append_run, record_process_run
 from downstream.common.registry import git_commit, sha256_file
 from downstream.tasks import multiclass
 from downstream.tasks.ec.dataset import read_split
-from downstream.tasks.go.prepare import _append_run
 
 
 def write_split_lists(config: dict, split_names: dict) -> None:
@@ -66,9 +67,16 @@ def main(argv: Optional[list], *, doc: str, load_config: Callable, task_yaml: Pa
     config = load_config(args.config, data_root=args.data_root)
     paths = multiclass.task_paths(config)
     if args.command == "process":
+        splits = args.splits or config["splits"]
+        started = datetime.now(timezone.utc).isoformat()
         classes, labels, _ = read_labels(config)
-        return multiclass.build_processed(config, labels, classes, splits=args.splits or config["splits"],
-                                          workers=args.workers, builder=builder)
+        exit_code = multiclass.build_processed(config, labels, classes, splits=splits, workers=args.workers,
+                                               builder=builder)
+        record_process_run(
+            paths["provenance"], started_utc=started, config_path=args.config,
+            processed_dir=multiclass.processed_dir(config), splits=splits, exit_code=exit_code,
+            inputs=[multiclass.file_index_path(config), *(paths["splits"] / f"{s}.txt" for s in splits)])
+        return exit_code
     started = datetime.now(timezone.utc).isoformat()
     result = download_fn(config) if args.command == "download" else {}
     result["validation"] = validate_with(config, read_labels)
