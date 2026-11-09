@@ -155,3 +155,23 @@ def test_metabolite_config_key_maps_to_coconut_metadata_type(tmp_path, monkeypat
     })
     dataset = load_universal_dataset(config, "PDB", "")
     assert dataset.excluded_indices == {1}
+
+
+def test_enabled_unsplit_domain_without_chunks_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("MIND_INDEX_MAP_CACHE_DIR", str(tmp_path / "maps"))
+    _write_chunk(tmp_path, "mol", 0, [5] * 10, "unimol")
+    config = _config({
+        "unimol": {"enabled": True, "chunk_dir": str(tmp_path / "mol"), "chunk_range": None},
+        "metabolite": {"enabled": True, "chunk_dir": str(tmp_path / "missing_coco"), "chunk_range": None},
+    })
+    with pytest.raises(FileNotFoundError, match="metabolite: enabled in the config but no chunks"):
+        load_universal_dataset(config, "PDB", "")
+
+
+def test_chunk_directory_without_data_file_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("MIND_INDEX_MAP_CACHE_DIR", str(tmp_path / "maps"))
+    _write_chunk(tmp_path, "mol", 0, [5] * 10, "unimol")
+    (tmp_path / "mol_chunk_1" / "processed").mkdir(parents=True)
+    config = _config({"unimol": {"enabled": True, "chunk_dir": str(tmp_path / "mol"), "chunk_range": None}})
+    with pytest.raises(FileNotFoundError, match="has no processed data file"):
+        load_universal_dataset(config, "PDB", "")

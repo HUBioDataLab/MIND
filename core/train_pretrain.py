@@ -169,6 +169,8 @@ def _discover_chunk_files(label: str, chunk_dir: str, chunk_range) -> list:
                         if 'pre_filter' not in f.name and 'pre_transform' not in f.name]
             if pt_files:
                 dtype_chunks.append(str(pt_files[0]))
+                continue
+        raise FileNotFoundError(f"{label}: chunk directory {chunk_dir_path} has no processed data file")
     if dtype_chunks:
         print(f"   ✓ {label.upper()}: {len(dtype_chunks)} chunks loaded")
     return dtype_chunks
@@ -238,10 +240,17 @@ def load_universal_dataset(config: PretrainingConfig, dataset_name: str, dataset
             dtype_chunks = _discover_chunk_files(
                 dtype, dtype_config.get('chunk_dir', ''), dtype_config.get('chunk_range')
             )
-            if dtype_chunks:
-                all_chunk_files.extend(dtype_chunks)
-                chunk_split_tags.extend([None] * len(dtype_chunks))
-                enabled_types.append(dtype)
+            if not dtype_chunks:
+                # An enabled domain whose chunks are missing must stop the run: skipping it
+                # would silently train on less data than the config says.
+                raise FileNotFoundError(
+                    f"{dtype}: enabled in the config but no chunks found for "
+                    f"chunk_dir={dtype_config.get('chunk_dir', '')!r} "
+                    f"chunk_range={dtype_config.get('chunk_range')!r}"
+                )
+            all_chunk_files.extend(dtype_chunks)
+            chunk_split_tags.extend([None] * len(dtype_chunks))
+            enabled_types.append(dtype)
 
         if not all_chunk_files:
             raise FileNotFoundError("No chunk files found for any enabled dataset type!")
