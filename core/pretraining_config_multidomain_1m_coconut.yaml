@@ -79,7 +79,6 @@ multi_domain:
       unimol: 20
       coconut: 10
   max_cache_chunks: 10
-  fallback_to_single_domain: true
 
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
@@ -90,7 +89,6 @@ dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom un
 # -------------------------
 num_workers: 8  # Measured 16 Oct: loader 6.2 -> 21 batch/s vs 0 workers; batch content is identical, only the random Tier-3 protein edges are drawn per worker. 0 was an old 'hanging' precaution.
 max_samples: null  # null = use all available samples
-use_universal_cache: true
 
 # -------------------------
 # Eğitim Parametreleri
@@ -113,21 +111,17 @@ gradient_clip_val: 0.5
 optimiser_weight_decay: 1.0e-10
 monitor_loss_name: "val_total_loss"
 use_bfloat16: true  # Required for flash_varlen
-accelerator: gpu #! Not used
 devices: 1  # Use single GPU (will be GPU 6 via CUDA_VISIBLE_DEVICES) #! Not used
-precision: bfloat16  # Required for flash_varlen
 num_sanity_val_steps: 0
 # Validation and logging: run validation and log to wandb more often than once per epoch
 val_check_interval: 0.5  # val = 1 protein chunk + all RNA val + 1 UniMol chunk
 log_every_n_steps: 25      # Log train metrics to wandb every N steps
-fast_dev_run: false #! Not used
 
 # -------------------------
 # Model Mimarisi (ESA)
 # -------------------------
 apply_attention_on: node
 graph_dim: 256
-edge_dim: 64 #! Not used
 hidden_dims: [256, 256, 256, 256, 256, 256, 256]
 num_heads: [16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "M", "S", "M", "S", "P"]
@@ -136,7 +130,6 @@ esa_packed_rows: true  # ESA runs on packed [T, D] rows (all four domains); no p
 norm_type: LN
 use_3d_coordinates: true
 set_max_items: 0
-triu_attn_mask: false #! Not used
 
 # -------------------------
 # Equivariant Features
@@ -193,7 +186,6 @@ short_range_bin_boundaries: [0.8, 1.2, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
 # Tier 1: Sequence-based edges (backbone connectivity)
 # Tier 2: Spatial edges (filtered to exclude Tier 1)
 # Tier 3: Random long-range edges
-use_hybrid_edges: true
 sequence_neighbors_k: 3          # Tier 1: Connect residue i to i±k neighbors in sequence
 max_spatial_neighbors: 48        # Tier 2: Spatial neighbors (reduced from 64, some covered by Tier 1)
 num_random_edges: 8              # Tier 3: Random long-range edges (scaled for proteins <1024 AA)
@@ -262,24 +254,6 @@ geometry_neutral_virtual_slots:
 unimol_masked_geometry_hiding:
   enabled: false
   bond_threshold_angstrom: 2.1
-
-temperature: 0.2 #! Not used
-
-# -------------------------
-# Yeni Kod Yapısı İçin Gerekli Diğer Parametreler
-# -------------------------
-max_block_types: 150 #! Not used
-max_position_types: 15 #! Not used
-max_entity_types: 6 #! Not used
-block_embedding_dim: 32 #! Not used
-position_embedding_dim: 16 #! Not used
-entity_embedding_dim: 8 #! Not used
-use_hierarchical_features: false #! Not used
-max_atomic_num: 118 #! Not used
-rwse_dim: 24 #! Not used
-lap_dim: 4 #! Not used
-mlp_inter_dim: 128 #! Not used
-pma_num_outputs: 32 #! Not used
 
 # ===================================================================
 # Quick Start Guide

@@ -66,7 +66,6 @@ multi_domain:
       unimol: 20
       coconut: 10
   max_cache_chunks: 6
-  fallback_to_single_domain: true
 
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
@@ -74,7 +73,6 @@ dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"
 
 num_workers: 8  # same as the full four-domain config; this fast gate tests the worker setting
 max_samples: null
-use_universal_cache: true
 
 max_epochs: 3
 batch_size: 32
@@ -93,17 +91,13 @@ gradient_clip_val: 0.5
 optimiser_weight_decay: 1.0e-10
 monitor_loss_name: "val_total_loss"
 use_bfloat16: true
-accelerator: gpu
 devices: 1
-precision: bfloat16
 num_sanity_val_steps: 0
 val_check_interval: 1.0  # one validation per epoch: the protein val chunk alone is ~800 batches
 log_every_n_steps: 25
-fast_dev_run: false
 
 apply_attention_on: node
 graph_dim: 256
-edge_dim: 64
 hidden_dims: [256, 256, 256, 256, 256, 256, 256]
 num_heads: [16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "M", "S", "M", "S", "P"]
@@ -112,7 +106,6 @@ esa_packed_rows: true  # same as the full four-domain config
 norm_type: LN
 use_3d_coordinates: true
 set_max_items: 0
-triu_attn_mask: false
 
 use_equivariant_features: false
 equivariant_lmax: 2
@@ -145,7 +138,6 @@ short_range_max_distance: 5.0
 short_range_distance_bins: 10
 short_range_bin_boundaries: [0.8, 1.2, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
 
-use_hybrid_edges: true
 sequence_neighbors_k: 3
 max_spatial_neighbors: 48
 num_random_edges: 8
@@ -192,17 +184,3 @@ geometry_neutral_virtual_slots:
   context_audit_batches: 4
   gradient_audit_batches: 1
 
-temperature: 0.2
-
-max_block_types: 150
-max_position_types: 15
-max_entity_types: 6
-block_embedding_dim: 32
-position_embedding_dim: 16
-entity_embedding_dim: 8
-use_hierarchical_features: false
-max_atomic_num: 118
-rwse_dim: 24
-lap_dim: 4
-mlp_inter_dim: 128
-pma_num_outputs: 32
