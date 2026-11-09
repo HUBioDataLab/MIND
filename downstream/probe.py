@@ -47,6 +47,10 @@ def load_embeddings(task: str, model_id: str, split: str, pooling: str, root=Non
         return data["chains"].tolist(), labels, data[key].astype(np.float32), path
 
 
+def _format_optional(value) -> str:
+    return "undefined" if value is None else f"{value:.4f}"
+
+
 def evaluate_with_cutoffs(labels: np.ndarray, scores: np.ndarray, subsets: Dict[int, np.ndarray]) -> dict:
     result = {"all": evaluate(labels, scores)}
     for cutoff, mask in sorted(subsets.items()):
@@ -210,8 +214,10 @@ def main(argv=None) -> int:
             metrics_val = evaluate_regression(data[val_split][1].reshape(-1), val_scores)
             metrics_test = {"all": evaluate_regression(data[test_split][1].reshape(-1), test_scores)}
             headline = (f"val rmse {metrics_val['rmse']:.4f} test rmse {metrics_test['all']['rmse']:.4f} "
-                        f"pearson {metrics_test['all']['pearson_r']:.4f} "
-                        f"spearman {metrics_test['all']['spearman_rho']:.4f}")
+                        f"pearson {_format_optional(metrics_test['all']['pearson_r'])} "
+                        f"spearman {_format_optional(metrics_test['all']['spearman_rho'])}")
+            if metrics_test["all"]["correlation_undefined_reason"]:
+                headline += f" (correlation undefined: {metrics_test['all']['correlation_undefined_reason']})"
         metrics = {
             "task": args.task, "kind": kind, "model_id": args.model_id, "protocol": protocol,
             "pooling": pooling, "seed": seed, "best_epoch": best["epoch"],

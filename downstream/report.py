@@ -60,6 +60,8 @@ LBA_LITERATURE_NOTE = (
     "to a frozen-encoder probe."
 )
 REGRESSION_TASKS = ("lba",)
+# Fold has three test sets; GearNet's table adds an "Avg." column over them.
+FOLD_TEST_SPLITS = ("test_fold", "test_superfamily", "test_family")
 
 
 def _stat(values):
@@ -79,13 +81,23 @@ def collect(task: str, root=None) -> list:
     for (model_id, protocol), runs in sorted(groups.items()):
         if all(run.get("kind") == "multiclass" for run in runs):
             test_splits = sorted({k for run in runs for k in run["test"]})
-            rows.append({
+            row = {
                 "model_id": model_id, "protocol": protocol, "seeds": sorted(run["seed"] for run in runs),
                 "val_accuracy": _stat([run["val"]["accuracy"] for run in runs]),
                 **{f"test_accuracy_{name}": _stat([run["test"][name]["accuracy"] for run in runs]) for name in test_splits},
-            })
+                **{f"test_balanced_accuracy_{name}": _stat([run["test"][name].get("balanced_accuracy") for run in runs])
+                   for name in test_splits},
+            }
+            if task == "fold":
+                row.update(_fold_average_stats(model_id, protocol, runs))
+            rows.append(row)
             continue
         if all(run.get("kind") == "regression" for run in runs):
+            undefined = defaultdict(int)
+            for run in runs:
+                reason = run["test"]["all"].get("correlation_undefined_reason")
+                if reason is not None:
+                    undefined[reason] += 1
             rows.append({
                 "model_id": model_id, "protocol": protocol,
                 "seeds": sorted(run["seed"] for run in runs),
@@ -94,6 +106,7 @@ def collect(task: str, root=None) -> list:
                 "test_pearson_r": _stat([run["test"]["all"]["pearson_r"] for run in runs]),
                 "test_spearman_rho": _stat([run["test"]["all"]["spearman_rho"] for run in runs]),
                 "test_mae": _stat([run["test"]["all"]["mae"] for run in runs]),
+                "test_correlation_undefined": dict(undefined),
             })
             continue
         cutoffs = sorted({k for run in runs for k in run["test"] if k.startswith("cutoff_")},
@@ -105,8 +118,25 @@ def collect(task: str, root=None) -> list:
             "test_pair_aupr": _stat([run["test"]["all"]["pair_aupr"] for run in runs]),
             "test_top1_accuracy": _stat([run["test"]["all"]["top1_accuracy"] for run in runs]),
             **{f"test_fmax_{c}": _stat([(run["test"].get(c) or {}).get("fmax") for run in runs]) for c in cutoffs},
+            "test_macro_aupr": _stat([run["test"]["all"].get("macro_aupr") for run in runs]),
+            "test_macro_aupr_num_terms_skipped": _stat(
+                [run["test"]["all"].get("macro_aupr_num_terms_skipped") for run in runs]),
         })
     return rows
+
+
+def _fold_average_stats(model_id: str, protocol: str, runs: list) -> dict:
+    """Per-seed mean over the three Fold test sets (GearNet's Avg. column); old runs without balanced accuracy give None."""
+    accuracy_means, balanced_means = [], []
+    for run in runs:
+        missing = [name for name in FOLD_TEST_SPLITS if name not in run["test"]]
+        if missing:
+            raise ValueError(f"{model_id}/{protocol} seed {run['seed']}: Fold run lacks test splits {missing}; "
+                             "the Avg. over the three test sets is undefined")
+        accuracy_means.append(float(np.mean([run["test"][n]["accuracy"] for n in FOLD_TEST_SPLITS])))
+        balanced = [run["test"][n].get("balanced_accuracy") for n in FOLD_TEST_SPLITS]
+        balanced_means.append(None if any(b is None for b in balanced) else float(np.mean(balanced)))
+    return {"test_accuracy_avg": _stat(accuracy_means), "test_balanced_accuracy_avg": _stat(balanced_means)}
 
 
 def _fmt(stat):
@@ -123,22 +153,46 @@ def regression_markdown(task: str, rows: list) -> str:
         ]) + " |")
     for name, value in LITERATURE.get(task, []):
         lines.append("| " + " | ".join([name, "literature", "-", f"{value:.3f}"] + ["-"] * 3) + " |")
-    return "\n".join(lines) + "\n\n" + LBA_LITERATURE_NOTE + "\n"
+    notes = []
+    for row in rows:
+        for reason, count in sorted(row.get("test_correlation_undefined", {}).items()):
+            notes.append(f"Correlation undefined ({reason}) in {count} of {len(row['seeds'])} seeds for "
+                         f"{row['model_id']} / {row['protocol']}; RMSE and MAE are still reported.")
+    return "\n".join(lines) + "\n\n" + LBA_LITERATURE_NOTE + "\n" + "".join(f"\n{note}\n" for note in notes)
 
 
 def multiclass_markdown(task: str, rows: list) -> str:
-    splits = sorted({k[len("test_accuracy_"):] for row in rows for k in row if k.startswith("test_accuracy_")})
+    splits = sorted({k[len("test_accuracy_"):] for row in rows for k in row
+                     if k.startswith("test_accuracy_") and k != "test_accuracy_avg"})
     literature = MULTICLASS_LITERATURE.get(task, [])
     splits = sorted(set(splits) | {k for _, values in literature for k in values})
-    header = ["model_id", "protocol", "val accuracy"] + [f"test accuracy {name}" for name in splits]
+    with_average = task == "fold"
+    header = (["model_id", "protocol", "val accuracy"] + [f"test accuracy {name}" for name in splits]
+              + [f"test balanced accuracy {name}" for name in splits])
+    if with_average:
+        header += ["test accuracy avg", "test balanced accuracy avg"]
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     for row in rows:
-        lines.append("| " + " | ".join([row["model_id"], row["protocol"], _fmt(row.get("val_accuracy"))]
-                                       + [_fmt(row.get(f"test_accuracy_{name}")) for name in splits]) + " |")
+        cells = ([row["model_id"], row["protocol"], _fmt(row.get("val_accuracy"))]
+                 + [_fmt(row.get(f"test_accuracy_{name}")) for name in splits]
+                 + [_fmt(row.get(f"test_balanced_accuracy_{name}")) for name in splits])
+        if with_average:
+            cells += [_fmt(row.get("test_accuracy_avg")), _fmt(row.get("test_balanced_accuracy_avg"))]
+        lines.append("| " + " | ".join(cells) + " |")
     for name, values in literature:
-        lines.append("| " + " | ".join([name, LITERATURE_NOTE, "-"]
-                                       + [(f"{values[s]:.1f} %" if s in values else "-") for s in splits]) + " |")
-    return "\n".join(lines) + "\n\nAccuracies of probes are fractions (0-1); literature rows are percent.\n"
+        cells = ([name, LITERATURE_NOTE, "-"] + [(f"{values[s]:.1f} %" if s in values else "-") for s in splits]
+                 + ["-"] * len(splits))
+        if with_average:
+            cells += [f"{np.mean(list(values.values())):.1f} %" if set(values) == set(FOLD_TEST_SPLITS) else "-", "-"]
+        lines.append("| " + " | ".join(cells) + " |")
+    notes = ("Accuracies of probes are fractions (0-1); literature rows are percent. Accuracy is the share of correctly "
+             "classified proteins; balanced accuracy is the mean per-class recall over the classes present in that test "
+             "split.")
+    if with_average:
+        notes += (" Avg. is the plain mean of the three test-set values per seed (the literature Avg. is derived the same "
+                  "way). GearNet's 'mean accuracy' is not shown to be either the plain or the balanced accuracy, so both "
+                  "are reported.")
+    return "\n".join(lines) + "\n\n" + notes + "\n"
 
 
 def to_markdown(task: str, rows: list) -> str:
@@ -149,15 +203,17 @@ def to_markdown(task: str, rows: list) -> str:
     columns = sorted({k for row in rows for k in row if k.startswith("test_fmax_cutoff")},
                      key=lambda k: int(k.rsplit("_", 1)[1]))
     header = ["model_id", "protocol", "val Fmax", "test Fmax", "pair AUPR", "top-1 acc"] + [
-        f"Fmax <{c.rsplit('_', 1)[1]}%" for c in columns]
+        f"Fmax <{c.rsplit('_', 1)[1]}%" for c in columns] + ["macro AUPR", "macro AUPR skipped terms"]
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     for row in rows:
         cells = [row["model_id"], row["protocol"], _fmt(row["val_fmax"]), _fmt(row["test_fmax"]),
-                 _fmt(row["test_pair_aupr"]), _fmt(row["test_top1_accuracy"])] + [_fmt(row.get(c)) for c in columns]
+                 _fmt(row["test_pair_aupr"]), _fmt(row["test_top1_accuracy"])] + [_fmt(row.get(c)) for c in columns] + [
+                     _fmt(row.get("test_macro_aupr")), _fmt(row.get("test_macro_aupr_num_terms_skipped"))]
         lines.append("| " + " | ".join(cells) + " |")
     for name, value in LITERATURE.get(task, []):
         lines.append("| " + " | ".join([name, LITERATURE_NOTE, "-", f"{value:.3f}"] + ["-"] * (len(header) - 4)) + " |")
-    return "\n".join(lines) + "\n"
+    return ("\n".join(lines) + "\n\npair AUPR: one curve over all (protein, term) pairs (GearNet). macro AUPR: one curve per "
+            "term, averaged over terms (DeepFRI); terms without a true protein are skipped and counted.\n")
 
 
 def main(argv=None) -> int:

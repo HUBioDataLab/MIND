@@ -7,15 +7,22 @@ maximum harmonic mean over t. Every evaluated protein must carry at least one
 true term (CAFA evaluates annotated benchmark proteins only).
 
 Pair-centric AUPR: average precision over all (protein, term) pairs
-(``sklearn.metrics.average_precision_score`` on the flattened arrays).
+(``sklearn.metrics.average_precision_score`` on the flattened arrays); this is the
+GearNet definition and keeps the name ``pair_aupr``.
+
+Label-centric (macro) AUPR: one average precision per term over the proteins, then the
+mean over terms (the DeepFRI definition), reported as ``macro_aupr``. A term with no true
+protein in the evaluated set has no precision-recall curve; it is left out of the mean and
+counted in ``macro_aupr_num_terms_skipped``, never counted as zero.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Dict
 
 import numpy as np
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 THRESHOLDS = np.round(np.arange(0, 101) / 100.0, 2)
 
@@ -61,6 +68,25 @@ def pair_aupr(labels: np.ndarray, scores: np.ndarray) -> float:
     return float(average_precision_score(labels.ravel(), scores.ravel()))
 
 
+def label_aupr(labels: np.ndarray, scores: np.ndarray) -> Dict[str, object]:
+    """Label-centric AUPR: mean over terms of the per-term average precision (DeepFRI)."""
+    labels, scores = _check(labels, scores)
+    values, skipped = [], []
+    for term in range(labels.shape[1]):
+        if not labels[:, term].any():
+            skipped.append(term)
+            continue
+        values.append(float(average_precision_score(labels[:, term], scores[:, term])))
+    if not values:
+        raise ValueError("no term has a true protein; macro AUPR is undefined")
+    return {
+        "macro_aupr": float(np.mean(values)),
+        "num_terms_evaluated": len(values),
+        "num_terms_skipped_no_positive": len(skipped),
+        "skipped_term_indices": skipped,
+    }
+
+
 def top1_accuracy(labels: np.ndarray, scores: np.ndarray) -> float:
     """Fraction of proteins whose highest-scoring term is a true term."""
     labels, scores = _check(labels, scores)
@@ -75,6 +101,7 @@ def subset_accuracy(labels: np.ndarray, scores: np.ndarray, threshold: float = 0
 
 def evaluate(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
     fmax = protein_fmax(labels, scores)
+    macro = label_aupr(labels, scores)
     return {
         "fmax": fmax["fmax"],
         "fmax_threshold": fmax["threshold"],
@@ -84,6 +111,9 @@ def evaluate(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
         "top1_accuracy": top1_accuracy(labels, scores),
         "subset_accuracy@0.5": subset_accuracy(labels, scores),
         "num_proteins": int(len(labels)),
+        "macro_aupr": macro["macro_aupr"],
+        "macro_aupr_num_terms": macro["num_terms_evaluated"],
+        "macro_aupr_num_terms_skipped": macro["num_terms_skipped_no_positive"],
     }
 
 
@@ -115,12 +145,27 @@ def mae(targets: np.ndarray, predictions: np.ndarray) -> float:
     return float(np.mean(np.abs(targets - predictions)))
 
 
+def _correlation_undefined_reason(targets: np.ndarray, predictions: np.ndarray) -> str | None:
+    """Why Pearson / Spearman have no value for these samples (None when they are defined)."""
+    if targets.size < 2:
+        return "fewer_than_two_samples"
+    constant_target = bool(np.ptp(targets) == 0)
+    constant_prediction = bool(np.ptp(predictions) == 0)
+    if constant_target and constant_prediction:
+        return "constant_target_and_prediction"
+    if constant_prediction:
+        return "constant_prediction"
+    if constant_target:
+        return "constant_target"
+    return None
+
+
 def pearson_r(targets: np.ndarray, predictions: np.ndarray) -> float:
     """Pearson correlation; a constant prediction or target has no correlation."""
     targets, predictions = _check_regression(targets, predictions)
     if targets.size < 2:
         raise ValueError("Pearson r needs at least two samples")
-    if targets.std() == 0 or predictions.std() == 0:
+    if np.ptp(targets) == 0 or np.ptp(predictions) == 0:
         raise ValueError("Pearson r is undefined for a constant target or prediction")
     from scipy.stats import pearsonr
 
@@ -139,16 +184,24 @@ def spearman_rho(targets: np.ndarray, predictions: np.ndarray) -> float:
     return value
 
 
-def evaluate_regression(targets: np.ndarray, predictions: np.ndarray) -> Dict[str, float]:
+def evaluate_regression(targets: np.ndarray, predictions: np.ndarray) -> Dict[str, object]:
+    """RMSE / MAE always; Pearson and Spearman are ``None`` with a named reason when undefined.
+
+    ``correlation_undefined_reason`` is ``None`` when both correlations were computed, otherwise one of
+    ``constant_prediction``, ``constant_target``, ``constant_target_and_prediction`` or
+    ``fewer_than_two_samples``. NaN/inf inputs and shape mismatches still raise.
+    """
     checked_targets, checked_predictions = _check_regression(targets, predictions)
+    reason = _correlation_undefined_reason(checked_targets, checked_predictions)
     return {
         "rmse": rmse(checked_targets, checked_predictions),
         "mae": mae(checked_targets, checked_predictions),
-        "pearson_r": pearson_r(checked_targets, checked_predictions),
-        "spearman_rho": spearman_rho(checked_targets, checked_predictions),
+        "pearson_r": None if reason else pearson_r(checked_targets, checked_predictions),
+        "spearman_rho": None if reason else spearman_rho(checked_targets, checked_predictions),
         "num_samples": int(checked_targets.size),
         "target_mean": float(checked_targets.mean()),
         "target_std": float(checked_targets.std()),
+        "correlation_undefined_reason": reason,
     }
 
 
@@ -178,6 +231,14 @@ def accuracy(targets: np.ndarray, scores: np.ndarray) -> float:
     return float((scores.argmax(axis=1) == targets).mean())
 
 
+def balanced_accuracy(targets: np.ndarray, scores: np.ndarray) -> float:
+    """Mean per-class recall over the classes that occur in ``targets`` (classes absent from the split are not averaged)."""
+    targets, scores = _check_multiclass(targets, scores)
+    predicted = scores.argmax(axis=1)
+    recalls = [float((predicted[targets == c] == c).mean()) for c in np.unique(targets)]
+    return float(np.mean(recalls))
+
+
 def evaluate_multiclass(targets: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
     targets, scores = _check_multiclass(targets, scores)
     top5 = np.argsort(-scores, axis=1)[:, :min(5, scores.shape[1])]
@@ -186,4 +247,275 @@ def evaluate_multiclass(targets: np.ndarray, scores: np.ndarray) -> Dict[str, fl
         "top5_accuracy": float((top5 == targets[:, None]).any(axis=1).mean()),
         "num_proteins": int(len(targets)),
         "num_classes_present": int(len(np.unique(targets))),
+        "balanced_accuracy": balanced_accuracy(targets, scores),
+    }
+
+
+# ---------------------------------------------------------------------------
+# MoleculeNet metrics (pure functions; no task code yet).
+#
+# Labels of a multi-task data set carry NaN where a molecule was not measured for a task. Every function
+# masks those entries per task. A task that cannot be scored (single-class labels) is skipped and counted in
+# the result; if no task can be scored the call raises. Scores must be finite everywhere.
+# ---------------------------------------------------------------------------
+
+def _as_columns(values, name: str) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim == 1:
+        array = array[:, None]
+    if array.ndim != 2:
+        raise ValueError(f"{name} must be 1-D or 2-D (samples x tasks), got shape {array.shape}")
+    return array
+
+
+def _check_masked(labels, scores, *, label_name: str, score_name: str) -> tuple[np.ndarray, np.ndarray]:
+    labels, scores = _as_columns(labels, label_name), _as_columns(scores, score_name)
+    if labels.shape != scores.shape:
+        raise ValueError(f"{label_name} {labels.shape} and {score_name} {scores.shape} must have equal shapes")
+    if labels.shape[0] == 0:
+        raise ValueError("metrics need at least one sample")
+    if not np.isfinite(scores).all():
+        raise ValueError(f"{score_name} contain NaN or inf")
+    return labels, scores
+
+
+def _multitask_binary(labels, scores, metric, key: str) -> Dict[str, object]:
+    labels, scores = _check_masked(labels, scores, label_name="labels", score_name="scores")
+    observed = ~np.isnan(labels)
+    if not np.isin(labels[observed], (0, 1)).all():
+        raise ValueError("labels must be 0, 1 or NaN (missing)")
+    per_task, skipped = [], []
+    for task in range(labels.shape[1]):
+        valid = observed[:, task]
+        truth = labels[valid, task].astype(int)
+        if truth.sum() == 0 or truth.sum() == truth.size:
+            per_task.append(None)
+            skipped.append(task)
+            continue
+        per_task.append(float(metric(truth, scores[valid, task])))
+    evaluated = [value for value in per_task if value is not None]
+    if not evaluated:
+        raise ValueError("every task is single-class (needs labelled positives and negatives); nothing to evaluate")
+    return {
+        key: float(np.mean(evaluated)),
+        "per_task": per_task,
+        "num_tasks": int(labels.shape[1]),
+        "num_tasks_evaluated": len(evaluated),
+        "num_tasks_skipped": len(skipped),
+        "skipped_task_indices": skipped,
+    }
+
+
+def multitask_roc_auc(labels: np.ndarray, scores: np.ndarray) -> Dict[str, object]:
+    """Mean over tasks of the ROC-AUC computed on each task's labelled molecules (MoleculeNet / Uni-Mol)."""
+    return _multitask_binary(labels, scores, roc_auc_score, "roc_auc")
+
+
+def multitask_prc_auc(labels: np.ndarray, scores: np.ndarray) -> Dict[str, object]:
+    """Mean over tasks of the average precision (area under the precision-recall curve), masked per task.
+
+    Average precision is the step-wise sum used by scikit-learn; MoleculeNet's own PRC-AUC may integrate the
+    curve with the trapezoid rule, which gives slightly different numbers.
+    """
+    return _multitask_binary(labels, scores, average_precision_score, "prc_auc")
+
+
+def multitarget_regression_errors(targets: np.ndarray, predictions: np.ndarray) -> Dict[str, object]:
+    """Per-target and target-averaged RMSE and MAE, masking NaN (missing) targets. Units are the caller's."""
+    targets, predictions = _check_masked(targets, predictions, label_name="targets", score_name="predictions")
+    observed = ~np.isnan(targets)
+    if not np.isfinite(targets[observed]).all():
+        raise ValueError("targets contain inf")
+    rmse_values, mae_values, counts = [], [], []
+    for target in range(targets.shape[1]):
+        valid = observed[:, target]
+        if not valid.any():
+            raise ValueError(f"target {target} has no labelled sample; its error is undefined")
+        error = predictions[valid, target] - targets[valid, target]
+        rmse_values.append(float(np.sqrt(np.mean(error ** 2))))
+        mae_values.append(float(np.mean(np.abs(error))))
+        counts.append(int(valid.sum()))
+    return {
+        "rmse": float(np.mean(rmse_values)),
+        "mae": float(np.mean(mae_values)),
+        "rmse_per_target": rmse_values,
+        "mae_per_target": mae_values,
+        "num_targets": int(targets.shape[1]),
+        "num_labeled_per_target": counts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# RNA metrics (rnaglib core tasks; pure functions, no task code yet).
+#
+# Binary and multi-label scores are probabilities; a prediction is ``score >= threshold``. A value that
+# cannot be computed is ``None`` and named in ``undefined`` (never a silent 0). MCC with a zero marginal
+# (for example an always-negative model) is therefore ``None``, whereas scikit-learn returns 0.
+# ---------------------------------------------------------------------------
+
+def _binary_counts(truth: np.ndarray, predicted: np.ndarray) -> tuple[int, int, int, int]:
+    tp = int((truth & predicted).sum())
+    fp = int((~truth & predicted).sum())
+    fn = int((truth & ~predicted).sum())
+    tn = int((~truth & ~predicted).sum())
+    return tp, fp, fn, tn
+
+
+def _ratio(numerator: float, denominator: float) -> float | None:
+    return None if denominator == 0 else float(numerator / denominator)
+
+
+def _balanced_accuracy_from_counts(tp, fp, fn, tn) -> float | None:
+    if tp + fn == 0 or tn + fp == 0:
+        return None
+    return 0.5 * (tp / (tp + fn) + tn / (tn + fp))
+
+
+def _mcc_from_counts(tp, fp, fn, tn) -> float | None:
+    denominator = math.sqrt(float(tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    return _ratio(tp * tn - fp * fn, denominator)
+
+
+def _check_binary_labels(labels: np.ndarray) -> np.ndarray:
+    if not np.isin(labels, (0, 1)).all():
+        raise ValueError("labels must be 0/1")
+    return labels.astype(bool)
+
+
+def binary_classification_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float = 0.5) -> Dict[str, object]:
+    """Balanced accuracy, F1, MCC, AUC and Jaccard of the positive class for one binary task."""
+    labels, scores = np.asarray(labels, dtype=np.float64), np.asarray(scores, dtype=np.float64)
+    if labels.ndim != 1 or labels.shape != scores.shape:
+        raise ValueError(f"labels {labels.shape} and scores {scores.shape} must have equal shapes (1-D)")
+    if labels.size == 0:
+        raise ValueError("metrics need at least one sample")
+    if not np.isfinite(scores).all():
+        raise ValueError("scores contain NaN or inf")
+    truth = _check_binary_labels(labels)
+    tp, fp, fn, tn = _binary_counts(truth, scores >= threshold)
+    values = {
+        "balanced_accuracy": _balanced_accuracy_from_counts(tp, fp, fn, tn),
+        "f1": _ratio(2 * tp, 2 * tp + fp + fn),
+        "mcc": _mcc_from_counts(tp, fp, fn, tn),
+        "auc": None if truth.all() or not truth.any() else float(roc_auc_score(truth, scores)),
+        "jaccard": _ratio(tp, tp + fp + fn),
+    }
+    reasons = {"balanced_accuracy": "single_class_labels", "f1": "no_positive_labels_or_predictions",
+               "mcc": "zero_marginal", "auc": "single_class_labels", "jaccard": "no_positive_labels_or_predictions"}
+    return {
+        **values,
+        "threshold": float(threshold),
+        "num_samples": int(labels.size),
+        "num_positive": int(truth.sum()),
+        "undefined": {name: reasons[name] for name, value in values.items() if value is None},
+    }
+
+
+def _macro(values: list, name: str, reason: str, undefined: dict) -> float | None:
+    defined = [value for value in values if value is not None]
+    if not defined:
+        undefined[name] = reason
+        return None
+    return float(np.mean(defined))
+
+
+def multilabel_classification_metrics(labels: np.ndarray, scores: np.ndarray, threshold: float = 0.5) -> Dict[str, object]:
+    """F1 and Jaccard (macro over labels, micro over all entries, mean over samples), plus macro balanced accuracy and AUC.
+
+    rnaglib does not state which averaging its RNA-GO table uses, so every variant is returned under its own name.
+    A label (or sample) whose metric is 0/0 is left out of the macro (or sample) mean and counted.
+    """
+    labels, scores = np.asarray(labels, dtype=np.float64), np.asarray(scores, dtype=np.float64)
+    if labels.ndim != 2 or labels.shape != scores.shape:
+        raise ValueError(f"labels {labels.shape} and scores {scores.shape} must be equal 2-D arrays (samples x labels)")
+    if labels.shape[0] == 0:
+        raise ValueError("metrics need at least one sample")
+    if not np.isfinite(scores).all():
+        raise ValueError("scores contain NaN or inf")
+    truth = _check_binary_labels(labels)
+    predicted = scores >= threshold
+    per_label = [_binary_counts(truth[:, j], predicted[:, j]) for j in range(truth.shape[1])]
+    per_sample = [_binary_counts(truth[i], predicted[i]) for i in range(truth.shape[0])]
+    tp, fp, fn = (int((truth & predicted).sum()), int((~truth & predicted).sum()),
+                  int((truth & ~predicted).sum()))
+    label_auc = [None if truth[:, j].all() or not truth[:, j].any() else float(roc_auc_score(truth[:, j], scores[:, j]))
+                 for j in range(truth.shape[1])]
+    per_label_values = {
+        "f1": [_ratio(2 * c[0], 2 * c[0] + c[1] + c[2]) for c in per_label],
+        "jaccard": [_ratio(c[0], c[0] + c[1] + c[2]) for c in per_label],
+        "balanced_accuracy": [_balanced_accuracy_from_counts(*c) for c in per_label],
+        "auc": label_auc,
+    }
+    per_sample_values = {
+        "f1": [_ratio(2 * c[0], 2 * c[0] + c[1] + c[2]) for c in per_sample],
+        "jaccard": [_ratio(c[0], c[0] + c[1] + c[2]) for c in per_sample],
+    }
+    undefined: Dict[str, str] = {}
+    result: Dict[str, object] = {}
+    for metric in ("f1", "jaccard"):
+        result[f"{metric}_macro"] = _macro(per_label_values[metric], f"{metric}_macro",
+                                           "no_positive_labels_or_predictions", undefined)
+        result[f"{metric}_samples"] = _macro(per_sample_values[metric], f"{metric}_samples",
+                                             "no_positive_labels_or_predictions", undefined)
+    result["f1_micro"] = _ratio(2 * tp, 2 * tp + fp + fn)
+    result["jaccard_micro"] = _ratio(tp, tp + fp + fn)
+    for name in ("f1_micro", "jaccard_micro"):
+        if result[name] is None:
+            undefined[name] = "no_positive_labels_or_predictions"
+    result["balanced_accuracy_macro"] = _macro(per_label_values["balanced_accuracy"], "balanced_accuracy_macro",
+                                               "no_label_has_both_classes", undefined)
+    result["auc_macro"] = _macro(per_label_values["auc"], "auc_macro", "no_label_has_both_classes", undefined)
+    result.update({
+        "num_labels": int(truth.shape[1]),
+        "num_samples": int(truth.shape[0]),
+        "threshold": float(threshold),
+        "num_labels_skipped": {name: sum(value is None for value in values) for name, values in per_label_values.items()},
+        "num_samples_skipped": {name: sum(value is None for value in values) for name, values in per_sample_values.items()},
+        "undefined": undefined,
+    })
+    return result
+
+
+def multiclass_classification_metrics(targets: np.ndarray, scores: np.ndarray) -> Dict[str, object]:
+    """Accuracy (= sequence recovery for nucleotide identity), balanced accuracy, macro F1 / Jaccard, MCC, one-vs-rest AUC.
+
+    Balanced accuracy averages the recall of classes present in ``targets``; macro F1 / Jaccard average over classes
+    present in the targets or the predictions; one-vs-rest AUC averages over classes that occur but not in every sample.
+    """
+    targets, scores = _check_multiclass(targets, scores)
+    num_classes = scores.shape[1]
+    predicted = scores.argmax(axis=1)
+    confusion = np.bincount(targets * num_classes + predicted, minlength=num_classes ** 2).reshape(num_classes, num_classes)
+    total = int(confusion.sum())
+    tp = np.diag(confusion).astype(np.float64)
+    true_counts, predicted_counts = confusion.sum(axis=1), confusion.sum(axis=0)
+    present = true_counts > 0
+    seen = present | (predicted_counts > 0)
+    undefined: Dict[str, str] = {}
+    f1 = float(np.mean(2 * tp[seen] / (true_counts[seen] + predicted_counts[seen])))
+    jaccard = float(np.mean(tp[seen] / (true_counts[seen] + predicted_counts[seen] - tp[seen])))
+    mcc_denominator = math.sqrt(float(total ** 2 - (predicted_counts.astype(float) ** 2).sum())
+                                * float(total ** 2 - (true_counts.astype(float) ** 2).sum()))
+    mcc = _ratio(float(tp.sum() * total - (predicted_counts.astype(float) * true_counts).sum()), mcc_denominator)
+    if mcc is None:
+        undefined["mcc"] = "zero_marginal"
+    aucs = [float(roc_auc_score(targets == k, scores[:, k])) for k in range(num_classes)
+            if 0 < (targets == k).sum() < targets.size]
+    auc = None if not aucs else float(np.mean(aucs))
+    if auc is None:
+        undefined["auc_ovr_macro"] = "single_class_labels"
+    accuracy_value = float(tp.sum() / total)
+    return {
+        "accuracy": accuracy_value,
+        "sequence_recovery": accuracy_value,
+        "balanced_accuracy": float(np.mean(tp[present] / true_counts[present])),
+        "f1_macro": f1,
+        "jaccard_macro": jaccard,
+        "mcc": mcc,
+        "auc_ovr_macro": auc,
+        "num_classes": int(num_classes),
+        "num_classes_present": int(present.sum()),
+        "num_classes_skipped_auc": int(num_classes - len(aucs)),
+        "num_samples": total,
+        "undefined": undefined,
     }
