@@ -270,6 +270,13 @@ eval-counterfactual:
 #   make ds-report TASK=ec
 # LBA adds SPLIT_TAG=identity30|identity60 and REPRESENTATION=joint|separate to
 # ds-embed and ds-probe (ds-finetune takes SPLIT_TAG only; it is joint-only).
+# Results ledger (append-only JSONL + generated reports under MIND_RESULTS_ROOT, outside Git; CPU only;
+# reads outputs, never writes them; ds-report is separate and unchanged):
+#   make ds-ledger-add OUTPUTS_ROOT=<outputs root> [EVAL_DIRS="<eval dir> ..."]   (re-running adds nothing new)
+#   make ds-ledger-annotate SELECT="task=ec data_revision=<rev>" STATUS=superseded REASON="..." [REPLACED_BY=<rev>]
+#   make ds-ledger-report [MODELS="<a> <b>"]   make ds-summary   make ds-missing   make ds-ledger-verify
+#   make ds-compare A=<model> B=<model> [TASKS="ec lba"] [BOOTSTRAP=1000]
+# MODELS defaults to summary_models in $(MIND_RESULTS_ROOT)/comparisons.yaml, else the list in ledger_report.py.
 # ===================================================================
 
 TASK ?= ec
@@ -299,7 +306,8 @@ DS_MOLNET_ARGS = $(if $(filter mn_%,$(TASK)),--task $(TASK),)
 DS_PROCESS_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS)))
 DS_DOWNLOAD_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),))
 
-.PHONY: ds-snapshot ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream
+.PHONY: ds-snapshot ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
+	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify
 
 ds-snapshot:
 	@test -n "$(CKPT)" -a -n "$(NAME)" || { echo "ERROR: set CKPT and NAME"; exit 1; }
@@ -345,6 +353,35 @@ ds-probe:
 ds-report:
 	$(CONDA_RUN) python -m downstream.report --task $(TASK)
 
+MIND_RESULTS_ROOT ?= /home/yusuf/mind_results
+BOOTSTRAP ?= 1000
+LEDGER_ENV = MIND_RESULTS_ROOT="$(MIND_RESULTS_ROOT)" CUDA_VISIBLE_DEVICES="" $(DS_ENV)
+LEDGER_MODELS_ARGS = $(if $(strip $(MODELS)),--models $(MODELS),)
+
+ds-ledger-add:
+	@test -n "$(strip $(OUTPUTS_ROOT)$(EVAL_DIRS))" || { echo "ERROR: set OUTPUTS_ROOT=<outputs root> and/or EVAL_DIRS=\"<eval dir> ...\""; exit 1; }
+	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger add $(if $(strip $(OUTPUTS_ROOT)),--outputs-root "$(OUTPUTS_ROOT)",) \
+		$(foreach d,$(EVAL_DIRS),--eval-dir "$(d)")
+
+ds-ledger-annotate:
+	@test -n "$(SELECT)" -a -n "$(STATUS)" -a -n "$(REASON)" || { echo "ERROR: set SELECT, STATUS and REASON"; exit 1; }
+	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger annotate --select "$(SELECT)" --status $(STATUS) --reason "$(REASON)" \
+		$(if $(strip $(REPLACED_BY)),--replaced-by "$(REPLACED_BY)",)
+
+ds-ledger-report:
+	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger_report report $(LEDGER_MODELS_ARGS)
+
+ds-summary ds-missing:
+	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger_report $(patsubst ds-%,%,$@) $(LEDGER_MODELS_ARGS)
+
+ds-compare:
+	@test -n "$(A)" -a -n "$(B)" || { echo "ERROR: set A and B (model keys as in the ledger)"; exit 1; }
+	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger_compare --a "$(A)" --b "$(B)" --bootstrap $(BOOTSTRAP) \
+		$(if $(strip $(TASKS)),--tasks $(TASKS),)
+
+ds-ledger-verify:
+	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger verify
+
 test-downstream:
 	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -m pytest -q tests/test_downstream_*.py
 
@@ -374,6 +411,7 @@ help:
 	@echo "    make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp"
 	@echo "    make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id>   (GPU, long)"
 	@echo "    make ds-report TASK=ec / make test-downstream"
+	@echo "    make ds-ledger-add OUTPUTS_ROOT=<dir> / ds-ledger-report / ds-compare A=<m> B=<m>   (results ledger, CPU)"
 	@echo "    LBA: make ds-download TASK=lba / ds-process TASK=lba"
 	@echo "         make ds-embed TASK=lba MODEL=<snapshot> GPU=<id> [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
 	@echo "         make ds-probe TASK=lba MODEL_ID=<id> HEAD=mlp [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
