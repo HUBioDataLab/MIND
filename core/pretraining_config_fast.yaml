@@ -1,7 +1,7 @@
 # ===================================================================
-# MIND - Fast Sanity Check Config (~10 min)
+# MIND - Fast sanity check config (3 domains, 40k protein baseline)
 # ===================================================================
-# Inherits all values from multidomain; only overrides for speed.
+# Standalone copy of pretraining_config_multidomain.yaml with small budgets; keep the two in sync.
 # Usage: make train GPU=6 CONFIG=f LOG=fast_test
 # ===================================================================
 
@@ -19,7 +19,7 @@ multi_domain:
       chunk_range: [0, 0]
       max_graph_atoms: 12000
     metabolite:
-      enabled: false  # Migrated 497-chunk COCONUT build; mixed-domain coordination remains a documented model defect.
+      enabled: false  # off in the fast 3-domain check; the four-domain check is pretraining_config_fast_1m_coconut.yaml
       chunk_dir: "/home/yusuf/data/metabolites/processed"
       chunk_range: [0, 0]
     unimol:
@@ -54,7 +54,7 @@ max_epochs: 3
 batch_size: 32
 use_dynamic_batching: true
 use_improved_sampler: true
-max_atoms_per_batch: 6000  # Safe fast-validation budget for 32 GB GPUs.
+max_atoms_per_batch: 6000  # same budget as the 40k multidomain baseline
 log_batch_statistics: true
 batch_stats_log_frequency: 25  # Compact telemetry/table cadence; every batch is retained in epoch stats.
 
@@ -123,7 +123,7 @@ task_weights:
   mlm: 1.0
 mlm_mask_ratio: 0.15
 
-# Protein-only block MLM (see multidomain config for details).
+# Block MLM: protein masks whole residues, RNA whole nucleotides; UniMol and COCONUT stay atom-level.
 protein_block_mlm: true
 protein_block_mlm_ratio: 0.15
 rna_block_mlm: true

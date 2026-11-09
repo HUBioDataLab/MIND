@@ -147,7 +147,7 @@ task_weights:
   mlm: 1.0
 mlm_mask_ratio: 0.15
 
-# Protein-only block MLM (see multidomain config for details).
+# Block MLM: protein masks whole residues, RNA whole nucleotides; UniMol and COCONUT stay atom-level.
 protein_block_mlm: true
 protein_block_mlm_ratio: 0.15
 rna_block_mlm: true

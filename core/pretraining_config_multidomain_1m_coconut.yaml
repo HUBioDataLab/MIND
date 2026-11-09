@@ -9,7 +9,7 @@
 # three-domain 100-epoch run used 65/15/20). Needs the 10 October graph-local
 # coordination repair. Epochs are budgeted virtual epochs (multi_domain.atom_sampling),
 # not full passes over the corpus.
-# Usage: make train GPU=<id> CONFIG=pretraining_config_multidomain_1m_coconut EPOCHS=100 SEED=42 LOG=md_1m_coconut_100ep
+# Usage: make train GPU=<id> CONFIG=pretraining_config_multidomain_1m_coconut EPOCHS=<n> SEED=42 LOG=md_1m_coconut_<n>ep
 # ===================================================================
 
 seed: 42
@@ -74,7 +74,7 @@ multi_domain:
 
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
-dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"  # 14-atom uniform chunks
+dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"  # stale path, not read in multi-domain mode (train_pretrain.py still reads the attribute)
 
 # -------------------------
 # Data Loading Settings
@@ -83,10 +83,10 @@ num_workers: 8  # Measured 16 Oct: loader 6.2 -> 21 batch/s vs 0 workers; batch 
 max_samples: null  # null = use all available samples
 
 # -------------------------
-# Eğitim Parametreleri
+# Training parameters
 # -------------------------
 max_epochs: 100
-batch_size: 32  # Used for validation/test (training uses dynamic batching)
+batch_size: 32  # only used when use_dynamic_batching is false (the dynamic samplers batch by atom budget)
 use_dynamic_batching: true  # ⚡ Essential for mixed datasets - enables atom-aware batching
 use_improved_sampler: true  # ✅ Use improved sampler (requires metadata, much faster)
 max_atoms_per_batch: 18000  # epoch_num_batches above assumes this budget
@@ -94,7 +94,7 @@ log_batch_statistics: true  # Print batch composition statistics during training
 batch_stats_log_frequency: 25  # Compact telemetry/table cadence; every batch is retained in epoch stats.
 
 # Per-Type Loss Tracking (for multi-domain analysis)
-compute_per_type_losses: true   # ✅ Track losses per dataset type (protein, qm9, etc.)
+compute_per_type_losses: true   # Track losses per dataset type (protein, RNA, UniMol, COCONUT)
 log_per_type_frequency: 25      # Log per-type losses every N batches (reduce overhead)  
 
 lr: 0.0005
@@ -103,14 +103,14 @@ gradient_clip_val: 0.5
 optimiser_weight_decay: 1.0e-10
 monitor_loss_name: "val_total_loss"
 use_bfloat16: true  # Required for flash_varlen
-devices: 1  # Use single GPU (will be GPU 6 via CUDA_VISIBLE_DEVICES) #! Not used
+devices: 1  # read by train_pretrain.py (the --devices flag overrides it)
 num_sanity_val_steps: 0
 # Validation and logging: run validation and log to wandb more often than once per epoch
-val_check_interval: 0.5  # val = 1 protein chunk + all RNA val + 1 UniMol chunk
+val_check_interval: 0.5  # val = 1 protein chunk + all RNA val + 1 UniMol chunk + 1 COCONUT chunk
 log_every_n_steps: 25      # Log train metrics to wandb every N steps
 
 # -------------------------
-# Model Mimarisi (ESA)
+# Model architecture (ESA)
 # -------------------------
 apply_attention_on: node
 graph_dim: 256
@@ -128,7 +128,7 @@ set_max_items: 0
 use_equivariant_features: false
 
 # -------------------------
-# MLP Ayarları
+# MLP settings
 # -------------------------
 use_mlps: true
 mlp_hidden_size: 512
@@ -139,7 +139,7 @@ use_mlp_ln: false
 pre_or_post: pre
 
 # -------------------------
-# Dropout Ayarları
+# Dropout settings
 # -------------------------
 sab_dropout: 0.0
 mab_dropout: 0.0
@@ -148,12 +148,12 @@ attn_residual_dropout: 0.0
 pma_residual_dropout: 0.0
 
 # -------------------------
-# 3D Geometrik Parametreler
+# 3D geometry parameters
 # -------------------------
 molecule_max_atoms: null #! Not used in chunked datasets.
 gaussian_kernels: 128
-cutoff_distance: 5.0 #? Graph representation max distance is n angstrom. (used .pkl -> .pt)
-max_neighbors: 64 #! Max neighbors for protein is 64 can be changed. (ikisi de komşuluk özelliği için)
+cutoff_distance: 5.0  # encoder RBF cutoff and spatial-edge radius at run time
+max_neighbors: 64  # RNA spatial-neighbour cap (protein uses max_spatial_neighbors)
 # Long-range distance loss: random atom pairs, spans entire molecule (0-20Å)
 max_distance: 20.0
 distance_bins: 16  # = len(distance_bin_boundaries) + 1
@@ -167,12 +167,12 @@ short_range_distance_bins: 10  # = len(short_range_bin_boundaries) + 1
 short_range_bin_boundaries: [0.8, 1.2, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
 
 # -------------------------
-# Hybrid Edge Construction (Salad-inspired)
+# Runtime edge parameters
 # -------------------------
-# Enables 3-tier hybrid edge construction:
-# Tier 1: Sequence-based edges (backbone connectivity)
-# Tier 2: Spatial edges (filtered to exclude Tier 1)
-# Tier 3: Random long-range edges
+# Protein edges are rebuilt at run time from three tiers (chunks store no edges):
+# Tier 1: sequence edges (CA, i +/- k)
+# Tier 2: real spatial neighbours (filtered to exclude Tier 1)
+# Tier 3: dynamic random long-range edges
 sequence_neighbors_k: 3          # Tier 1: Connect residue i to i±k neighbors in sequence
 max_spatial_neighbors: 48        # Tier 2: Spatial neighbors (reduced from 64, some covered by Tier 1)
 num_random_edges: 8              # Tier 3: Random long-range edges (scaled for proteins <1024 AA)
@@ -181,13 +181,13 @@ random_edge_min_distance: 10.0   # Tier 3: Minimum distance (Å) for random edge
 # -------------------------
 # Dynamic Random Edges (Runtime)
 # -------------------------
-# Enable this to generate different Tier 3 edges each epoch (prevents bias)
-# NOTE: This happens at runtime during data loading, not preprocessing
-use_dynamic_random_edges: true         # Set to true to enable dynamic Tier 3 edges
-replace_existing_random_edges: true    # If true, removes static Tier 3 from .pt files
+# Tier 3 edges are drawn at run time (different each epoch); both flags must stay true
+# for the edge-free chunk contract (data_loading/pt_schema.py).
+use_dynamic_random_edges: true         # must be true (edge-free chunk contract)
+replace_existing_random_edges: true    # must be true (edge-free chunk contract)
 
 # -------------------------
-# Ön-Eğitim Görevleri
+# Pretraining tasks
 # -------------------------
 pretraining_tasks: ["long_range_distance", "short_range_distance", "mlm"]
 task_weights:
@@ -202,11 +202,8 @@ coconut_num_random_walks: 1
 log_coconut_masking_stats: true
 log_coconut_masking_frequency: 50
 
-# Protein-only block MLM: when true, MLM mask for pdb/protein graphs covers
-# whole residues (all 14 atoms of selected residues), not random atoms. Other
-# molecule types remain atom-level. Validation uses a deterministic seed so
-# val_mlm_loss is stable across cycles. Default false → behaviour identical
-# to atom-level MLM for all graphs.
+# Block MLM: protein masks whole residues (14 slots), RNA whole nucleotides (23 slots);
+# UniMol and COCONUT stay atom-level. Validation masks are seeded.
 protein_block_mlm: true
 protein_block_mlm_ratio: 0.15  # Fraction of residues to mask per protein graph
 rna_block_mlm: true
@@ -234,30 +231,3 @@ unimol_masked_geometry_hiding:
   enabled: false
   bond_threshold_angstrom: 2.1
 
-# ===================================================================
-# Quick Start Guide
-# ===================================================================
-#
-# 1. PROTEIN-ONLY MODE (Default):
-#    - Set multi_domain.enabled = false
-#    - Run: python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain.yaml
-#
-# 2. MULTI-DOMAIN MODE (When you have QM9 and Metabolite data):
-#    a. Generate metadata for all chunks:
-#       python data_loading/create_chunk_metadata.py --chunk-dir ../data/proteins/processed_graphs_40k
-#       python data_loading/create_chunk_metadata.py --chunk-dir ../data/small_molecules/qm9/processed_chunks
-#       python data_loading/create_chunk_metadata.py --chunk-dir ../data/metabolites/processed_chunks
-#
-#    b. Update this config:
-#       - Set multi_domain.enabled = true
-#       - Set multi_domain.datasets.qm9.enabled = true
-#       - Set multi_domain.datasets.metabolite.enabled = true
-#
-#    c. Run training:
-#       python core/train_pretrain.py --config-yaml-path core/pretraining_config_multidomain.yaml
-#
-# 3. TUNING PARAMETERS:
-#    - target_atoms_per_rotation: Increase if you have more GPU RAM, decrease if OOM
-#    - max_cache_chunks: Increase if you have more system RAM
-#
-# ===================================================================
