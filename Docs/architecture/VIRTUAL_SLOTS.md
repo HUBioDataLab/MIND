@@ -74,8 +74,8 @@ MLM has learned chemically informative residue context.
 
 ## What is not enabled
 
-`masked_slot_template` is a deprecated synthetic-coordinate experiment and is
-off in the production multidomain config. Do not describe it as part of the
+`masked_slot_template` is a deprecated synthetic-coordinate experiment. It is a
+config field with default off (the production YAMLs no longer list it). Do not describe it as part of the
 current representation. The current system also has no occupancy head, residue
 classifier, or BoltzGen-style coordinate decoder.
 

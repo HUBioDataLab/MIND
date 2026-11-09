@@ -126,14 +126,14 @@ make build-edge-free DOMAIN=protein MANIFEST=manifest.csv RAW_DIR=raw_structures
 **3. Point a config at your chunks and train.** Copy
 [core/pretraining_config_fast.yaml](core/pretraining_config_fast.yaml) (a short sanity
 run) to `core/my_config.yaml`, set each enabled dataset's `chunk_dir`, disable the
-domains you did not prepare, and set `use_wandb: false` if you do not use Weights & Biases.
+domains you did not prepare (an enabled domain without chunks stops the run), and set `use_wandb: false` if you do not use Weights & Biases.
 
 ```bash
 make train GPU=auto CONFIG=my_config EPOCHS=3 SEED=42 LOG=my_run
 ```
 
-`CONFIG` is either a shortcut (`m` = multidomain, `f` = fast) or a file name in `core/`
-without `.yaml`. `make train` selects the GPU (`GPU=auto` picks one with at least 15 GB
+`CONFIG` is either a shortcut (`m` = the four-domain `pretraining_config_multidomain_1m_coconut`,
+`f` = fast) or a file name in `core/` without `.yaml`. `make train` selects the GPU (`GPU=auto` picks one with at least 15 GB
 free), starts training in the background, writes the log to `logs/<MonthYear>/` and
 checkpoints to a run-specific directory under `outputs/` (override with `OUTPUT_DIR`).
 Inspect a run with `make status` and `make logs`. The `Makefile` activates the authors'
@@ -158,7 +158,8 @@ Run results are kept locally.
 - The sampler is designed for one full pass over the data per epoch, but a known
   Lightning epoch-length issue can drop a fraction of a percent of the planned batches.
 - Pretraining results come from a single seed and a subset of the available graphs.
-- Metabolite (COCONUT) and QM9 domains are implemented but not enabled in the default configs.
+- Metabolite (COCONUT) is enabled only in the three four-domain configs and `coconut_only`. QM9 has an adapter but no
+  pretraining config (its data is unavailable).
 
 ## Repository layout
 

@@ -54,14 +54,13 @@ graphs have no explicit bonds and use the proxy.
 
 This is sparse graph routing, not a claim that every computation is O(NK):
 global S attention can still scale with the largest graph in a batch, and so do
-the padded intermediate tensors unless `esa_packed_rows: true` is set (both
-four-domain configs), in which case ESA pads only once, before PMA. An optional distance-bias path exists but is disabled
+the padded intermediate tensors unless `esa_packed_rows: true` is set (the COCONUT-enabled four-domain configs and the four
+`*_only` configs), in which case ESA pads only once, before PMA. An optional distance-bias path exists but is disabled
 by default.
 
 ## Configuration reference
 
 ```yaml
-use_hybrid_edges: true
 sequence_neighbors_k: 3
 max_spatial_neighbors: 48
 num_random_edges: 8
@@ -69,6 +68,9 @@ random_edge_min_distance: 10.0
 use_dynamic_random_edges: true
 replace_existing_random_edges: true
 ```
+
+There is no `use_hybrid_edges` switch: no code read it, and the YAML loader now refuses
+unknown keys. The three tiers are always built (Tier 1 at load time, the rest at runtime).
 
 The exact effective edge set depends on molecule size, chain/entity boundaries,
 cached edges, and runtime geometry-neutral filtering. Report edge counts and

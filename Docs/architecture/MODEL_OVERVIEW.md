@@ -8,8 +8,9 @@ directed sparse `edge_index`; PyG batching keeps molecules separate.
 This is an implementation description, not a claim of downstream or generative
 performance. The `core/` YAML files and what each one selects are listed in the
 [training guide](../training/TRAINING_GUIDE.md#configuration-files); the Makefile
-shortcut `CONFIG=m` is `core/pretraining_config_multidomain.yaml`, and the four-domain
-configuration is `core/pretraining_config_multidomain_1m_coconut.yaml`.
+shortcut `CONFIG=m` is `core/pretraining_config_multidomain_1m_coconut.yaml`, the
+four-domain configuration; the old three-domain 40k baseline is
+`core/pretraining_config_multidomain.yaml` (`CONFIG=pretraining_config_multidomain`).
 
 ## End-to-end computation
 
@@ -53,14 +54,15 @@ configs):
 - `S` is global self-attention within each molecule.
 - `P` is PMA pooling to 32 learned seed outputs for graph-level embeddings.
 
-With `xformers_or_torch_attn: flash_varlen`, graph-local M attention uses the
+With the `flash_varlen` backend (the only one, and the code default of the
+`xformers_or_torch_attn` field, so the YAMLs do not set it), graph-local M attention uses the
 sparse `forward_graph` path and S attention uses variable-length FlashAttention
 within molecule boundaries. `flash_varlen` is the only supported attention
 backend; the torch and xformers backends were removed. With
 `esa_packed_rows: false` (the dataclass default, and the setting of the
-single-domain and three-domain configs) the model still creates padded
+three-domain and `fast` configs) the model still creates padded
 `[B, N, D]` intermediate representations, so “padding-free” should be read as an
-attention-path detail. With `esa_packed_rows: true` (both four-domain configs)
+attention-path detail. With `esa_packed_rows: true` (the COCONUT-enabled four-domain configs and the four `*_only` configs)
 ESA runs on packed `[T, D]` rows and pads once, before PMA; this mode is not
 supported together with equivariant features or the distance bias.
 
@@ -125,8 +127,10 @@ explicit bonds (`bond_edge_index`, flagged by `has_explicit_bonds`) count those
 bonds, and only graphs without an explicit source use the distance proxy
 (edges of 0.5-1.85 Å). Protein and RNA graphs therefore keep the distance proxy
 in mixed batches even when other graphs carry explicit bonds (repaired on
-10 October; CPU contract tests pass, matched learning checks are pending).
+10 October; CPU contract tests pass and CUDA COCONUT runs have completed, but the
+matched reference-versus-repaired comparison has no log on this machine, so it was not
+run or could not be verified).
 
 The metabolite/COCONUT domain is disabled in the three-domain comparison
-configuration and enabled in the two four-domain configurations.
+configuration and enabled in the three four-domain configurations and in `coconut_only`.
 See [hybrid edges](HYBRID_EDGES.md) for graph construction.

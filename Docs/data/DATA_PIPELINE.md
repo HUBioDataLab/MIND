@@ -114,8 +114,9 @@ selection-specific index map and loads chunk contents on demand with an LRU
 cache. `train_pretrain.py` discovers sibling directories named
 `<base>_chunk_*` (sorted by name, so UniMol chunk 10 sorts before chunk 2),
 applies an inclusive `chunk_range`, and combines enabled domains into one
-dataset. A domain whose `chunk_dir` has no chunks is skipped with a warning; loading
-fails only when no enabled domain yields any chunk. An unfinished `.partial` chunk
+dataset. An enabled domain whose `chunk_dir` has no chunks stops the run with an error
+(`FileNotFoundError`); it is not skipped, so a run never trains on less data than the
+config says. An unfinished `.partial` chunk
 directory raises.
 
 Instead of `chunk_dir`/`chunk_range`, a domain may give fixed splits:
@@ -146,7 +147,8 @@ must be treated as legacy when interpreting old runs.
 
 Two epoch policies exist, selected by `multi_domain.atom_sampling`:
 
-- Natural full pass (`pretraining_config_multidomain.yaml`, `atom_sampling.enabled:
+- Natural full pass (`pretraining_config_multidomain.yaml`, the old three-domain
+  baseline; `atom_sampling.enabled:
   false`): the sampler plan targets every selected train graph once per epoch, with
   deterministic proportional interleaving while domains remain available. It does not
   cycle short domains or enforce atom quotas; any tail after a domain is exhausted is a

@@ -7,8 +7,9 @@ full target list.
 
 ```bash
 make train CONFIG=f LOG=fast_check
-make train CONFIG=m LOG=multidomain_run
-make train GPU=6 CONFIG=m LOG=multidomain_run
+make train CONFIG=m LOG=four_domain_run
+make train GPU=6 CONFIG=m LOG=four_domain_run
+make train CONFIG=pretraining_config_multidomain LOG=three_domain_40k
 make train GPU=auto CONFIG=f LOG=fast_check
 make train GPU=auto CONFIG=pretraining_config_multidomain_1m_coconut EPOCHS=100 SEED=42 LOG=md_1m_coconut_100ep
 make test-unit
@@ -17,9 +18,11 @@ make logs
 ```
 
 `CONFIG=f` selects [`core/pretraining_config_fast.yaml`](../../core/pretraining_config_fast.yaml)
-and `CONFIG=m` selects [`core/pretraining_config_multidomain.yaml`](../../core/pretraining_config_multidomain.yaml).
+and `CONFIG=m` selects [`core/pretraining_config_multidomain_1m_coconut.yaml`](../../core/pretraining_config_multidomain_1m_coconut.yaml),
+the four-domain configuration (it used to point at the three-domain 40k baseline).
 Any other value is a file name in `core/` without `.yaml`
-(`CONFIG=pretraining_config_fast_1m`).
+(`CONFIG=pretraining_config_fast_1m_coconut`); the old three-domain baseline is
+`CONFIG=pretraining_config_multidomain`.
 
 Optional variables (see the header of the [Makefile](../../Makefile)):
 
@@ -41,36 +44,47 @@ override `MIND_CONDA_ENV`, `CONDA_ROOT` and `MIND_HF_HOME` on another machine.
 
 ## Configuration files
 
-`core/` holds 13 YAML files. The six multi-domain files share one model and task
+`core/` holds 11 YAML files: 7 multi-domain files (`fast`, `multidomain`,
+`multidomain_1m`, `multidomain_1m_coconut`, `fast_1m_coconut` and the two
+`unimol_hidden` files) and 4 single-domain `*_only` files (`protein_only`, `rna_only`,
+`unimol_only`, `coconut_only`). All of them share one model and task
 setup (7 layers, width 256, 16 heads, `pretraining_tasks` long-range distance,
-short-range distance and MLM, `precision: bfloat16`, `xformers_or_torch_attn:
-flash_varlen`) and differ in data and sampling. Protein and RNA chunks are
+short-range distance and MLM, `use_bfloat16: true`) and differ in data and sampling.
+The attention backend is `flash_varlen`, the only one supported; it is the code
+default, so the YAMLs no longer set it. A YAML key that no config field or known
+reader accepts is refused at start-up (a typo is an error, not ignored), and the
+removed keys (`precision`, `fast_dev_run`, `use_hybrid_edges` and others that no code
+read) must not be added back. Protein and RNA chunks are
 edge-free fixed-slot chunks; UniMol and COCONUT chunks store radius-graph edges.
 
 | YAML | Domains enabled | Data selection | Sampling and loader |
 |---|---|---|---|
-| `pretraining_config_multidomain.yaml` (`CONFIG=m`) | protein (40k), UniMol, RNA (June-equivalent); metabolite, QM9, DNA off | protein chunks 0-9, UniMol chunks 0-9, all RNA chunks; one pooled random 80/10/10 split | natural full pass (`atom_sampling.enabled: false`), `max_atoms_per_batch: 6000`, `num_workers: 0`, 100 epochs |
+| `pretraining_config_multidomain.yaml` (old `CONFIG=m`) | protein (40k), UniMol, RNA (June-equivalent); metabolite off | protein chunks 0-9, UniMol chunks 0-9, all RNA chunks; one pooled random 80/10/10 split | natural full pass (`atom_sampling.enabled: false`), `max_atoms_per_batch: 6000`, `num_workers: 0`, 100 epochs |
 | `pretraining_config_fast.yaml` (`CONFIG=f`) | same three domains | chunk 0 of each domain, 5k-structure RNA | budgeted epoch (700k atoms, 140 batches), 6,000 atoms, 3 epochs |
 | `pretraining_config_multidomain_1m.yaml` | protein (1M), full RNA corpus, UniMol; COCONUT off | fixed `splits:` for all three (UniMol train chunks 0-197, val 198, test 199); `oversized_graphs: skip` for protein and RNA | budgeted virtual epochs (100M atoms, 6,400 batches, weights 65/15/20), 18,000 atoms, `num_workers: 0`, 100 epochs |
-| `pretraining_config_multidomain_1m_coconut.yaml` | **four domains**: protein (1M), RNA, UniMol, COCONUT | as above plus COCONUT chunks 0-494 train, 495 val, 496 test | budgeted virtual epochs (weights 55/15/20/10), 18,000 atoms, `num_workers: 8`, `esa_packed_rows: true`, 100 epochs |
-| `pretraining_config_fast_1m.yaml` | protein (1M), RNA, UniMol | one chunk per protein split, RNA train chunks 0-1, UniMol chunk 0 | budgeted (2.4M atoms, 160 batches), 18,000 atoms, 3 epochs |
-| `pretraining_config_fast_1m_coconut.yaml` | four domains | as `fast_1m` plus COCONUT chunks 0-1 (random split) | budgeted (weights 55/15/20/10), 18,000 atoms, `num_workers: 8`, `esa_packed_rows: true`, 3 epochs |
-| `pretraining_config_protein.yaml`, `..._protein_flash_varlen_dynamic.yaml`, `..._rna.yaml`, `..._unimol.yaml`, `..._coconut.yaml`, `..._lba.yaml`, `..._qm9.yaml` | one domain each (`dataset:` key, `multi_domain` not used) | `dataset_download_dir` with older or other-user paths | older single-dataset templates with their own model sizes (RNA width 192, UniMol/COCONUT/LBA/QM9 width 512); UniMol, COCONUT and QM9 also use `coordinate_denoising`; QM9 data is unavailable |
+| `pretraining_config_multidomain_1m_coconut.yaml` (`CONFIG=m`) | **four domains**: protein (1M), RNA, UniMol, COCONUT | as above plus COCONUT chunks 0-494 train, 495 val, 496 test | budgeted virtual epochs (weights 55/15/20/10), 18,000 atoms, `num_workers: 8`, `esa_packed_rows: true`, 100 epochs |
+| `pretraining_config_fast_1m_coconut.yaml` | four domains | protein (1M) chunk 0 of each split, RNA train chunks 0-1 (val and test chunk 0), UniMol chunk 0, COCONUT chunks 0-1 (random split) | budgeted (2.4M atoms, 160 batches, weights 55/15/20/10), 18,000 atoms, `num_workers: 8`, `esa_packed_rows: true`, 3 epochs |
+| `pretraining_config_multidomain_1m_unimol_hidden.yaml`, `pretraining_config_multidomain_1m_coconut_unimol_hidden.yaml` | as `multidomain_1m` (three domains) and `multidomain_1m_coconut` (four domains) | children of those files (`base_config`); the only change is `unimol_masked_geometry_hiding.enabled: true` (G1 trial: masked UniMol atoms keep only bond topology) | as the parent: `num_workers: 0` and 8, 100 epochs |
+| `pretraining_config_protein_only.yaml`, `pretraining_config_rna_only.yaml`, `pretraining_config_unimol_only.yaml`, `pretraining_config_coconut_only.yaml` | one domain each; the other three are switched off | children of `multidomain_1m_coconut` (`base_config`): same splits, model (width 256) and masking | one domain with weight 1, 6,400 batches per epoch (100M atoms; 96M for `protein_only`), 18,000 atoms, `num_workers: 8`, `esa_packed_rows: true`, 100 epochs (the Make examples use `EPOCHS=500`). The LBA and QM9 pretraining YAMLs and the `qm9` and `dna` config blocks were removed; the QM9 and LBA adapters remain, but QM9 data is unavailable |
 
 The dataset paths in every YAML are the authors' paths and must be edited
 (see the [data pipeline](../data/DATA_PIPELINE.md)). The 10 October graph-local
-coordination repair is required for the two COCONUT-enabled four-domain configs;
-their learning effect still needs a matched from-scratch comparison.
+coordination repair is required for every COCONUT-enabled config (the three four-domain files and `coconut_only`).
+It passed the CPU contract tests, and COCONUT runs have completed on CUDA since (the
+3-epoch `coconut_coord_fixed_gate` run of 10 October and the 100-epoch run
+`md4_1m_100ep_s42_20261025_131601`); the matched reference-versus-repaired comparison
+has no log on this machine, so it was not run or could not be verified.
 
 ## Multidomain epoch policy
 
-`pretraining_config_multidomain.yaml` (`CONFIG=m`) enables PDB, UniMol, and
-June-equivalent 23-slot RNA; QM9, metabolite, and DNA are disabled. It requests a
+`pretraining_config_multidomain.yaml` (the old three-domain baseline, now
+`CONFIG=pretraining_config_multidomain`) enables PDB, UniMol, and
+June-equivalent 23-slot RNA; metabolite is disabled (QM9 and DNA have no config block). It requests a
 natural full pass (`atom_sampling.enabled: false`); the 1M and fast configs set
 `atom_sampling.enabled: true` and run budgeted virtual epochs (a fixed atom budget
 split by `domain_weights` and a fixed batch count), not a pass over the corpus.
-Metabolite (COCONUT) is enabled only in the two four-domain configs; the other
-configs keep it off.
+Metabolite (COCONUT) is enabled only in the three four-domain configs and
+`coconut_only`; the other configs keep it off.
 
 A natural full pass is an intended policy, not proof that every run completed its
 plan: the training loop can cache the initial dataloader batch count while the
@@ -87,8 +101,8 @@ encoder, the ESA backbone, the three configured tasks (long-range distance,
 short-range distance, MLM; weight `1.0` each, set by `pretraining_tasks` and
 `task_weights`), the block masking and the virtual-target loss weight are described in
 the [model overview](../architecture/MODEL_OVERVIEW.md); the geometry-neutral graph
-view (which replaced the historical `masked_slot_template` experiment, disabled in the
-production configs) is in [virtual slots](../architecture/VIRTUAL_SLOTS.md).
+view (which replaced the historical `masked_slot_template` experiment; no production YAML sets
+that key any more) is in [virtual slots](../architecture/VIRTUAL_SLOTS.md).
 
 ## Logging and checkpoints
 
@@ -106,12 +120,15 @@ does not establish that Lightning consumed the whole plan.
 
 ## Data and resource prerequisites
 
-Every enabled chunk should have a matching metadata sidecar. A missing or unreadable
+An enabled domain whose chunk directory has no chunks stops the run with an error
+(it is no longer skipped with a warning); disable the domain in the YAML if you did
+not prepare it. Every enabled chunk should have a matching metadata sidecar. A missing or unreadable
 sidecar makes the default configs fail at start-up (atom-budget batching and
 `max_graph_atoms` need it; details in the
 [data pipeline](../data/DATA_PIPELINE.md#chunk-conversion-and-metadata)). The
-`num_workers` value differs by config (0 for `m`, `fast`, `multidomain_1m` and
-`fast_1m`; 8 for the two four-domain configs, set after a measured loader speed-up);
+`num_workers` value differs by config (0 for `fast`, `multidomain`, `multidomain_1m` and
+`multidomain_1m_unimol_hidden`; 8 for the COCONUT-enabled four-domain configs, including `CONFIG=m`, and the four `*_only`
+files, set after a measured loader speed-up);
 chunks are loaded lazily. Lower `max_atoms_per_batch` if the selected GPU cannot hold
 the configured graph mix.
 
@@ -119,8 +136,10 @@ Some graphs carry explicit bonds (`bond_edge_index`) and others do not (protein
 graphs carry none); since the 10 October repair the encoder chooses the coordination
 source per graph (`has_explicit_bonds`, see the
 [model overview](../architecture/MODEL_OVERVIEW.md)), so a graph never mixes the two
-sources inside a mixed batch. CPU contract tests pass;
-the learning effect of enabling COCONUT still needs a matched from-scratch comparison.
+sources inside a mixed batch. CPU contract tests pass and CUDA COCONUT runs have
+completed (the 10 October 3-epoch gate, the 100-epoch `md4` run). The matched
+reference-versus-repaired learning comparison has no log on this machine, so it was
+not run or could not be verified, and 12 CUDA-only unit checks have no recorded run.
 
 Before the first training run in a fresh worktree, run the focused tests
 (`make test-unit`), then a short `make train CONFIG=f` run.
