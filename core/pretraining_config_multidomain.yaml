@@ -3,7 +3,7 @@
 # ===================================================================
 # Cross-modal batches from lazily loaded chunks (LRU cache). COCONUT is off here; the
 # four-domain run is pretraining_config_multidomain_1m_coconut.yaml.
-# Usage: make train GPU=<id> CONFIG=m LOG=<name>
+# Usage: make train GPU=<id> CONFIG=pretraining_config_multidomain LOG=<name>
 # ===================================================================
 
 # -------------------------

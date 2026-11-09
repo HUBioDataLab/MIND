@@ -2,13 +2,13 @@
 # MIND Training Makefile
 # ===================================================================
 # Usage:
-#   make train GPU=6 CONFIG=m                  # multidomain, default log
+#   make train GPU=6 CONFIG=m                  # four-domain run, default log
 #   make train GPU=6 CONFIG=f                  # fast test (~10 min)
 #   make train GPU=6 CONFIG=m LOG=my_run       # custom log name
 #   make train GPU=auto CONFIG=f               # auto-pick least used GPU
 #
 # CONFIG shortcuts:
-#   m  = pretraining_config_multidomain.yaml
+#   m  = pretraining_config_multidomain_1m_coconut.yaml   (four domains, latest)
 #   f  = pretraining_config_fast.yaml
 #   (or pass full filename without .yaml)
 #
@@ -45,8 +45,8 @@ endif
 
 # Map single-letter shortcuts to full config names
 ifeq ($(CONFIG),m)
-  CONFIG_FILE := core/pretraining_config_multidomain.yaml
-  CONFIG_TAG := multidomain
+  CONFIG_FILE := core/pretraining_config_multidomain_1m_coconut.yaml
+  CONFIG_TAG := multidomain_1m_coconut
   CONFIG_IS_FAST := 0
 else ifeq ($(CONFIG),f)
   CONFIG_FILE := core/pretraining_config_fast.yaml
@@ -303,7 +303,7 @@ help:
 	@echo "MIND Commands:"
 	@echo ""
 	@echo "  Training:"
-	@echo "    make train CONFIG=m LOG=run1         Full multidomain training"
+	@echo "    make train CONFIG=m LOG=run1         Four-domain training (multidomain_1m_coconut)"
 	@echo "    make train CONFIG=f                  Fast sanity check"
 	@echo "    make train CONFIG=f EPOCHS=1         Override config epoch count"
 	@echo "    make train CONFIG=f SEED=43          Independent seeded run"
@@ -330,4 +330,4 @@ help:
 	@echo "    make build-edge-free DOMAIN=protein MANIFEST=.. RAW_DIR=.. DEST_PREFIX=.. CHUNK_SIZE=4000"
 	@echo "                                         Raw -> edge-free chunks (detached, no defaults)"
 	@echo ""
-	@echo "  CONFIG shortcuts: m=multidomain, f=fast"
+	@echo "  CONFIG shortcuts: m=multidomain_1m_coconut, f=fast"
