@@ -1,0 +1,58 @@
+# Baseline models for MIND downstream tasks. Weights live outside Git under
+# MIND_MODELS_ROOT (default /home/yusuf/models): Hugging Face repos in
+# huggingface/hub (HF cache layout), other files in other/<name>/.
+# `python -m downstream.baselines.fetch_models` downloads the pinned revisions and
+# writes MANIFEST.json with a sha256 per file. Checked available on 2026-10-25.
+#
+# Not downloaded yet: ESM-C (biohub/ESMC-300M, biohub/ESMC-600M; MIT per the
+# Biohub/esm README, needs trust_remote_code) is waiting for a decision.
+
+models:
+  # ---------------- protein, sequence ----------------
+  esm2_t6_8M_UR50D:     {kind: hf, repo: facebook/esm2_t6_8M_UR50D, revision: c731040fcd8d73dceaa04b0a8e6329b345b0f5df, license: mit, modality: protein-sequence,
+                         allow: [model.safetensors, "*.json", vocab.txt]}
+  esm2_t12_35M_UR50D:   {kind: hf, repo: facebook/esm2_t12_35M_UR50D, revision: 6fbf070e65b0b7291e7bbcd451118c216cff79d8, license: mit, modality: protein-sequence,
+                         allow: [model.safetensors, "*.json", vocab.txt]}
+  esm2_t30_150M_UR50D:  {kind: hf, repo: facebook/esm2_t30_150M_UR50D, revision: a695f6045e2e32885fa60af20c13cb35398ce30c,
+                         license: mit, modality: protein-sequence, allow: [model.safetensors, "*.json", vocab.txt]}
+  esm2_t33_650M_UR50D:  {kind: hf, repo: facebook/esm2_t33_650M_UR50D, revision: 08e4846e537177426273712802403f7ba8261b6c,
+                         license: mit, modality: protein-sequence, allow: [model.safetensors, "*.json", vocab.txt]}
+  esm2_t36_3B_UR50D:    {kind: hf, repo: facebook/esm2_t36_3B_UR50D, revision: 476b639933c8baad5ad09a60ac1a87f987b656fc,
+                         license: mit, modality: protein-sequence,
+                         allow: ["pytorch_model-*.bin", pytorch_model.bin.index.json, config.json, special_tokens_map.json,
+                                 tokenizer_config.json, vocab.txt]}
+  # ---------------- protein, sequence + structure (Foldseek 3Di) ----------------
+  saprot_650m_pdb:      {kind: hf, repo: westlake-repl/SaProt_650M_PDB, revision: 6f7468fdd0cdffe7e780bd4f57fa291df6b01867,
+                         license: mit, modality: protein-structure-tokens, allow: [pytorch_model.bin, "*.json", vocab.txt]}
+  saprot_650m_af2:      {kind: hf, repo: westlake-repl/SaProt_650M_AF2, revision: d9b9ad00ef61c0990e611b2b43f2231c7de24b38,
+                         license: mit, modality: protein-structure-tokens, allow: [pytorch_model.bin, "*.json", vocab.txt]}
+  saprot_35m_af2:       {kind: hf, repo: westlake-repl/SaProt_35M_AF2, revision: 316cd4017d29f4657b959365f24b57f1ee278912,
+                         license: mit, modality: protein-structure-tokens, allow: [pytorch_model.bin, "*.json", vocab.txt]}
+  saprot_1_3b_af2:      {kind: hf, repo: westlake-repl/SaProt_1.3B_AF2, revision: 314b94aee8eece41e5d52e0413f7df1cd00d3325,
+                         license: mit, modality: protein-structure-tokens, allow: [pytorch_model.bin, "*.json", vocab.txt]}
+  # ---------------- protein, 3D structure graph ----------------
+  gearnet_edge_mc:      {kind: url, url: "https://zenodo.org/records/7723075/files/mc_gearnet_edge.pth",
+                         md5: c35402108f14e43f20feb475918f9c26, license: cc-by-4.0, modality: protein-structure-graph,
+                         note: "GearNet-Edge, multiview contrast pretraining on AlphaFoldDB; needs a TorchDrug environment"}
+  # ---------------- RNA, sequence (MultiMolecule ports, AGPL-3.0) ----------------
+  rnafm:                {kind: hf, repo: multimolecule/rnafm, revision: 7d6e73ad3b48e042b378f9a788a56ccb4d573a27,
+                         license: agpl-3.0, modality: rna-sequence, allow: [model.safetensors, "*.json", "*.md", vocab.txt]}
+  rinalmo_giga:         {kind: hf, repo: multimolecule/rinalmo-giga, revision: 2a71f6f98fb41dd2e6542a5e131d3778111d1468,
+                         license: agpl-3.0, modality: rna-sequence, allow: [model.safetensors, "*.json", "*.md", vocab.txt]}
+  rinalmo_mega:         {kind: hf, repo: multimolecule/rinalmo-mega, revision: 5e3a682eb856148fe81f12a25301962c9ffaf0ed,
+                         license: agpl-3.0, modality: rna-sequence, allow: [model.safetensors, "*.json", "*.md", vocab.txt]}
+  rinalmo_micro:        {kind: hf, repo: multimolecule/rinalmo-micro, revision: ad782877b5a334ebf7b6b9854a76837fabb25deb,
+                         license: agpl-3.0, modality: rna-sequence, allow: [model.safetensors, "*.json", "*.md", vocab.txt]}
+  # ---------------- small molecules, 3D conformers ----------------
+  unimol_v1:            {kind: hf, repo: dptech/Uni-Mol-Models, revision: 9f19c45c718192888a1c8a1c905f69f0755ea502,
+                         license: mit, modality: molecule-3d,
+                         allow: [mol_pre_all_h_220816.pt, mol_pre_no_h_220816.pt, mol.dict.txt, pocket_pre_220816.pt,
+                                 poc.dict.txt],
+                         note: "molecule and protein-pocket encoders; pretrained on the conformers MIND's UniMol domain uses"}
+  unimol2:              {kind: hf, repo: dptech/Uni-Mol2, revision: bf37d253c0f5ac61f468137eb00059978a104ff0,
+                         license: mit, modality: molecule-3d,
+                         allow: [modelzoo/84M/checkpoint.pt, modelzoo/310M/checkpoint.pt, modelzoo/1.1B/checkpoint.pt]}
+  # ---------------- natural products ----------------
+  nafm:                 {kind: url, url: "https://zenodo.org/records/15385335/files/NaFM.ckpt",
+                         md5: f2c0c52b816fbc3655c5edba953f0d9a, license: cc-by-4.0, modality: natural-product-graph,
+                         note: "NaFM (Nature Machine Intelligence 2026), pretrained on COCONUT"}

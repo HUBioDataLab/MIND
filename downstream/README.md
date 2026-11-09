@@ -20,6 +20,8 @@ for MIND encoders.
 | snapshot | `python -m downstream.common.registry snapshot <ckpt> <name>` and `... alias current_best <name>` | file copy, CPU |
 | embed | `python -m downstream.embed --task <task> --model <snapshot> [--random-init]` | GPU inference |
 | ESM-2 | `python -m downstream.embed --task ec --model esm2_t12_35M_UR50D --hf-cache-dir DIR` | GPU inference |
+| Foldseek 3Di | `python -m downstream.baselines.foldseek_3di --task ec --foldseek BIN --threads 16` | data processing, CPU |
+| SaProt | `python -m downstream.embed --task ec --model saprot_650m_pdb --hf-cache-dir DIR` | GPU inference |
 | probe | `python -m downstream.probe --task <task> --model-id <id> --head linear\|mlp [--pooling P]` | CPU training |
 | fine-tune | `python -m downstream.finetune --task <task> --model <snapshot> [--random-init]` | GPU training |
 | report | `python -m downstream.report --task <task>` | CPU |
@@ -29,6 +31,13 @@ For `lba`, `embed`, `probe` and `finetune` also take `--split-tag identity30|ide
 combination writes its own embeddings and results directory.
 
 Training-like steps (embed, probe, fine-tune) are user-run through Make targets.
+
+SaProt (`saprot_650m_pdb`, `saprot_650m_af2`, `saprot_35m_af2`) sees the residues
+MIND kept, one `<AA><3Di>` token each; the 3Di state comes from Foldseek on the
+same structure file, aligned to the kept residues without mismatches (rules in
+`downstream/baselines/foldseek_3di.py`). Residues MIND masks for an incomplete
+sidechain, and residues without a Foldseek state, get SaProt's unknown-structure
+letter `#`; the amino acid is kept.
 
 ## Contracts
 
@@ -66,7 +75,7 @@ downstream/<task>/<model_id>/<protocol>.<pooling>/seed<k>/{metrics.json,predicti
 ```
 
 `model_id` is the snapshot name, `<snapshot>.random_init` for the untrained
-control, or the ESM-2 name. Literature EC numbers in the report are fine-tuned
+control, or the ESM-2 / SaProt name. Literature EC numbers in the report are fine-tuned
 results under other protocols and are labelled as such.
 
 
@@ -160,8 +169,8 @@ Id matching does not detect homologs. `make ds-leakage ...` (see the Makefile he
 
 `downstream/tasks/{fold,reaction}/` (`task.yaml`, `dataset.py`, `prepare.py`) on top of `downstream/tasks/multiclass.py`.
 
-- Structures are the archives' own `.hdf5` files (`structure_io.read_hdf5_chain`, needs `h5py`, which is NOT yet in
-  `mind_esa3d`). Atom elements come from atom names; `atom_types` is not used. Chains go through the EC/GO code path
+- Structures are the archives' own `.hdf5` files (`structure_io.read_hdf5_chain`, needs `h5py`, installed in
+  `mind_esa3d` as 3.16.0 and required to process Fold and Reaction). Atom elements come from atom names; `atom_types` is not used. Chains go through the EC/GO code path
   (`process_entry` + missing-atom policy), so a CA-only domain is dropped and counted, never kept. `ProcessedSplit.report`
   and `qc_<split>.json` carry listed / kept / dropped counts.
 - Source and unverified items are written at the top of each `task.yaml`. Reaction's Google Drive archive has no published

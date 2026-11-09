@@ -18,7 +18,7 @@
 SHELL := /bin/bash
 CONDA_ROOT ?= /opt/miniconda3
 MIND_CONDA_ENV ?= /home/yusuf/.conda/envs/mind_esa3d
-MIND_HF_HOME ?= /home/yusuf/.cache/huggingface
+MIND_HF_HOME ?= /home/yusuf/models/huggingface
 CONDA_RUN := source "$(CONDA_ROOT)/etc/profile.d/conda.sh" && conda activate "$(MIND_CONDA_ENV)" && export PATH="$(MIND_CONDA_ENV)/bin:$$PATH" HF_HOME="$(MIND_HF_HOME)" HUGGINGFACE_HUB_CACHE="$(MIND_HF_HOME)/hub" TRANSFORMERS_CACHE="$(MIND_HF_HOME)/hub" &&
 
 GPU ?= auto
@@ -236,7 +236,7 @@ eval-pretrain:
 #   make ds-validate TASK=reaction       download stops until archive_sha256/archive_bytes are pinned in task.yaml)
 #   make ds-leakage LEAK_TASK=go REFERENCE=protein_1m NAMESPACE=pdb_chain PROVENANCE=<task dir>/provenance.json \
 #        QUERIES="valid=<dir>/splits/valid.txt test=<dir>/splits/test.txt" [ID_MAP=<pdb_chain->uniprot tsv>]
-#   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D> GPU=<id> [RANDOM_INIT=1]
+#   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D|saprot_650m_pdb> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
 #   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]
 #   make ds-report TASK=ec
@@ -255,7 +255,7 @@ DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
 DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
 # Fine-tune overrides: a random-init encoder needs a far larger LR than a pretrained one.
 FT_ARGS ?=
-DS_HF_ARGS := $(if $(filter esm2_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
+DS_HF_ARGS := $(if $(filter esm2_% saprot_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
 # LBA-only selectors; empty for every other task so their CLIs never see them.
 SPLIT_TAG ?=
 REPRESENTATION ?=
