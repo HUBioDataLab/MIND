@@ -18,7 +18,6 @@
 # Genel ve Çıktı Ayarları
 # -------------------------
 seed: 42
-out_path: "outputs/multidomain_pretrain"
 wandb_run_name: "multidomain-full-geometry-neutral-v1"
 use_wandb: true
 
@@ -62,10 +61,6 @@ multi_domain:
   # interleaving, zero repeated samples, no quota cutoff, natural dataset distribution).
   atom_sampling:
     enabled: false
-    epoch_atom_budget: null   # Disabled (null): No artificial 4.8M atom cap. Uses 100% of selected train data.
-    epoch_num_batches: null   # Disabled (null): Natural full-pass batch count derived from dataset size.
-    cycle_to_quota: false     # Disabled (false): Zero sample repetition (selected == available == unique, repeated == 0).
-    domain_weights: null      # Disabled (null): Natural data coverage is used (domain loss weights used if needed).
   
   # Rotational Sampling Parameters
   max_cache_chunks: 10              # Maximum chunks in LRU cache (adjust based on system RAM)
@@ -119,7 +114,6 @@ graph_dim: 256
 hidden_dims: [256, 256, 256, 256, 256, 256, 256]
 num_heads: [16, 16, 16, 16, 16, 16, 16]
 layer_types: ["M", "S", "M", "S", "M", "S", "P"]
-xformers_or_torch_attn: flash_varlen  # ⚡ Padding-free for mixed sizes (CORRECT: flash_varlen not varlen_flash!)
 norm_type: LN
 use_3d_coordinates: true
 set_max_items: 0
@@ -128,10 +122,6 @@ set_max_items: 0
 # Equivariant Features
 # -------------------------
 use_equivariant_features: false
-equivariant_lmax: 2
-equivariant_num_features: 16
-equivariant_fusion_method: add
-equivariant_cross_connection: true
 
 # -------------------------
 # MLP Ayarları
@@ -221,14 +211,6 @@ rna_block_mlm_ratio: 0.15
 use_domain_local_slot_embedding: true
 virtual_atom_loss_weight: 0.2
 protein_block_mlm_exclude_legacy_oxt: true
-
-# Deprecated synthetic-coordinate experiment. It is kept off; the
-# geometry-neutral view below replaces it.
-masked_slot_template:
-  enabled: false
-  protein: false
-  rna: false
-  visible_virtuals_prepositioned: false
 
 # Keep 14/23 MLM targets, but remove visible V and masked sidechain/base slots
 # from the encoder graph. Their prediction states are read from the encoded

@@ -12,7 +12,7 @@ SINGLE_DOMAIN = {
     "unimol": ("unimol", "unimol"),
     "coconut": ("metabolite", "coconut"),
 }
-ALLOWED_TOP_LEVEL_DIFFERENCES = {"out_path", "wandb_run_name", "multi_domain"}
+ALLOWED_TOP_LEVEL_DIFFERENCES = {"wandb_run_name", "multi_domain"}
 
 
 def _write(path: Path, text: str) -> Path:

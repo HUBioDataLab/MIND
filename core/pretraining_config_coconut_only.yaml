@@ -10,7 +10,6 @@
 # ===================================================================
 
 base_config: pretraining_config_multidomain_1m_coconut.yaml
-out_path: "outputs/coconut_only"
 wandb_run_name: "coconut-only-1m-v1"
 
 multi_domain:
