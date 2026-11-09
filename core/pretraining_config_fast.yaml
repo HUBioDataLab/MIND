@@ -19,10 +19,6 @@ multi_domain:
       chunk_dir: "/home/yusuf/data/proteins/processed_14atom_edgefree"  # edge-free copy, graph-identical to the legacy chunks of the September/Atum runs (12,225 graphs checked)
       chunk_range: [0, 0]
       max_graph_atoms: 12000
-    qm9:
-      enabled: false  # Replaced by unimol as the small-molecule domain.
-      chunk_dir: "/home/arin/data/qm9_chunks"
-      chunk_range: [0, 0]
     metabolite:
       enabled: false  # Migrated 497-chunk COCONUT build; mixed-domain coordination remains a documented model defect.
       chunk_dir: "/home/yusuf/data/metabolites/processed"
@@ -37,9 +33,6 @@ multi_domain:
       chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k_edgefree"  # edge-free copy of the development RNA
       chunk_range: [0, 0]
       max_graph_atoms: 5000
-    dna:
-      enabled: false
-      chunk_dir: "../data/dna/processed_chunks"
   atom_sampling:
     enabled: true
     epoch_atom_budget: 700000

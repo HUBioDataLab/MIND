@@ -39,11 +39,6 @@ multi_domain:
       chunk_range: [0, 9]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
       max_graph_atoms: 12000
     
-    qm9:
-      enabled: false  # Replaced by unimol as the small-molecule domain.
-      chunk_dir: "/home/arin/data/qm9_chunks"  # Will match qm9_chunks_chunk_0 through qm9_chunks_chunk_4
-      chunk_range: null
-    
     metabolite:
       enabled: false  # Migrated 497-chunk COCONUT build; mixed-domain coordination remains a documented model defect.
       chunk_dir: "/home/yusuf/data/metabolites/processed"
@@ -61,10 +56,6 @@ multi_domain:
       chunk_range: null  # All 67 June-equivalent 23-slot chunks (8,556 graphs <=5,000 real non-H atoms).
       max_graph_atoms: 6000
     
-    dna:
-      enabled: false  # Future expansion
-      chunk_dir: "../data/dna/processed_chunks"
-
   # Full-pass epoch semantics:
   # In full multidomain training, atom-quota boundaries and domain cycling are DISABLED.
   # Every selected train graph is consumed exactly once per epoch (single-pass proportional

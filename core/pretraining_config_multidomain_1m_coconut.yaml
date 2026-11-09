@@ -59,13 +59,6 @@ multi_domain:
         train: {chunk_dir: "/home/yusuf/data/metabolites/processed", chunk_range: [0, 494]}
         val: {chunk_dir: "/home/yusuf/data/metabolites/processed", chunk_range: [495, 495]}
         test: {chunk_dir: "/home/yusuf/data/metabolites/processed", chunk_range: [496, 496]}
-    qm9:
-      enabled: false
-      chunk_dir: "/home/arin/data/qm9_chunks"
-      chunk_range: null
-    dna:
-      enabled: false
-      chunk_dir: "../data/dna/processed_chunks"
   # Budgeted virtual epochs: a fixed atom budget split by domain weights and a fixed
   # batch count (constant plan length, so Lightning consumes every planned batch).
   atom_sampling:

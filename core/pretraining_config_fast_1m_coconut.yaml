@@ -46,13 +46,6 @@ multi_domain:
       enabled: true
       chunk_dir: "/home/yusuf/data/metabolites/processed"   # 497 sibling processed_chunk_* directories
       chunk_range: [0, 1]
-    qm9:
-      enabled: false
-      chunk_dir: "/home/arin/data/qm9_chunks"
-      chunk_range: null
-    dna:
-      enabled: false
-      chunk_dir: "../data/dna/processed_chunks"
   # Budgeted virtual epochs: a fixed atom budget split by domain weights and a fixed
   # batch count (constant plan length, so Lightning consumes every planned batch).
   atom_sampling:
