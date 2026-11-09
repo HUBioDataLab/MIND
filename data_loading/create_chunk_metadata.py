@@ -202,8 +202,7 @@ def process_chunk_directory(chunk_dir: str, overwrite: bool = False) -> List[Dic
     ])
     
     if not pt_files:
-        print(f"⚠️  No .pt chunk files found in: {chunk_dir}")
-        return []
+        raise FileNotFoundError(f"no .pt chunk files found in: {chunk_dir}")
     
     print(f"🔍 Found {len(pt_files)} chunk files in: {chunk_dir}")
     print(f"{'Overwrite mode: ON' if overwrite else 'Skipping existing metadata'}")
@@ -246,6 +245,13 @@ def process_chunk_directory(chunk_dir: str, overwrite: bool = False) -> List[Dic
         print(f"   Avg atoms/sample: {total_atoms/total_samples:.1f}")
     
     print("=" * 60)
+    
+    if failed_chunks:
+        # The healthy chunks keep their metadata, but the run must not report success.
+        raise RuntimeError(
+            f"metadata failed for {len(failed_chunks)} of {len(pt_files)} chunks: "
+            + ", ".join(failed_chunks)
+        )
     
     return all_metadata
 
