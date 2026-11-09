@@ -93,3 +93,85 @@ def test_unsupported_suffix_fails_loudly(tmp_path):
     path.write_text("")
     with pytest.raises(ValueError, match="unsupported structure file type"):
         read_chains(path, mse_to_met=True)
+
+
+# ---------------------------------------------------------------------------
+# Two-character PDB chain ids (DeepFRI / TorchProtein GeneOntology per-chain files, e.g. 3J9M-AK)
+# ---------------------------------------------------------------------------
+
+# Verbatim first atoms of GeneOntology/test/3J9M-AK_15808.pdb: the writer put a 2-character chain id in
+# columns 22-23, so every field after the chain is shifted one column to the right (81-character lines).
+REAL_WIDE_CHAIN_LINES = (
+    "ATOM      1  N   HIS AK  28     177.137 124.931 209.744  1.00174.51           N  \n"
+    "ATOM      2  CA  HIS AK  28     177.867 124.174 208.674  1.00173.48           C  \n"
+    "ATOM      3  C   HIS AK  28     177.539 124.615 207.234  1.00168.32           C  \n"
+    "ATOM      4  O   HIS AK  28     178.008 123.995 206.277  1.00171.27           O  \n"
+    "TER       5      HIS AK  28\n"
+    "END\n"
+)
+
+
+def test_two_character_pdb_chain_id_is_read_with_correct_residue_number_and_coordinates(tmp_path):
+    path = tmp_path / "3J9M-AK_15808.pdb"
+    path.write_text(REAL_WIDE_CHAIN_LINES)
+    chains = read_chains(path, mse_to_met=True)
+    assert set(chains) == {"AK"}                      # the real two-character id survives
+    record = chains["AK"]
+    assert record.sequence == "H" and record.residues[0].resseq == 28
+    np.testing.assert_allclose(record.residues[0].atoms["CA"][1], (177.867, 124.174, 208.674), atol=1e-3)
+    assert set(record.residues[0].atoms) == {"N", "CA", "C", "O"}
+
+
+@pytest.mark.parametrize("chain_id", ["AK", "S2", "19", "aB", "SSS", "AAA", "A12"])
+def test_two_character_pdb_chain_matches_the_single_character_reading(tmp_path, chain_id):
+    residues = chain_of(["ALA", "SER", "TRP", "GLY"])
+    wide = tmp_path / f"1XYZ-{chain_id}_0.pdb"
+    wide.write_text(pdb_text({chain_id: residues}))
+    narrow = tmp_path / "1XYZ-A_0.pdb"
+    narrow.write_text(pdb_text({"A": residues}))
+    got, want = read_chains(wide, mse_to_met=True), read_chains(narrow, mse_to_met=True)
+    assert set(got) == {chain_id} and set(want) == {"A"}
+    assert got[chain_id].sequence == want["A"].sequence == "ASWG"
+    for left, right in zip(got[chain_id].residues, want["A"].residues):
+        assert left.resseq == right.resseq and set(left.atoms) == set(right.atoms)
+        for name in left.atoms:
+            np.testing.assert_allclose(left.atoms[name][1], right.atoms[name][1], atol=1e-3)
+    assert got[chain_id].report["chain_id"] == chain_id
+
+
+def test_three_character_chain_id_real_line_layout(tmp_path):
+    # verbatim layout of EnzymeCommission 4UE3-SSS (82-character lines, x starts one column later still)
+    path = tmp_path / "4UE3-SSS_1.pdb"
+    path.write_text("ATOM      1  N   LYS SSS   4       3.625 -29.105  -7.449  1.00 52.54           N  \n"
+                    "ATOM      2  CA  LYS SSS   4       4.100 -28.000  -6.500  1.00 52.54           C  \n"
+                    "ATOM      3  C   LYS SSS   4       5.100 -27.500  -7.500  1.00 52.54           C  \n"
+                    "END\n")
+    record = read_chains(path, mse_to_met=True)["SSS"]
+    assert record.sequence == "K" and record.residues[0].resseq == 4
+    np.testing.assert_allclose(record.residues[0].atoms["N"][1], (3.625, -29.105, -7.449), atol=1e-3)
+
+
+def test_two_character_chain_hetatm_lines_are_unshifted_too(tmp_path):
+    ligand = [("ZN", "ZN", (1.0, 2.0, 3.0))]
+    path = tmp_path / "1XYZ-AK_0.pdb"
+    path.write_text(pdb_text({"AK": chain_of(["ALA"]) + [("ZN", ligand, "HETATM")]}))
+    record = read_chains(path, mse_to_met=True)["AK"]
+    assert record.sequence == "A" and record.report["ligand_residues_skipped"] == 1
+
+
+def test_two_character_chain_gz_is_read_like_plain_text(tmp_path):
+    path = tmp_path / "3J9M-AK_15808.pdb.gz"
+    with gzip.open(path, "wt") as handle:
+        handle.write(REAL_WIDE_CHAIN_LINES)
+    assert read_chains(path, mse_to_met=True)["AK"].sequence == "H"
+
+
+def test_wide_chain_ids_that_cannot_be_unshifted_unambiguously_fail_loudly(tmp_path):
+    two_wide = tmp_path / "two.pdb"
+    two_wide.write_text(pdb_text({"AK": chain_of(["ALA"]), "AL": chain_of(["GLY"])}))
+    with pytest.raises(ValueError, match="more than one multi-character chain id"):
+        read_chains(two_wide, mse_to_met=True)
+    mixed = tmp_path / "mixed.pdb"
+    mixed.write_text(pdb_text({"AK": chain_of(["ALA"]), "B": chain_of(["GLY"])}))
+    with pytest.raises(ValueError, match="mixes multi-character and standard"):
+        read_chains(mixed, mse_to_met=True)
