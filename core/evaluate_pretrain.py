@@ -3,7 +3,8 @@
 
     python -m core.evaluate_pretrain --ckpt RUN/last.ckpt --split test --seed 0 \
         --output-dir /path/to/new_dir [--config-yaml-path core/<config>.yaml] \
-        [--domains protein,rna] [--max-batches N] [--device cuda:0]
+        [--domains protein,rna] [--max-batches N] [--device cuda:0] \
+        [--counterfactual MODE [--counterfactual-sigma ANGSTROM]]
 
 The checkpoint is only read (``torch.load`` with ``map_location='cpu'``); its
 sha256, size and mtime are recorded and re-checked at the end. Outputs go to
@@ -34,6 +35,12 @@ Determinism (what is guaranteed):
 
 ``mask_manifest.csv`` lists every graph's mask digest; ``metrics.json`` holds
 the per-domain digest, so two evaluations can be checked for identical masks.
+
+Counterfactual modes (G1 step 0, core/counterfactual_eval.py): ``--counterfactual MODE``
+corrupts, at evaluation time only, what the encoder/ESA see of the masked UniMol atoms
+(position, distances, ESA edges) while the targets, the mask and the distance-loss frame
+stay clean. protein/RNA/COCONUT graphs are untouched. The default ``none`` leaves the
+evaluation exactly as before; ``metrics.json`` gets a ``counterfactual`` block either way.
 
 A real forward needs a GPU (flash_varlen). The CPU path exists for tests,
 which replace the flash kernel with an SDPA stand-in.
@@ -67,6 +74,12 @@ from pytorch_lightning.callbacks import Callback
 from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader as GeometricDataLoader
 
+from core.counterfactual_eval import (
+    COUNTERFACTUAL_MODES,
+    DEFAULT_NOISE_SIGMA,
+    build_counterfactual_settings,
+    validate_mode,
+)
 from core.deterministic import enable_deterministic_algorithms
 from core.metrics.domain_mlm_metrics import DOMAIN_ORDER, canonical_domain
 from core.metrics.domain_mlm_metrics_callback import DomainMLMMetricsCallback
@@ -505,6 +518,32 @@ def write_tables(out: Path, metrics: dict, run_cb: EvalRunCallback) -> None:
     write_csv(out / "mask_manifest.csv", run_cb.mask_rows)
 
 
+def counterfactual_summary(args, settings, domains, metrics_domain_mlm: dict, losses: dict) -> dict:
+    """The ``counterfactual`` block of metrics.json (also written for mode ``none``)."""
+    block = {
+        "mode": args.counterfactual,
+        "sigma": None if settings is None else settings.sigma,
+        "domains": [] if settings is None else list(settings.domains),
+        "applied": {} if settings is None else dict(sorted(settings.stats.items())),
+        "note": "inputs of masked UniMol atoms are corrupted for the encoder/ESA only; targets, mask and "
+                "distance-loss targets are clean, so the distance losses below see corrupted inputs",
+    }
+    unimol = (metrics_domain_mlm or {}).get("unimol")
+    if unimol is not None:
+        summary = unimol["summary"]
+        block["unimol"] = {
+            "n_masked": summary["n_masked"],
+            "top1_acc_real": summary["top1_acc_real"],
+            "top3_acc_real": summary["top3_acc_real"],
+            "ce_real": summary["ce_real"],
+            "ece_real": summary["ece_real"],
+            "element_recall": {row["element"]: row["recall"] for row in unimol["elements"] if row["support"] > 0},
+            "element_support": {row["element"]: row["support"] for row in unimol["elements"] if row["support"] > 0},
+            "losses": {k: v for k, v in losses.get("unimol", {}).items() if k != "n_batches"},
+        }
+    return block
+
+
 def format_loss_table(losses: dict) -> str:
     lines = ["PER-DOMAIN LOSSES (mean over the domain's batches; batches are domain-pure)"]
     for domain, row in losses.items():
@@ -516,6 +555,13 @@ def format_loss_table(losses: dict) -> str:
 # ---------------------------------------------------------------------------
 # Main evaluation
 # ---------------------------------------------------------------------------
+
+
+def _counterfactual_mode(value: str) -> str:
+    try:
+        return validate_mode(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error))
 
 
 def parse_args(argv=None):
@@ -531,12 +577,23 @@ def parse_args(argv=None):
     parser.add_argument("--num-workers", type=int, default=None, help="loader workers (default: config num_workers)")
     parser.add_argument("--output-dir", required=True, help="new directory (must not exist)")
     parser.add_argument("--device", default="cuda", help="cuda, cuda:<i> or cpu (cpu only for tests)")
+    parser.add_argument("--counterfactual", type=_counterfactual_mode, default="none", metavar="MODE",
+                        help="evaluation-only corruption of masked UniMol atoms: "
+                             + ", ".join(COUNTERFACTUAL_MODES) + " (default none = unchanged evaluation)")
+    parser.add_argument("--counterfactual-sigma", type=float, default=None,
+                        help=f"Angstrom, only for masked_pos_noise (default {DEFAULT_NOISE_SIGMA} for that mode)")
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
     args = parser.parse_args(argv)
     if args.threads < 1:
         parser.error("--threads must be at least 1")
     if args.max_batches is not None and args.max_batches < 1:
         parser.error("--max-batches must be at least 1")
+    if args.counterfactual == "masked_pos_noise" and args.counterfactual_sigma is None:
+        args.counterfactual_sigma = DEFAULT_NOISE_SIGMA
+    try:
+        build_counterfactual_settings(args.counterfactual, args.counterfactual_sigma)
+    except ValueError as error:
+        parser.error(str(error))
     return args
 
 
@@ -624,6 +681,15 @@ def _evaluate(args, ckpt: Path, out: Path, accelerator, devices, ckpt_sha256: st
         raise ValueError("checkpoint was not trained with the MLM task; nothing to evaluate")
 
     domains = resolve_domains(eval_config, args.domains)
+    counterfactual = build_counterfactual_settings(args.counterfactual, args.counterfactual_sigma)
+    if counterfactual is not None:
+        missing = [d for d in counterfactual.domains if d not in domains]
+        if missing:
+            raise ValueError(
+                f"--counterfactual {args.counterfactual} corrupts {list(counterfactual.domains)} graphs but "
+                f"the evaluated domains are {domains}; it would change nothing"
+            )
+        model.counterfactual_eval = counterfactual
     max_atoms = int(eval_dict.get("max_atoms_per_batch") or 0)
     dataset, indices, source = load_split_dataset(eval_config, args.split, domains)
     entries = sample_entries(dataset, indices, domains)
@@ -669,8 +735,17 @@ def _evaluate(args, ckpt: Path, out: Path, accelerator, devices, ckpt_sha256: st
     logged = trainer.validate(model, dataloaders=loader, verbose=False)[0]
     if run_cb.batches_seen != len(plan):
         raise RuntimeError(f"evaluated {run_cb.batches_seen} batches, planned {len(plan)}")
+    if counterfactual is not None:
+        expected = sum(1 for entry in plan if entry["domain"] in counterfactual.domains)
+        if counterfactual.stats["batches"] != expected or counterfactual.stats["masked_atoms"] == 0:
+            raise RuntimeError(
+                f"counterfactual {args.counterfactual} was applied to {counterfactual.stats['batches']} batches "
+                f"and {counterfactual.stats['masked_atoms']} masked atoms; expected {expected} batches with masks"
+            )
 
     per_domain_losses = run_cb.per_domain_losses()
+    counterfactual_block = counterfactual_summary(
+        args, counterfactual, domains, metrics_domain_mlm=domain_cb.last_results, losses=per_domain_losses)
     metrics = {
         "provenance": {
             "command": [sys.executable, *sys.argv],
@@ -689,6 +764,7 @@ def _evaluate(args, ckpt: Path, out: Path, accelerator, devices, ckpt_sha256: st
             "data_source": source,
             "config_yaml_path": str(Path(args.config_yaml_path).resolve()) if args.config_yaml_path else None,
             "yaml_keys_not_applied": ignored,
+            "counterfactual": {k: counterfactual_block[k] for k in ("mode", "sigma", "domains")},
             "masking_protocol": {k: eval_dict.get(k) for k in MASKING_KEYS},
             "masking_differs_from_checkpoint": masking_changes,
             "max_atoms_per_batch": max_atoms,
@@ -702,6 +778,7 @@ def _evaluate(args, ckpt: Path, out: Path, accelerator, devices, ckpt_sha256: st
             "eval_config": eval_dict,
         },
         "plan": plan_stats,
+        "counterfactual": counterfactual_block,
         "losses": {
             "per_domain_batch_means": per_domain_losses,
             "lightning_logged": {k: float(v) for k, v in logged.items()},

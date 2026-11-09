@@ -269,6 +269,17 @@ class UniversalMolecularEncoder(nn.Module):
 
         edge_src, edge_dst = edge_index[0], edge_index[1]
         edge_distances = torch.norm(pos[edge_src] - pos[edge_dst], dim=1)  # [num_edges]
+        # Evaluation-only counterfactual (core/counterfactual_eval.py): other distances for the
+        # same edges. Absent in every training and normal evaluation batch.
+        override = getattr(batch_obj, 'counterfactual_edge_distances', None)
+        if override is not None:
+            if (override.shape != edge_distances.shape or override.device != edge_distances.device
+                    or not torch.is_floating_point(override)):
+                raise ValueError(
+                    "counterfactual_edge_distances must be a floating tensor with one distance per "
+                    f"edge_index column ({tuple(edge_distances.shape)}), got {tuple(override.shape)}"
+                )
+            edge_distances = override.to(edge_distances.dtype)
 
         chemical_coordination = self._compute_chemical_coordination(
             x_dense, batch_obj, pos=pos, edge_distances=edge_distances

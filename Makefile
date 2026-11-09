@@ -105,7 +105,7 @@ RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
 WORKERS ?= 32
 SPLIT_GROUP ?= id
 
-.PHONY: train test-unit stop status logs help build-edge-free check-epoch-plan eval-pretrain
+.PHONY: train test-unit stop status logs help build-edge-free check-epoch-plan eval-pretrain eval-counterfactual
 
 PLAN_EPOCHS ?= 5
 
@@ -198,6 +198,10 @@ build-edge-free:
 # EVAL_CONFIG see identical masks. OUT must be a new directory.
 #   make eval-pretrain CKPT=<ckpt> SPLIT=test SEED=0 GPU=<id> OUT=<new dir> \
 #        [EVAL_CONFIG=pretraining_config_multidomain_1m_coconut] [DOMAINS=protein,rna] [MAX_BATCHES=N]
+#        [COUNTERFACTUAL=<mode> [CF_SIGMA=<Angstrom>]]
+# COUNTERFACTUAL (G1 step 0, core/counterfactual_eval.py) corrupts what the encoder/ESA see of the
+# masked UniMol atoms, evaluation only: masked_pos_noise (CF_SIGMA, default 1.0), masked_pos_random,
+# masked_dist_shuffle, esa_edges_remove, esa_edges_shuffle, masked_edges_remove. Unset/none = unchanged.
 eval-pretrain:
 	@test -n "$(CKPT)" -a -n "$(SPLIT)" -a -n "$(OUT)" || { echo "ERROR: set CKPT, SPLIT and OUT"; exit 1; }
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; exit 1; fi
@@ -206,8 +210,30 @@ eval-pretrain:
 		--ckpt "$(CKPT)" --split $(SPLIT) --seed $(or $(SEED),0) --output-dir "$(OUT)" --device cuda:0 \
 		$(if $(strip $(EVAL_CONFIG)),--config-yaml-path core/$(EVAL_CONFIG).yaml,) \
 		$(if $(strip $(DOMAINS)),--domains $(DOMAINS),) $(if $(strip $(MAX_BATCHES)),--max-batches $(MAX_BATCHES),) \
+		$(if $(strip $(COUNTERFACTUAL)),--counterfactual $(COUNTERFACTUAL),) \
+		$(if $(strip $(CF_SIGMA)),--counterfactual-sigma $(CF_SIGMA),) \
 		> $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Log: $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log"
+
+# G1 step 0: UniMol counterfactual sweep on one frozen checkpoint (GPU workload, user-started).
+# Runs the modes one after another in one detached shell on one GPU; each writes OUT_ROOT/<mode>/
+# (OUT_ROOT/<mode> must not exist). The loop stops at the first failing mode.
+#   make eval-counterfactual CKPT=<ckpt> SPLIT=test SEED=0 GPU=<id> OUT_ROOT=<new dir> \
+#        [CF_MODES="none masked_pos_noise ..."] [DOMAINS=unimol] [MAX_BATCHES=N]
+CF_MODES ?= none masked_pos_noise masked_pos_random masked_dist_shuffle esa_edges_remove esa_edges_shuffle masked_edges_remove
+eval-counterfactual:
+	@test -n "$(CKPT)" -a -n "$(SPLIT)" -a -n "$(OUT_ROOT)" || { echo "ERROR: set CKPT, SPLIT and OUT_ROOT"; exit 1; }
+	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; exit 1; fi
+	@mkdir -p $(LOG_MONTH_DIR)
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup bash -c 'set -e; for mode in $(CF_MODES); do \
+		echo "=== counterfactual $$mode ==="; \
+		python -u -m core.evaluate_pretrain --threads $(DS_THREADS) --ckpt "$(CKPT)" --split $(SPLIT) \
+			--seed $(or $(SEED),0) --output-dir "$(OUT_ROOT)/$$mode" --device cuda:0 \
+			--domains $(or $(DOMAINS),unimol) --counterfactual $$mode \
+			$(if $(strip $(EVAL_CONFIG)),--config-yaml-path core/$(EVAL_CONFIG).yaml,) \
+			$(if $(strip $(MAX_BATCHES)),--max-batches $(MAX_BATCHES),); \
+		done' > $(LOG_MONTH_DIR)/eval_counterfactual_$(SPLIT)_$(_LOG_DATETIME).log 2>&1 &
+	@echo "GPU: $(RESOLVED_GPU)   Modes: $(CF_MODES)   Log: $(LOG_MONTH_DIR)/eval_counterfactual_$(SPLIT)_$(_LOG_DATETIME).log"
 
 # ===================================================================
 # Downstream evaluation (downstream/README.md)
@@ -287,6 +313,7 @@ help:
 	@echo "    make check-epoch-plan CONFIG=pretraining_config_protein_only  Epoch plan fits epoch_num_batches?"
 	@echo "    make test-unit                       Run the complete unit-test suite"
 	@echo "    make eval-pretrain CKPT=<ckpt> SPLIT=test GPU=<id> OUT=<new dir>  Offline checkpoint eval (GPU)"
+	@echo "    make eval-counterfactual CKPT=<ckpt> SPLIT=test GPU=<id> OUT_ROOT=<new dir>  UniMol counterfactual sweep (GPU)"
 	@echo ""
 	@echo "  Downstream (see downstream/README.md):"
 	@echo "    make ds-snapshot CKPT=<ckpt> NAME=<snapshot> ALIAS=current_best"

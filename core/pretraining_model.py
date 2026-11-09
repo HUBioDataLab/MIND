@@ -1,3 +1,4 @@
+import copy
 import math
 from types import SimpleNamespace
 import torch
@@ -18,6 +19,8 @@ from core.pretraining_config import PretrainingConfig, create_pretraining_config
 from core.block_masking import legacy_oxt_eligible_node_mask, select_whole_blocks
 from core.masked_coordinate_corruption import apply_masked_slot_template_
 from core.masked_slot_mapping import flatten_pos_codes
+from core.counterfactual_eval import apply_counterfactual
+from core.metrics.domain_mlm_metrics import canonical_domain
 from core.molecular_encoder import (
     UniversalMolecularEncoder,
     build_domain_local_slot_ids,
@@ -28,6 +31,7 @@ from core.virtual_slot_graph import (
     build_geometry_neutral_graph_view,
     build_slot_readout_edges_for_owner_mode,
 )
+from data_loading.bond_contract import resolve_bond_sources
 from data_loading.masking_utils import (
     compute_coconut_masking_metrics,
     get_graph_dataset_type,
@@ -195,6 +199,10 @@ class PretrainingESAModel(pl.LightningModule):
         # number of encoder-visible node states sampled per batch for the
         # embedding-health metrics (0 = off). Never used by training_step.
         self.eval_embedding_sample_nodes = 0
+        # Evaluation-only counterfactual corruption of masked UniMol atoms
+        # (core/counterfactual_eval.CounterfactualSettings); set by
+        # core/evaluate_pretrain.py only, None in every other run.
+        self.counterfactual_eval = None
 
         self.equivariant_requested = bool(config.use_equivariant_features)
         self.equivariant_effective = bool(
@@ -319,6 +327,63 @@ class PretrainingESAModel(pl.LightningModule):
         result.index_copy_(0, target_nodes, slot_states.to(result.dtype))
         return result
 
+    def _apply_counterfactual_eval(
+        self, batch, pos, edge_index, attention_edge_index, batch_mapping, encoder_batch, active
+    ):
+        """Evaluation-only corruption of what the encoder/ESA see of masked UniMol atoms.
+
+        Returns (encoder pos, ESA edges, encoder batch). ``batch.pos`` (the frame of the
+        distance losses), ``batch.z`` and the mask stay clean. See core/counterfactual_eval.py.
+        """
+        settings = self.counterfactual_eval
+        if self.training:
+            raise RuntimeError("counterfactual_eval is evaluation-only and cannot run in training mode")
+        if self.config.apply_attention_on != "node":
+            raise ValueError("counterfactual_eval supports apply_attention_on='node' only")
+        mlm_mask = getattr(batch, "mlm_mask", None)
+        if mlm_mask is None:
+            raise ValueError("counterfactual_eval needs batch.mlm_mask (MLM masking must run first)")
+        seeds = getattr(batch, "eval_mask_seed", None)
+        if seeds is None:
+            raise ValueError(
+                "counterfactual_eval needs the per-graph batch.eval_mask_seed of core/evaluate_pretrain.py"
+            )
+        graph_types = self._graph_dtype_list(batch)
+        if graph_types is None:
+            raise ValueError("counterfactual_eval needs batch.dataset_type")
+        graph_domains = [canonical_domain(value) for value in graph_types]
+        if active is not None:
+            mlm_mask = mlm_mask[active]
+        if active is None:
+            has_explicit_bonds = resolve_bond_sources(batch, batch_mapping, len(graph_domains))[1]
+        else:
+            has_explicit_bonds = encoder_batch.has_explicit_bonds
+        for index, domain in enumerate(graph_domains):
+            if domain in settings.domains and bool(has_explicit_bonds[index]):
+                raise ValueError(
+                    f"counterfactual_eval is defined for graphs without explicit bonds; "
+                    f"mol_id={getattr(batch, 'mol_id', '?')} graph={index} domain={domain}"
+                )
+        result = apply_counterfactual(
+            settings,
+            pos=pos,
+            edge_index=edge_index,
+            attention_edge_index=attention_edge_index,
+            batch_mapping=batch_mapping,
+            mlm_mask=mlm_mask.bool(),
+            graph_domains=graph_domains,
+            eval_mask_seeds=seeds.detach().long().cpu().tolist(),
+        )
+        # Never write into the shared batch: the encoder gets a shallow copy with the new edges.
+        if isinstance(encoder_batch, SimpleNamespace):
+            encoder_batch = SimpleNamespace(**vars(encoder_batch))
+        else:
+            encoder_batch = copy.copy(encoder_batch)
+        encoder_batch.edge_index = result.edge_index
+        if result.edge_distances is not None:
+            encoder_batch.counterfactual_edge_distances = result.edge_distances
+        return result.pos, result.attention_edge_index, encoder_batch
+
     def forward(self, batch, slot_readout_mode: str = "correct"):
         """
         Forward pass for pretraining.
@@ -417,6 +482,12 @@ class PretrainingESAModel(pl.LightningModule):
             pos = pos_centered
             batch.pos = pos_centered
             encoder_batch = batch
+
+        if getattr(self, "counterfactual_eval", None) is not None:
+            pos, attention_edge_index, encoder_batch = self._apply_counterfactual_eval(
+                batch, pos, edge_index, attention_edge_index, batch_mapping, encoder_batch,
+                graph_view.compact_to_full if graph_view is not None else None,
+            )
 
         # Encode nodes
         node_embeddings = self.encoder(x, pos, encoder_batch)
