@@ -95,3 +95,20 @@ def test_unimol_hidden_child_differs_from_its_base_only_in_the_hiding_flag_and_r
     assert base["unimol_masked_geometry_hiding"] == {"enabled": False, "bond_threshold_angstrom": 2.1}
     assert child["unimol_masked_geometry_hiding"] == {"enabled": True, "bond_threshold_angstrom": 2.1}
     assert create_pretraining_config(**child).unimol_masked_geometry_hiding["enabled"] is True
+
+
+def test_every_shipped_yaml_passes_the_unknown_key_check():
+    from core.pretraining_config import check_yaml_keys
+    for path in sorted((REPO_ROOT / "core").glob("pretraining_config_*.yaml")):
+        check_yaml_keys(load_config_yaml(path), path.name)
+
+
+def test_unknown_yaml_key_is_refused_but_checkpoint_style_configs_still_load():
+    from core.pretraining_config import check_yaml_keys
+    values = load_config_yaml(BASE)
+    check_yaml_keys(values, "base")
+    with pytest.raises(ValueError, match="unknown config key.*lr_typo"):
+        check_yaml_keys({**values, "lr_typo": 1}, "typo.yaml")
+    # old checkpoints carry keys that are no longer fields (e.g. temperature-era leftovers);
+    # create_pretraining_config must keep accepting them.
+    assert create_pretraining_config(**{**values, "lr_typo": 1, "use_hybrid_edges": True}).lr_typo == 1

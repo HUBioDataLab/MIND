@@ -28,7 +28,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from core.pretraining_model import PretrainingESAModel, PretrainingConfig, create_pretraining_config
-from core.pretraining_config import load_config_yaml
+from core.pretraining_config import check_yaml_keys, load_config_yaml
 from core.batch_statistics_callback import BatchStatisticsCallback
 from core.metrics.rna_per_atom_metrics_callback import PerAtomMetricsCallback
 from core.metrics.protein_per_atom_metrics_callback import ProteinPerAtomMetricsCallback
@@ -1142,6 +1142,7 @@ def main():
     # Load config from YAML
     print(f"📂 Loading config from: {args.config_yaml_path}")
     config_dict = load_config_yaml(args.config_yaml_path)
+    check_yaml_keys(config_dict, args.config_yaml_path)
     print(f"✅ Config loaded: {config_dict['dataset']}")
 
     # Override config with command line arguments

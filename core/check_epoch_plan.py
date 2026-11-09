@@ -13,7 +13,7 @@ import json
 import statistics
 import sys
 
-from core.pretraining_config import create_pretraining_config, load_config_yaml
+from core.pretraining_config import check_yaml_keys, create_pretraining_config, load_config_yaml
 from core.train_pretrain import _build_train_batch_sampler, load_universal_dataset, split_dataset
 
 
@@ -57,6 +57,7 @@ def main() -> int:
         parser.error("--epochs must be positive")
 
     config_dict = load_config_yaml(args.config_yaml_path)
+    check_yaml_keys(config_dict, args.config_yaml_path)
     if args.seed is not None:
         config_dict["seed"] = args.seed
     config = create_pretraining_config(**config_dict)

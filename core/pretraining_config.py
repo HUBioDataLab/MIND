@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Optional, List, Dict
 
@@ -371,6 +371,36 @@ class PretrainingConfig:
     equivariant_num_features: int = 16  # Number of tensor feature channels
     equivariant_fusion_method: str = "add"  # add, concat, bilinear
     equivariant_cross_connection: bool = True  # Enable cross-connection between invariant and equivariant branches
+
+
+# Keys a YAML may carry that are not PretrainingConfig fields. They are read straight from the
+# config object or dict by the trainer, the sampler, the edge builders or the encoder.
+# Checkpoints may hold more such keys; that is why this list guards only the YAML path.
+NON_DATACLASS_YAML_KEYS = frozenset({
+    "dataset", "dataset_download_dir", "universal_cache_path", "max_samples", "seed",
+    "multi_domain", "max_epochs", "gradient_clip_val", "devices", "strategy",
+    "num_sanity_val_steps", "val_check_interval", "log_every_n_steps",
+    "use_dynamic_batching", "use_improved_sampler", "max_atoms_per_batch",
+    "log_batch_statistics", "batch_stats_log_frequency",
+    "sequence_neighbors_k", "max_spatial_neighbors", "num_random_edges",
+    "random_edge_min_distance", "use_dynamic_random_edges", "replace_existing_random_edges",
+    "use_distance_bias", "distance_bias_scale", "distance_bias_cutoff", "close_cutoff",
+})
+
+
+def check_yaml_keys(config_dict: dict, source) -> None:
+    """Refuse YAML keys that no config field or known reader accepts (typos would be ignored).
+
+    Call it on a dict from ``load_config_yaml`` only. ``create_pretraining_config`` stays
+    permissive because it also rebuilds configs from old checkpoints.
+    """
+    known = {field.name for field in fields(PretrainingConfig)} | NON_DATACLASS_YAML_KEYS
+    unknown = sorted(set(config_dict) - known)
+    if unknown:
+        raise ValueError(
+            f"{source}: unknown config key(s) {unknown}. Fix the spelling, remove the key, "
+            "or add it to PretrainingConfig / NON_DATACLASS_YAML_KEYS if code reads it."
+        )
 
 
 def create_pretraining_config(**kwargs) -> PretrainingConfig:
