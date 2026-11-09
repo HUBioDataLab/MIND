@@ -276,9 +276,10 @@ ds-snapshot:
 	$(CONDA_RUN) python -m downstream.common.registry snapshot "$(CKPT)" "$(NAME)"
 	$(if $(strip $(ALIAS)),$(CONDA_RUN) python -m downstream.common.registry alias "$(ALIAS)" "$(NAME)" --repoint,)
 
+# `set -o pipefail`: without it the pipeline exit status is tee's (always 0) and a failed prepare/probe looks like success.
 ds-download ds-process:
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare $(patsubst ds-%,%,$@) \
+	set -o pipefail; $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare $(patsubst ds-%,%,$@) \
 		$(if $(filter ds-process,$@),$(DS_PROCESS_ARGS),$(DS_DOWNLOAD_ARGS)) 2>&1 | tee $(call DS_LOG,$(patsubst ds-%,%,$@))
 
 # Read-only: re-checks labels and split lists against task.yaml (go, fold, reaction).
@@ -307,7 +308,7 @@ ds-embed ds-finetune:
 ds-probe:
 	@test -n "$(MODEL_ID)" || { echo "ERROR: set MODEL_ID (snapshot, <snapshot>.random_init or ESM-2 name)"; exit 1; }
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --threads $(DS_THREADS) --task $(TASK) --model-id "$(MODEL_ID)" \
+	set -o pipefail; $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --threads $(DS_THREADS) --task $(TASK) --model-id "$(MODEL_ID)" \
 		--head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) $(DS_LBA_ARGS) \
 		2>&1 | tee $(call DS_LOG,probe_$(HEAD))
 
