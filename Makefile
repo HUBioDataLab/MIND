@@ -279,6 +279,11 @@ eval-counterfactual:
 #   make ds-ledger-recompute MODEL=<model> CONTROL=<model with macro AUPR> DATA_REVISION=<rev> [TASK=ec] [DRY_RUN=1]
 #        (macro AUPR a probe did not record, from its saved predictions.npz; four checks, nothing written on failure)
 # MODELS defaults to summary_models in $(MIND_RESULTS_ROOT)/comparisons.yaml, else the list in ledger_report.py.
+# One command for one MIND model (downstream/run_all.py; GPU embeds + CPU probes, user-started, no fine-tune):
+#   make ds-run MODEL=<snapshot | path/to.ckpt> [NAME=<snapshot name, required with a ckpt>] [TASKS=all|ec,go_mf,...]
+#        GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp] [PROBE_JOBS=1] [RANDOM_INIT=1] [OUTPUTS_ROOT=<dir>] [PLAN=1] [DETACH=1]
+#   snapshot (ckpt) -> embeds on the GPUs -> probes (SEEDS) -> ledger add -> table of final metrics + missing cells.
+#   PLAN=1 prints what would run and writes nothing. DETACH=1 runs it in the background (log path printed).
 # ===================================================================
 
 TASK ?= ec
@@ -309,7 +314,8 @@ DS_PROCESS_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lb
 DS_DOWNLOAD_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),))
 
 .PHONY: ds-snapshot ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
-	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify ds-ledger-recompute
+	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify ds-ledger-recompute \
+	ds-run
 
 ds-snapshot:
 	@test -n "$(CKPT)" -a -n "$(NAME)" || { echo "ERROR: set CKPT and NAME"; exit 1; }
@@ -389,6 +395,24 @@ ds-ledger-recompute:
 	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger recompute-macro-aupr --task $(TASK) --model "$(MODEL)" \
 		--control "$(CONTROL)" --data-revision "$(DATA_REVISION)" $(if $(strip $(POOLING)),--pooling $(POOLING),) \
 		$(if $(filter 1,$(DRY_RUN)),--dry-run,)
+
+HEADS ?= linear,mlp
+PER_GPU ?= 1
+PROBE_JOBS ?= 1
+DS_RUN_CMD = python -u -m downstream.run_all --model "$(MODEL)" $(if $(strip $(NAME)),--name "$(NAME)",) \
+	--tasks $(or $(strip $(TASKS)),all) --gpus "$(GPU)" --per-gpu $(PER_GPU) --heads $(HEADS) --seeds $(SEEDS) \
+	--probe-jobs $(PROBE_JOBS) --threads $(DS_THREADS) --log-root $(LOG_MONTH_DIR) $(DS_RANDOM_INIT_ARGS) \
+	$(if $(strip $(OUTPUTS_ROOT)),--outputs-root "$(OUTPUTS_ROOT)",) $(if $(filter 1,$(PLAN)),--plan,)
+
+ds-run:
+	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name or .ckpt path; a path also needs NAME)"; exit 1; }
+ifeq ($(DETACH),1)
+	@mkdir -p $(LOG_MONTH_DIR)
+	log=$(LOG_MONTH_DIR)/ds_run_$(_LOG_DATETIME)_$$$$.log; echo "Log: $$log"; \
+	$(CONDA_RUN) $(LEDGER_ENV) setsid nohup $(DS_RUN_CMD) > $$log 2>&1 < /dev/null &
+else
+	$(CONDA_RUN) $(LEDGER_ENV) $(DS_RUN_CMD)
+endif
 
 test-downstream:
 	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -m pytest -q tests/test_downstream_*.py

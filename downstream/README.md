@@ -239,3 +239,18 @@ Std: ledger reports and comparisons use the sample std over run seeds (ddof=1, u
   writes nothing unless the metrics files are unchanged since ingestion, fmax and pair AUPR are reproduced exactly,
   the CONTROL model's recorded macro AUPR is reproduced by the same formula, and no macro AUPR row exists yet. New
   rows name their source in `recomputed_from` and stay in the "Ayar" section of the file they come from.
+
+## One command per model (`make ds-run`)
+
+`downstream/run_all.py`: `make ds-run MODEL=<snapshot | path/to.ckpt> [NAME=<snapshot>] [TASKS=all|ec,go_mf,...]
+GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp] [PROBE_JOBS=1] [RANDOM_INIT=1] [OUTPUTS_ROOT=<dir>] [PLAN=1] [DETACH=1]`.
+A checkpoint path is first snapshotted as NAME (a NAME that already names another checkpoint, in the snapshot
+store or in the ledger, stops the run). Then one embedding job per task on the GPUs (at most PER_GPU per GPU; splits
+already embedded are skipped), then, after every embedding job has ended, the probes on CPU (SEEDS; seeds already
+done are skipped), `ledger add`, and a table of the primary metric per task and head plus the missing required
+cells. `all` is EC, GO, Fold, LBA (identity30 and identity60, joint) and the 14 MoleculeNet tasks; Reaction only
+when named. A task outside the model's pretraining domains (protein needs `pdb`, MoleculeNet `unimol`) is skipped
+and listed under `all`, refused when named. A failing job is reported with its log and the others continue; the
+run ends with the list of what is missing and exit code 1. `PLAN=1` prints what would run (and recorded embedding
+times of other models, when there are any) and writes nothing. Logs and `summary.md` go to
+`logs/<Month><Year>/ds_run_<model>_<stamp>_<pid>/`; fine-tuning is not part of this command.
