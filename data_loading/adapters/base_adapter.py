@@ -6,13 +6,63 @@ Abstract base class for dataset adapters that convert raw data to universal form
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Any, TYPE_CHECKING
+from collections import Counter
+from typing import List, Any, Optional, Sequence, Tuple, TYPE_CHECKING
+import json
 import os
 import pickle
 from tqdm import tqdm
 
 if TYPE_CHECKING:
     from data_types import UniversalMolecule
+
+MAX_REPORTED_SKIPS = 10000
+
+
+def report_skipped_items(
+    adapter_name: str,
+    seen: int,
+    skipped: Sequence[Tuple[str, str]],
+    cache_path: Optional[str],
+) -> None:
+    """Make dropped items visible: print counts, write a report next to the cache, then fail.
+
+    ``skipped`` holds ``(item label, reason)``. Nothing is raised when it is empty. A data
+    tool may drop a bad item, but never silently: the run ends with a non-zero exit.
+    """
+    if not skipped:
+        return
+    by_reason = dict(Counter(reason for _, reason in skipped).most_common())
+    report_path = None
+    if cache_path:
+        report_path = f"{cache_path}.skipped.json"
+        with open(report_path, "w") as handle:
+            json.dump(
+                {
+                    "adapter": adapter_name,
+                    "seen": seen,
+                    "skipped": len(skipped),
+                    "by_reason": by_reason,
+                    "items": [{"item": item, "reason": reason} for item, reason in skipped[:MAX_REPORTED_SKIPS]],
+                },
+                handle,
+                indent=2,
+            )
+    shown = "; ".join(f"{count} x {reason}" for reason, count in list(by_reason.items())[:5])
+    first_item, first_reason = skipped[0]
+    raise RuntimeError(
+        f"{adapter_name}: skipped {len(skipped)} of {seen} items ({shown}). "
+        f"First: {first_item}: {first_reason}. "
+        + (f"Report: {report_path}. " if report_path else "")
+        + "Fix the inputs and rebuild; the cache written so far lacks these items."
+    )
+
+
+def _item_label(raw_item: Any) -> str:
+    if isinstance(raw_item, dict):
+        return str(raw_item.get("id") or raw_item.get("smi") or "<dict item>")[:200]
+    return str(raw_item)[:200]
+
 
 class BaseAdapter(ABC):
     """Abstract base for dataset adapters - converts raw data to universal blocks"""
@@ -47,18 +97,24 @@ class BaseAdapter(ABC):
         A memory-efficient generator that processes raw data items one by one.
         It yields processed UniversalMolecule objects without storing them all in a list.
         """
-        # This loop processes one raw item at a time (e.g., one PDB file path)
+        # This loop processes one raw item at a time (e.g., one PDB file path).
+        # Dropped items are recorded in self.skipped_items (label, reason) and reported by
+        # process_dataset; nothing is dropped without a record.
+        self.skipped_items = []
         for item in tqdm(raw_data_items, desc="Processing raw samples"):
             try:
-                # Convert the raw item to the universal format
                 universal_item = self.convert_to_universal(item)
-                # Ensure the processed item is valid (contains atoms) before yielding
-                if len(universal_item.blocks) > 0:
-                    yield universal_item
             except Exception as e:
-                # Silently skip any file that fails to process and continue with the next one.
-                print(f"⚠️ Skipping item due to error: {e}")
-                pass
+                reason = f"{type(e).__name__}: {e}"[:200]
+                print(f"⚠️ Skipping item {_item_label(item)}: {reason}")
+                self.skipped_items.append((_item_label(item), reason))
+                continue
+            # An item without blocks is unreadable or empty (the protein/RNA adapters
+            # return [] for a file that cannot be parsed).
+            if len(universal_item.blocks) == 0:
+                self.skipped_items.append((_item_label(item), "no blocks (unreadable or empty structure)"))
+                continue
+            yield universal_item
     
     def process_dataset(self, data_path: str, cache_path: str = None, **kwargs) -> int:
         """
@@ -89,11 +145,15 @@ class BaseAdapter(ABC):
                     count += 1
             
             print(f"✅ Successfully cached {count} universal samples.")
+            report_skipped_items(
+                self.dataset_type, len(raw_data_items), self.skipped_items, cache_path
+            )
         else:
             # If no cache path is provided, we can't save. We'll just count.
             # This case is less common.
             print("No cache path provided. Counting processed items without saving.")
             for _ in processed_item_generator:
                 count += 1
+            report_skipped_items(self.dataset_type, len(raw_data_items), self.skipped_items, None)
 
         return count

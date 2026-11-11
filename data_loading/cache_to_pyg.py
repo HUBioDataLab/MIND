@@ -36,7 +36,6 @@ from data_loading.atom_position_vocab import (
     VIRTUAL_ATOMIC_NUMBER,
     is_virtual_position_code,
 )
-warnings.filterwarnings('ignore')
 
 # Periodic table whitelist: all other atoms collapse to R (rare atom).
 ELEMENT_TO_ATOMIC_NUMBER = {

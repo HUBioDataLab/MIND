@@ -1,7 +1,6 @@
 
 import sys
 import os
-import warnings
 import argparse
 import copy
 import torch
@@ -45,8 +44,6 @@ from data_loading.improved_dynamic_sampler import ImprovedDynamicBatchSampler
 from data_loading.protein_dynamic_random_edges import OptimizedProteinDynamicRandomEdges
 from torch_geometric.transforms import Compose
 from glob import glob
-
-warnings.filterwarnings("ignore")
 
 os.environ["WANDB__SERVICE_WAIT"] = "500"
 

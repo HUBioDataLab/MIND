@@ -538,12 +538,11 @@ class LazyUniversalDataset(Dataset):
         Metadata files are expected to be in the same directory as .pt files
         with naming convention: <chunk_name>_metadata.json
         
-        If metadata is missing for any chunk, gracefully falls back to no metadata mode.
+        Missing or unreadable metadata raises: the caller asked for metadata, and a silent
+        metadata-free mode would change sampling and dataset types without notice.
         """
         if self.verbose:
             print("🔄 Loading chunk metadata...")
-        
-        missing_metadata = []
         
         for chunk_idx, pt_file in enumerate(self.chunk_pt_files):
             pt_path = Path(pt_file)
@@ -551,53 +550,34 @@ class LazyUniversalDataset(Dataset):
             
             # If not found in same directory, check alternative search paths
             if not metadata_path.exists():
-                found = False
                 for search_path in self.metadata_search_paths:
                     alt_path = Path(search_path) / f"{pt_path.stem}_metadata.json"
                     if alt_path.exists():
                         metadata_path = alt_path
-                        found = True
                         break
-                
-                if not found:
-                    missing_metadata.append(pt_path.name)
-                    continue
+                else:
+                    raise FileNotFoundError(
+                        f"Chunk metadata missing for {pt_file} (expected {metadata_path}); "
+                        "run data_loading/create_chunk_metadata.py --chunk-dir <chunk directory>"
+                    )
             
             try:
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
-                    self.chunk_metadata.append(metadata)
-            except Exception as e:
-                if self.verbose:
-                    print(f"⚠️  Failed to load metadata for {pt_path.name}: {e}")
-                missing_metadata.append(pt_path.name)
+            except (OSError, ValueError) as e:
+                raise ValueError(f"Cannot read chunk metadata {metadata_path}: {e}") from e
+            self.chunk_metadata.append(metadata)
         
-        # Check if all metadata loaded successfully
-        if len(self.chunk_metadata) == len(self.chunk_pt_files):
-            self.metadata_loaded = True
-            self._load_metadata_schemas()
-            self._build_metadata_index()
-            
-            if self.verbose:
-                total_atoms = sum(m['total_atoms'] for m in self.chunk_metadata)
-                dataset_types = set(m['dataset_type'] for m in self.chunk_metadata)
-                print(f"✅ Metadata loaded for {len(self.chunk_metadata)} chunks")
-                print(f"   Total atoms: {total_atoms:,}")
-                print(f"   Dataset types: {', '.join(sorted(dataset_types))}")
-        else:
-            # Graceful fallback
-            self.metadata_loaded = False
-            self.chunk_metadata = []
-            self.sample_metadata_index = []
-            
-            if self.verbose:
-                print(f"⚠️  Metadata missing for {len(missing_metadata)} chunks:")
-                for name in missing_metadata[:5]:
-                    print(f"     - {name}")
-                if len(missing_metadata) > 5:
-                    print(f"     ... and {len(missing_metadata) - 5} more")
-                print(f"💡 Tip: Run create_chunk_metadata.py to generate metadata")
-                print(f"🔄 Falling back to standard mode (metadata-free)")
+        self.metadata_loaded = True
+        self._load_metadata_schemas()
+        self._build_metadata_index()
+        
+        if self.verbose:
+            total_atoms = sum(m['total_atoms'] for m in self.chunk_metadata)
+            dataset_types = set(m['dataset_type'] for m in self.chunk_metadata)
+            print(f"✅ Metadata loaded for {len(self.chunk_metadata)} chunks")
+            print(f"   Total atoms: {total_atoms:,}")
+            print(f"   Dataset types: {', '.join(sorted(dataset_types))}")
     
     def _require_edge_free_runtime(self, schema: dict, origin: str) -> None:
         if self.edge_free_runtime is None:
