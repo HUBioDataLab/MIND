@@ -127,11 +127,15 @@ def _ci_reason(row: dict, spec: dict) -> Optional[str]:
 
 
 def _parts(row: dict, spec: dict) -> list:
+    """Test splits behind a row: the catalog's derived average (e.g. Fold test_avg) or the row's own split.
+
+    Only a catalog average for this split and metric expands; any other ``derived_from`` row is resampled on its
+    own split, and the reproduction check in ``paired_bootstrap`` still compares it with the predictions.
+    """
     if row["derived_from"]:
         for derived in spec.get("derived_averages") or []:
-            if derived["eval_split"] == row["eval_split"]:
+            if derived["eval_split"] == row["eval_split"] and row["metric"] in derived["metrics"]:
                 return list(derived["of"])
-        raise ValueError(f"{row['source_metrics_path']}: derived row {row['eval_split']} has no catalog definition")
     return [row["eval_split"]]
 
 

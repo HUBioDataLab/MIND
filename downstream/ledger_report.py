@@ -85,14 +85,15 @@ def load_state(root: Optional[Path] = None, *, catalog: Optional[dict] = None) -
     catalog = catalog or ledger.load_catalog()
     records = {name: ledger.read_records(root, name) for name in ledger.LEDGER_FILES}
     rows = ledger.apply_annotations(records["measurements"], records["annotations"])
-    for row in rows:
-        row["data_fingerprint"] = None
+    # Keyed by the source file and its content hash, not by the ingest: a row recomputed later from the same
+    # file (``ledger recompute-macro-aupr``) keeps the setting of that file's other rows.
     fingerprints = defaultdict(set)
     for row in rows:
-        fingerprints[row["source_metrics_path"], row["ingest_id"]].add((row["eval_split"], row["eval_processed_sha256"]))
+        fingerprints[row["source_metrics_path"], row["source_metrics_sha256"]].add(
+            (row["eval_split"], row["eval_processed_sha256"]))
     for row in rows:
-        row["data_fingerprint"] = ledger.sha256_json(sorted(fingerprints[row["source_metrics_path"], row["ingest_id"]],
-                                                            key=str))
+        row["data_fingerprint"] = ledger.sha256_json(
+            sorted(fingerprints[row["source_metrics_path"], row["source_metrics_sha256"]], key=str))
     header = {"generated_utc": ledger.now_utc(), "n_rows": len(rows), "measurements_sha256": summary["measurements_sha256"],
               "catalog_sha256": catalog["sha256"], "code_git": ledger._code_git(),
               "n_annotations": len(records["annotations"])}

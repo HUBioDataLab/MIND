@@ -276,6 +276,8 @@ eval-counterfactual:
 #   make ds-ledger-annotate SELECT="task=ec data_revision=<rev>" STATUS=superseded REASON="..." [REPLACED_BY=<rev>]
 #   make ds-ledger-report [MODELS="<a> <b>"]   make ds-summary   make ds-missing   make ds-ledger-verify
 #   make ds-compare A=<model> B=<model> [TASKS="ec lba"] [BOOTSTRAP=1000]
+#   make ds-ledger-recompute MODEL=<model> CONTROL=<model with macro AUPR> DATA_REVISION=<rev> [TASK=ec] [DRY_RUN=1]
+#        (macro AUPR a probe did not record, from its saved predictions.npz; four checks, nothing written on failure)
 # MODELS defaults to summary_models in $(MIND_RESULTS_ROOT)/comparisons.yaml, else the list in ledger_report.py.
 # ===================================================================
 
@@ -307,7 +309,7 @@ DS_PROCESS_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lb
 DS_DOWNLOAD_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),))
 
 .PHONY: ds-snapshot ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
-	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify
+	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify ds-ledger-recompute
 
 ds-snapshot:
 	@test -n "$(CKPT)" -a -n "$(NAME)" || { echo "ERROR: set CKPT and NAME"; exit 1; }
@@ -381,6 +383,12 @@ ds-compare:
 
 ds-ledger-verify:
 	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger verify
+
+ds-ledger-recompute:
+	@test -n "$(MODEL)" -a -n "$(CONTROL)" -a -n "$(DATA_REVISION)" || { echo "ERROR: set MODEL, CONTROL and DATA_REVISION"; exit 1; }
+	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger recompute-macro-aupr --task $(TASK) --model "$(MODEL)" \
+		--control "$(CONTROL)" --data-revision "$(DATA_REVISION)" $(if $(strip $(POOLING)),--pooling $(POOLING),) \
+		$(if $(filter 1,$(DRY_RUN)),--dry-run,)
 
 test-downstream:
 	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -m pytest -q tests/test_downstream_*.py

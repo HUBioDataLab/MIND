@@ -234,3 +234,8 @@ Std: ledger reports and comparisons use the sample std over run seeds (ddof=1, u
   `ds-summary`, `ds-missing`, `ds-compare A=<model> B=<model>`, `ds-ledger-verify`. `ds-report` is unchanged.
   Report models: `MODELS=...`, else `summary_models` in `<root>/comparisons.yaml`, else `DEFAULT_SUMMARY_MODELS` in
   `ledger_report.py`; a listed model the ledger has never seen appears as `EKSİK:model-henüz-yok`, never skipped.
+- `make ds-ledger-recompute MODEL=<m> CONTROL=<m2> DATA_REVISION=<rev> [TASK=ec] [DRY_RUN=1]`: adds the macro AUPR a
+  frozen probe did not record (EC/GO), computed from each seed's `predictions.npz` with the probe's own function. It
+  writes nothing unless the metrics files are unchanged since ingestion, fmax and pair AUPR are reproduced exactly,
+  the CONTROL model's recorded macro AUPR is reproduced by the same formula, and no macro AUPR row exists yet. New
+  rows name their source in `recomputed_from` and stay in the "Ayar" section of the file they come from.

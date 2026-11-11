@@ -3,6 +3,7 @@
     python -m downstream.ledger add --outputs-root DIR [--eval-dir DIR ...]
     python -m downstream.ledger annotate --select "task=ec data_revision=<rev>" --status superseded --reason "..."
     python -m downstream.ledger verify
+    python -m downstream.ledger recompute-macro-aupr --task ec --model <m> --control <m2> --data-revision <rev> [--dry-run]
 
 The ledger lives outside Git under ``$MIND_RESULTS_ROOT/ledger/`` (no default: an unset variable is an
 error, so a ledger is never opened in a surprising place; the Makefile passes the project's root):
@@ -692,6 +693,126 @@ def ingest(root: Optional[Path] = None, *, outputs_root: Optional[Path] = None, 
     return record
 
 
+# ---------------------------------------------------------------------------------------------------------
+# Recomputation of a missing metric from saved predictions
+# ---------------------------------------------------------------------------------------------------------
+
+RECOMPUTE_TOLERANCE = 1e-9
+
+
+def _recompute_cells(rows: list, setting: dict, model: str, metric: str) -> dict:
+    """``{run_seed: row}`` of one model's test/all cell in one frozen-probe setting; two rows per seed is an error."""
+    found = {}
+    for row in rows:
+        if (row["model_key"] == model and row["eval_split"] == "test" and row["subset"] == "all"
+                and row["metric"] == metric and row["protocol_family"] == "frozen_probe"
+                and all(row[key] == value for key, value in setting.items())):
+            if row["run_seed"] in found:
+                raise LedgerError(f"{model} seed {row['run_seed']} {metric}: more than one row in setting {setting}; "
+                                  "the setting is ambiguous")
+            found[row["run_seed"]] = row
+    return found
+
+
+def _saved_test_arrays(row: dict):
+    """(predictions.npz path, labels, scores) next to a row's metrics.json, which must be the ingested file."""
+    import numpy as np
+
+    path = Path(row["source_metrics_path"])
+    if sha256_path(path) != row["source_metrics_sha256"]:
+        raise LedgerError(f"{path} changed since it was ingested (sha256 differs); refusing to recompute from it")
+    npz = path.with_name("predictions.npz")
+    with np.load(npz) as data:
+        return npz, data["test_labels"], data["test_scores"]
+
+
+def recompute_macro_aupr(root: Optional[Path], *, task: str, model: str, control: str, data_revision: str,
+                         protocol_id: str = "mlp_probe", pooling: str = "mean_atoms", dry_run: bool = False,
+                         command: Optional[str] = None, out=print) -> dict:
+    """Add the macro AUPR a frozen-probe run did not record, computed from its saved ``predictions.npz``.
+
+    The probe is not re-run: the value is ``downstream.common.metrics.label_aupr`` (the function probe.py uses)
+    on the stored test labels and scores. Only the test/all cell (the catalog's required one); subset masks and
+    validation labels are not in predictions.npz. Nothing is written unless all four checks pass:
+
+    1. each metrics.json still has the sha256 recorded in the ledger;
+    2. fmax and pair_aupr recomputed from the predictions equal the ledger values (``RECOMPUTE_TOLERANCE``);
+    3. the CONTROL model, whose probe did record macro AUPR, gets its stored value back from the same formula;
+    4. the target has no macro_aupr row in this cell yet (a second run is an error).
+
+    New rows copy the fmax row of the same run and name their source in ``recomputed_from``.
+    """
+    import numpy as np
+
+    from downstream.common import metrics as M
+
+    root = results_root(root)
+    catalog = load_catalog()
+    if task_spec(catalog, task)["kind"] != "multilabel":
+        raise LedgerError(f"recompute-macro-aupr applies to multilabel tasks (ec, go_*); {task!r} is "
+                          f"{task_spec(catalog, task)['kind']}")
+    setting = {"task": task, "data_revision": data_revision, "protocol_id": protocol_id, "pooling": pooling}
+    verify(root)
+    with _locked(root):
+        rows = _read_locked(root, "measurements")
+        control_fmax = _recompute_cells(rows, setting, control, "fmax")
+        control_macro = _recompute_cells(rows, setting, control, "macro_aupr")
+        if not control_fmax:
+            raise LedgerError(f"control {control}: no {task} test/all fmax row in setting {setting}")
+        for seed, row in sorted(control_fmax.items()):  # check 3
+            stored = control_macro.get(seed)
+            if stored is None or stored["value"] is None:
+                raise LedgerError(f"control {control} seed {seed}: no recorded macro_aupr to check the formula against")
+            _, labels, scores = _saved_test_arrays(row)
+            value = M.label_aupr(labels, scores)["macro_aupr"]
+            if abs(value - stored["value"]) > RECOMPUTE_TOLERANCE:
+                raise LedgerError(f"control {control} seed {seed}: recomputed {value} != recorded {stored['value']}")
+            out(f"kontrol {control} seed {seed}: hesap {value:.10f} == kayitli {stored['value']:.10f}")
+        targets = _recompute_cells(rows, setting, model, "fmax")
+        if not targets:
+            raise LedgerError(f"{model}: no {task} test/all fmax row in setting {setting}")
+        existing = _recompute_cells(rows, setting, model, "macro_aupr")
+        pair = _recompute_cells(rows, setting, model, "pair_aupr")
+        ingest_id, stamp = str(uuid.uuid4()), now_utc()
+        new = []
+        for seed, template in sorted(targets.items()):
+            if seed in existing:  # check 4
+                raise LedgerError(f"{model} seed {seed} already has a macro_aupr row in setting {setting}")
+            npz, labels, scores = _saved_test_arrays(template)  # check 1
+            full = M.evaluate(labels, scores)
+            for name, reference in (("fmax", template["value"]), ("pair_aupr", pair.get(seed, {}).get("value"))):
+                if reference is None or abs(full[name] - reference) > RECOMPUTE_TOLERANCE:  # check 2
+                    raise LedgerError(f"{npz} does not reproduce the ledger {name} of {model} seed {seed}: "
+                                      f"{full[name]} vs {reference}")
+            macro = M.label_aupr(labels, scores)
+            row = dict(template)
+            row.update(metric="macro_aupr", value=float(macro["macro_aupr"]), undefined_reason=None, is_primary=False,
+                       context={"macro_aupr_num_terms": macro["num_terms_evaluated"],
+                                "macro_aupr_num_terms_skipped": macro["num_terms_skipped_no_positive"]},
+                       row_id=str(uuid.uuid4()), ingest_id=ingest_id, ingested_utc=stamp,
+                       recomputed_from=(f"{npz} predictions_sha256={sha256_path(npz)} via "
+                                        "downstream.common.metrics.label_aupr (probe not re-run)"),
+                       **metric_info(catalog, task, "macro_aupr"))
+            new.append(row)
+            out(f"{model} seed {seed}: macro_aupr {row['value']:.10f} (terim {macro['num_terms_evaluated']}, atlanan "
+                f"{macro['num_terms_skipped_no_positive']}; fmax/pair_aupr yeniden hesap defterle birebir)")
+        values = [row["value"] for row in new]
+        spread = f" std(ddof=1) {float(np.std(values, ddof=1)):.6f}" if len(values) > 1 else ""
+        out(f"ortalama {float(np.mean(values)):.6f}{spread} n={len(values)}")
+        record = {"ingest_id": ingest_id, "started_utc": stamp, "finished_utc": now_utc(),
+                  "command": command or " ".join(sys.argv), "code_git": _code_git(), "outputs_root": None,
+                  "eval_dirs": [], "files_seen": len(new), "rows_added": len(new), "models_added": [],
+                  "files_skipped_same_sha": 0, "embedding_sets": [], "catalog_sha256": catalog["sha256"],
+                  "note": f"macro_aupr of {model} recomputed from predictions.npz; control={control}; setting={setting}"}
+        if dry_run:
+            out("DRY-RUN: yazilmadi")
+            return dict(record, rows_added=0, dry_run=True)
+        _append_locked(root, "measurements", new)
+        _append_locked(root, "ingests", [record])
+    out(f"yazildi: {len(new)} satir, ingest {ingest_id}")
+    return record
+
+
 def _code_git() -> Optional[str]:
     """Commit of this checkout (``+dirty`` when it has local changes); None outside a git checkout."""
     import subprocess
@@ -782,7 +903,22 @@ def main(argv=None) -> int:
     note.add_argument("--replaced-by", default=None)
     note.add_argument("--author", default=None)
     commands.add_parser("verify")
+    recompute = commands.add_parser("recompute-macro-aupr",
+                                    help="add a missing macro AUPR from saved predictions.npz (see recompute_macro_aupr)")
+    recompute.add_argument("--task", required=True)
+    recompute.add_argument("--model", required=True)
+    recompute.add_argument("--control", required=True, help="model whose probe recorded macro AUPR (formula check)")
+    recompute.add_argument("--data-revision", required=True)
+    recompute.add_argument("--protocol-id", default="mlp_probe")
+    recompute.add_argument("--pooling", default="mean_atoms")
+    recompute.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "recompute-macro-aupr":
+        result = recompute_macro_aupr(args.results_root, task=args.task, model=args.model, control=args.control,
+                                      data_revision=args.data_revision, protocol_id=args.protocol_id,
+                                      pooling=args.pooling, dry_run=args.dry_run, command=" ".join(sys.argv))
+        print(json.dumps({k: v for k, v in result.items() if k != "embedding_sets"}, indent=1))
+        return 0
     if args.command == "add":
         if args.outputs_root is None and not args.eval_dir:
             parser.error("add needs --outputs-root and/or --eval-dir")

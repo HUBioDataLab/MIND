@@ -36,6 +36,12 @@ def _make(*args, env_root=None):
     ("ds-compare", ["A=m1", "B=m2", "TASKS=ec lba", "BOOTSTRAP=200"],
      'python -m downstream.ledger_compare --a "m1" --b "m2" --bootstrap 200 --tasks ec lba'),
     ("ds-ledger-verify", [], "python -m downstream.ledger verify"),
+    ("ds-ledger-recompute", ["MODEL=m1", "CONTROL=m2", "DATA_REVISION=r2", "DRY_RUN=1"],
+     'python -m downstream.ledger recompute-macro-aupr --task ec --model "m1" --control "m2" --data-revision "r2" '
+     '--dry-run'),
+    ("ds-ledger-recompute", ["TASK=go_mf", "MODEL=m1", "CONTROL=m2", "DATA_REVISION=r2", "POOLING=ca"],
+     'python -m downstream.ledger recompute-macro-aupr --task go_mf --model "m1" --control "m2" --data-revision "r2" '
+     '--pooling ca'),
 ])
 def test_dry_run_commands(target, args, expected):
     result = _make("-n", target, *args)
@@ -53,6 +59,7 @@ def test_results_root_is_overridable_by_variable_and_environment():
     ("ds-ledger-add", [], "OUTPUTS_ROOT"),
     ("ds-ledger-annotate", ["STATUS=superseded", "REASON=x"], "SELECT"),
     ("ds-compare", ["A=m1"], "set A and B"),
+    ("ds-ledger-recompute", ["MODEL=m1", "CONTROL=m2"], "DATA_REVISION"),
 ])
 def test_missing_variables_stop_before_python(target, args, message):
     result = _make(target, *args)

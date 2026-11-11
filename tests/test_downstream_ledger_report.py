@@ -223,3 +223,22 @@ def test_std_is_the_sample_std_and_undefined_for_one_seed(tmp_path):
     assert cell["std"] == pytest.approx(0.0141421, abs=1e-6)  # ddof=1; ddof=0 would give 0.010
     single = next(r for r in rows if r["model_key"] == "po" and r["metric"] == "fmax" and r["subset"] == "all")
     assert single["std"] is None and "std tanımsız (n=1)" in single["cell"]
+
+
+# -- S1: a recomputed row (new ingest) stays in the setting of the file it was computed from ----------------
+
+def test_recomputed_row_stays_in_the_same_setting(tmp_path):
+    import uuid
+
+    root = _ingest(tmp_path, lambda outputs: [write_probe(outputs, ec_metrics("md4", s, 0.5, macro=False))
+                                              for s in (0, 1, 2)])
+    templates = [r for r in ledger.read_records(root, "measurements")
+                 if (r["eval_split"], r["subset"], r["metric"]) == ("test", "all", "fmax")]
+    new_ingest = str(uuid.uuid4())
+    ledger.append_records(root, "measurements", [
+        dict(row, metric="macro_aupr", value=0.4, row_id=str(uuid.uuid4()), ingest_id=new_ingest,
+             ingested_utc=ledger.now_utc(), recomputed_from="predictions.npz") for row in templates])
+    sections = ledger_report.sections(ledger_report.load_state(root), "ec")
+    assert len(sections) == 1
+    assert {r["metric"] for r in sections[0]["rows"] if r["subset"] == "all" and r["eval_split"] == "test"} >= {
+        "fmax", "macro_aupr"}

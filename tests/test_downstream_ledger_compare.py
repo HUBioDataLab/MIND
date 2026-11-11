@@ -176,3 +176,24 @@ def test_single_seed_cells_get_no_decision(tmp_path):
     pair = _pair(ledger_compare.compare(_state(tmp_path, build), "A", "B", n_boot=50), "ec", "fmax")
     assert pair["std_a"] is None and pair["ci_low"] is not None
     assert pair["decision"] == "karar yok: tek tohum, probe-tohumu std'si tanımsız"
+
+
+# -- S2: derived_from without a catalog average is an ordinary row (its value is still reproduced) ----------
+
+def test_derived_row_without_catalog_average_is_compared_like_a_plain_row(tmp_path):
+    import uuid
+
+    def build(outputs):
+        for seed in (0, 1, 2):
+            _ec_run(outputs, "A", seed, ec_predictions(np.random.default_rng(seed), quality=0.4), SHA_A)
+            _ec_run(outputs, "B", seed, ec_predictions(np.random.default_rng(seed + 10), quality=0.6), SHA_B)
+    _state(tmp_path, build)
+    root = tmp_path / "results"
+    fmax_rows = [r for r in ledger.read_records(root, "measurements")
+                 if (r["eval_split"], r["subset"], r["metric"]) == ("test", "all", "fmax")]
+    ledger.append_records(root, "measurements", [
+        dict(r, row_id=str(uuid.uuid4()), ingested_utc=ledger.now_utc(), derived_from="predictions.npz@x")
+        for r in fmax_rows])
+    result = ledger_compare.compare(ledger_report.load_state(root), "A", "B", n_boot=50)
+    pair = _pair(result, "ec", "fmax")
+    assert pair["ci_low"] is not None and pair["common_seeds"] == [0, 1, 2]
