@@ -40,7 +40,7 @@ from downstream.common.metrics import (
     accuracy, evaluate, evaluate_multiclass, evaluate_multitask_classification, evaluate_regression,
     multitarget_regression_errors, multitask_roc_auc, protein_fmax, rmse,
 )
-from downstream.common.registry import embeddings_path, new_results_dir
+from downstream.common.registry import embeddings_path, new_results_dir, run_record
 from downstream.tasks import KINDS, TASKS, load_task
 from downstream.tasks.multiclass import split_roles
 
@@ -242,6 +242,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.threads < 1:
         parser.error("--threads must be at least 1")
+    run = run_record()
     torch.set_num_threads(args.threads)
     task = load_task(args.task)
     kind = task.KIND
@@ -335,7 +336,8 @@ def main(argv=None) -> int:
         provenance = {s: json.loads(Path(p).with_suffix(".json").read_text()) for s, (_, _, _, p) in data.items()}
         (out / "config.json").write_text(json.dumps({"args": vars(args) | {"data_root": str(args.data_root),
                                                      "outputs_root": str(args.outputs_root)},
-                                                     "probe": settings, "embeddings": provenance}, indent=1))
+                                                     "probe": settings, "embeddings": provenance, "run": run},
+                                                    indent=1))
         (out / "metrics.json").write_text(json.dumps(metrics, indent=1))
         log_handle.close()
         print(f"seed {seed}: {headline} -> {out}")

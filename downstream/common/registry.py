@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +66,11 @@ def git_commit(repo: Path = REPO_ROOT) -> str:
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(f"cannot read git commit of {repo}: {exc}") from exc
     return f"{sha}+dirty" if dirty else sha
+
+
+def run_record() -> dict:
+    """Commit, start time and command of a running probe / fine-tune, written into its config.json."""
+    return {"git": git_commit(), "started_utc": datetime.now(timezone.utc).isoformat(), "argv": list(sys.argv)}
 
 
 def pretrain_run_dir(group: str, run_name: str, root: Optional[Path] = None) -> Path:

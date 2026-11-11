@@ -1,0 +1,160 @@
+# Results-ledger catalog: which metrics each task must report (no numbers here; numbers live in the
+# results root outside Git). Rule: every metric a reference paper reports for a task is required; a
+# required metric our code does not compute is listed with `code: missing` and shows up as KOD-YOK.
+#
+# metrics:  name -> direction (higher | lower) and unit. `unit: task` takes the task's `target_unit`.
+# tasks:    kind (metrics.json `kind`), required protocols (protocol ids as in the results path, e.g.
+#           mlp_probe or mlp_probe.identity30.joint), summary protocol (the professor page), primary cell,
+#           required cells (eval_split, subset, metric, source) and optional derived averages.
+schema_version: 1
+
+metrics:
+  fmax: {direction: higher, unit: fraction}
+  pair_aupr: {direction: higher, unit: fraction}
+  macro_aupr: {direction: higher, unit: fraction}
+  top1_accuracy: {direction: higher, unit: fraction}
+  accuracy: {direction: higher, unit: fraction}
+  balanced_accuracy: {direction: higher, unit: fraction}
+  rmse: {direction: lower, unit: task}
+  mae: {direction: lower, unit: task}
+  pearson_r: {direction: higher, unit: correlation}
+  spearman_rho: {direction: higher, unit: correlation}
+  roc_auc: {direction: higher, unit: fraction}
+  prc_auc: {direction: higher, unit: fraction}
+  # metrics a paper reports but our code does not compute (KOD-YOK); kept here so units/directions are known
+  coverage: {direction: higher, unit: fraction}
+  ic_binned_macro_aupr: {direction: higher, unit: fraction}
+  weighted_f1: {direction: higher, unit: fraction}
+  # offline pretraining evaluation (core/evaluate_pretrain.py); internal, no literature
+  top1_acc_real: {direction: higher, unit: fraction}
+  top3_acc_real: {direction: higher, unit: fraction}
+  ece_real: {direction: lower, unit: fraction}
+  ce_real: {direction: lower, unit: nats}
+
+tasks:
+  ec:
+    family: protein_function
+    kind: multilabel
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: test, subset: all, metric: fmax}
+    required:
+      - {eval_split: test, subset: all, metric: fmax, source: "GearNet T2; SaProt T2"}
+      - {eval_split: test, subset: cutoff_30, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: cutoff_40, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: cutoff_50, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: cutoff_70, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: cutoff_95, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: all, metric: pair_aupr, source: "GearNet T7"}
+      - {eval_split: test, subset: all, metric: macro_aupr, source: "DeepFRI"}
+      - {eval_split: test, subset: all, metric: coverage, source: "DeepFRI", code: missing}
+  go_mf: &go
+    family: protein_function
+    kind: multilabel
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: test, subset: all, metric: fmax}
+    required:
+      - {eval_split: test, subset: all, metric: fmax, source: "GearNet T2; SaProt T2 (column order MF-BP-CC)"}
+      - {eval_split: test, subset: cutoff_30, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: cutoff_40, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: cutoff_50, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: cutoff_70, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: cutoff_95, metric: fmax, source: "GearNet T6"}
+      - {eval_split: test, subset: all, metric: pair_aupr, source: "GearNet T7"}
+      - {eval_split: test, subset: all, metric: macro_aupr, source: "DeepFRI"}
+      - {eval_split: test, subset: all, metric: ic_binned_macro_aupr, source: "DeepFRI Fig. 3e,f", code: missing}
+  go_bp: *go
+  go_cc: *go
+  fold:
+    family: protein_structure
+    kind: multiclass
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: test_avg, subset: all, metric: accuracy}
+    derived_averages:
+      - {eval_split: test_avg, of: [test_fold, test_superfamily, test_family], metrics: [accuracy, balanced_accuracy]}
+    required:
+      - {eval_split: test_fold, subset: all, metric: accuracy, source: "GearNet T2; ProNet T2"}
+      - {eval_split: test_superfamily, subset: all, metric: accuracy, source: "GearNet T2; ProNet T2"}
+      - {eval_split: test_family, subset: all, metric: accuracy, source: "GearNet T2; ProNet T2"}
+      - {eval_split: test_avg, subset: all, metric: accuracy, source: "GearNet T2 Avg."}
+      - {eval_split: test_fold, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
+      - {eval_split: test_superfamily, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
+      - {eval_split: test_family, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
+      - {eval_split: test_avg, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
+      - {eval_split: test_fold, subset: all, metric: weighted_f1, source: "PEER", code: missing}
+  reaction:
+    family: protein_function
+    kind: multiclass
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: test, subset: all, metric: accuracy}
+    required:
+      - {eval_split: test, subset: all, metric: accuracy, source: "GearNet T2; ProNet T2"}
+      - {eval_split: test, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
+  lba:
+    family: protein_ligand
+    kind: regression
+    target_unit: pK
+    required_protocols: [mlp_probe.identity30.joint, mlp_probe.identity60.joint]
+    summary_protocol: mlp_probe.identity30.joint
+    primary: {eval_split: test, subset: all, metric: rmse}
+    required:
+      - {eval_split: test, subset: all, metric: rmse, source: "ATOM3D T5/T8; ProNet T4"}
+      - {eval_split: test, subset: all, metric: pearson_r, source: "ATOM3D T5/T8; ProNet T4"}
+      - {eval_split: test, subset: all, metric: spearman_rho, source: "ATOM3D T5/T8; ProNet T4"}
+  mn_bbbp: &mn_cls
+    family: molecule_property
+    kind: multilabel_masked
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: test, subset: all, metric: roc_auc}
+    required:
+      - {eval_split: test, subset: all, metric: roc_auc, source: "Uni-Mol T1; MoleculeNet T3"}
+      - {eval_split: test, subset: all, metric: prc_auc, source: "MoleculeNet T3"}
+  mn_bace: *mn_cls
+  mn_clintox: *mn_cls
+  mn_tox21: *mn_cls
+  mn_toxcast: *mn_cls
+  mn_sider: *mn_cls
+  mn_hiv: *mn_cls
+  mn_pcba: *mn_cls
+  mn_muv: *mn_cls
+  mn_esol: &mn_reg_rmse
+    family: molecule_property
+    kind: multitarget_regression
+    target_unit: native
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: test, subset: all, metric: rmse}
+    required:
+      - {eval_split: test, subset: all, metric: rmse, source: "Uni-Mol T2; MoleculeNet T3"}
+      - {eval_split: test, subset: all, metric: mae, source: "MoleculeNet T3"}
+  mn_freesolv: *mn_reg_rmse
+  mn_lipo: *mn_reg_rmse
+  mn_qm7: &mn_reg_mae
+    family: molecule_property
+    kind: multitarget_regression
+    target_unit: native
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: test, subset: all, metric: mae}
+    required:
+      - {eval_split: test, subset: all, metric: mae, source: "Uni-Mol T2; MoleculeNet T3"}
+      - {eval_split: test, subset: all, metric: rmse, source: "MoleculeNet T3"}
+  mn_qm8: *mn_reg_mae
+  pretrain_eval:
+    family: pretraining
+    kind: pretrain_eval
+    required_protocols: [mlm_eval]
+    summary_protocol: mlm_eval
+    primary: {eval_split: test, subset: protein, metric: top1_acc_real}
+    required: []
+  counterfactual:
+    family: diagnostic
+    kind: counterfactual
+    required_protocols: []
+    summary_protocol: null
+    primary: null
+    required: []

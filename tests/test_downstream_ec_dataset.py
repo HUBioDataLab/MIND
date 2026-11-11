@@ -164,3 +164,37 @@ def test_probe_and_report_on_synthetic_embeddings(tmp_path):
     assert len(rows) == 1 and rows[0]["seeds"] == [0, 1] and rows[0]["test_fmax"]["n"] == 2
     markdown = report.to_markdown("ec", rows)
     assert "SaProt" in markdown and "literature, fine-tuned, different protocol" in markdown
+
+
+def test_probe_config_records_its_own_run_commit(tmp_path):
+    """config.json names the probe's own code state (not only the embedding step's), so a result can be traced."""
+    from downstream.common import registry
+
+    data_root = tmp_path / "data"
+    _write_task(data_root)
+    outputs = tmp_path / "outputs"
+    rng = np.random.default_rng(0)
+    chains = {"train": [f"T{i}" for i in range(40)], "valid": [f"V{i}" for i in range(10)], "test": ["3AAA-A", "3AAA-B"]}
+    for split, ids in chains.items():
+        labels = np.zeros((len(ids), 3), dtype=np.uint8)
+        labels[np.arange(len(ids)), np.arange(len(ids)) % 3] = 1
+        path = outputs / "downstream" / "ec" / "toy" / "embeddings" / f"{split}.npz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(path, chains=np.array(ids), labels=labels,
+                 emb_mean_atoms=labels.astype(np.float32) + rng.normal(0, 0.3, labels.shape).astype(np.float32))
+        path.with_suffix(".json").write_text(json.dumps({"split": split, "git": "embed-commit"}))
+    args = ["--task", "ec", "--model-id", "toy", "--head", "linear", "--seeds", "0",
+            "--data-root", str(data_root), "--outputs-root", str(outputs)]
+    assert probe.main(args) == 0
+    config = json.loads((outputs / "downstream" / "ec" / "toy" / "linear_probe.mean_atoms" / "seed0"
+                         / "config.json").read_text())
+    assert config["run"]["git"] == registry.git_commit()
+    assert config["run"]["argv"] and config["run"]["started_utc"].endswith("+00:00")
+    assert config["embeddings"]["test"]["git"] == "embed-commit"  # the embedding record is kept as before
+
+
+def test_run_record_names_commit_time_and_command():
+    from downstream.common import registry
+
+    record = registry.run_record()
+    assert record["git"] == registry.git_commit() and record["argv"] and "T" in record["started_utc"]

@@ -26,6 +26,7 @@ for MIND encoders.
 | probe | `python -m downstream.probe --task <task> --model-id <id> --head linear\|mlp [--pooling P]` | CPU training |
 | fine-tune | `python -m downstream.finetune --task <task> --model <snapshot> [--random-init]` | GPU training |
 | report | `python -m downstream.report --task <task>` | CPU |
+| ledger | `python -m downstream.ledger add --outputs-root DIR`, `downstream.ledger_report report`, `downstream.ledger_compare --a A --b B` | CPU, writes only under `$MIND_RESULTS_ROOT` |
 
 For `lba`, `embed`, `probe` and `finetune` also take `--split-tag identity30|identity60`;
 `embed` and `probe` additionally take `--representation joint|separate`. Each
@@ -200,3 +201,56 @@ Id matching does not detect homologs. `make ds-leakage ...` (see the Makefile he
 - Commands: `make ds-download|ds-validate|ds-process TASK=fold` (same for `reaction`).
 - Leakage: Fold ids are SCOPe domain ids (`scop_domain`, no map to the AFDB UniProt reference, so the tool refuses);
   Reaction ids are `4xi6.A` (`pdb_chain`, needs `--id-map`). See `queries:` in `leakage_references.yaml`.
+
+## Results ledger
+
+`downstream/ledger.py`, `ledger_report.py`, `ledger_compare.py`; the required-metric catalog is
+`downstream/ledger_catalog.yaml` (every metric a reference paper reports for a task; uncomputed ones are marked
+`code: missing` and appear as KOD-YOK).
+
+What goes where: Git holds only the code (the three modules, the catalog, the Make targets and the tests). The ledger
+data and every generated report stay local under `$MIND_RESULTS_ROOT` (no default in Python; the Makefile passes
+`/home/yusuf/mind_results`), as does `literature/literature.csv`; committing the code never commits a result.
+
+Std: ledger reports and comparisons use the sample std over run seeds (ddof=1, undefined for one seed), while
+`downstream.report` (`ds-report`) keeps ddof=0, so the same seeds can show two different std values.
+
+- `ledger/measurements.jsonl`: one row per model x run seed x (eval split, subset, metric), with checkpoint sha256,
+  training card fields (epoch, `selection_rule`), data revision and processed-file sha256, protocol and its settings
+  hash, the probe's own commit (`config.json` `run`; older runs list `run_git` in `missing_provenance`).
+  `models.jsonl`, `annotations.jsonl` (superseded / invalid / caveat / smoke / valid), `ingests.jsonl`.
+- Append-only: `MANIFEST.json` holds each file's line count and sha256; an edit outside the module stops every
+  write and `verify`. Writes hold an exclusive `flock`. Re-ingesting a file (same metrics and config sha256) adds nothing.
+  One model name with two checkpoint hashes is an error.
+- Reports (`reports/`, regenerated): `tasks/<task>.md|csv` (one "Ayar" section per comparable setting: protocol,
+  pooling, data revision and fingerprint, settings hash; superseded rows excluded), `timeline/<task>.md|csv` (all
+  statuses), `ozet_hoca.md` (primary metric per task, counts of required / computed / missing cells),
+  `eksik_hucreler.md|csv` (each missing cell with its category and the command that fills it). Literature comes from
+  `<root>/literature/literature.csv` (local) and is shown in its own column, unit and protocol.
+- `ledger_compare`: cell-by-cell A vs B with probe-seed std, a paired bootstrap interval over `predictions.npz` (chains
+  aligned by id; each seed's predictions must reproduce the ledger value) and the unmeasured pretraining-seed noise
+  stated in a warning box, plus the expected number of chance "differences".
+- Commands: `make ds-ledger-add OUTPUTS_ROOT=<dir> [EVAL_DIRS=...]`, `ds-ledger-annotate`, `ds-ledger-report`,
+  `ds-summary`, `ds-missing`, `ds-compare A=<model> B=<model>`, `ds-ledger-verify`. `ds-report` is unchanged.
+  Report models: `MODELS=...`, else `summary_models` in `<root>/comparisons.yaml`, else `DEFAULT_SUMMARY_MODELS` in
+  `ledger_report.py`; a listed model the ledger has never seen appears as `EKSİK:model-henüz-yok`, never skipped.
+- `make ds-ledger-recompute MODEL=<m> CONTROL=<m2> DATA_REVISION=<rev> [TASK=ec] [DRY_RUN=1]`: adds the macro AUPR a
+  frozen probe did not record (EC/GO), computed from each seed's `predictions.npz` with the probe's own function. It
+  writes nothing unless the metrics files are unchanged since ingestion, fmax and pair AUPR are reproduced exactly,
+  the CONTROL model's recorded macro AUPR is reproduced by the same formula, and no macro AUPR row exists yet. New
+  rows name their source in `recomputed_from` and stay in the "Ayar" section of the file they come from.
+
+## One command per model (`make ds-run`)
+
+`downstream/run_all.py`: `make ds-run MODEL=<snapshot | path/to.ckpt> [NAME=<snapshot>] [TASKS=all|ec,go_mf,...]
+GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp] [PROBE_JOBS=1] [RANDOM_INIT=1] [OUTPUTS_ROOT=<dir>] [PLAN=1] [DETACH=1]`.
+A checkpoint path is first snapshotted as NAME (a NAME that already names another checkpoint, in the snapshot
+store or in the ledger, stops the run). Then one embedding job per task on the GPUs (at most PER_GPU per GPU; splits
+already embedded are skipped), then, after every embedding job has ended, the probes on CPU (SEEDS; seeds already
+done are skipped), `ledger add`, and a table of the primary metric per task and head plus the missing required
+cells. `all` is EC, GO, Fold, LBA (identity30 and identity60, joint) and the 14 MoleculeNet tasks; Reaction only
+when named. A task outside the model's pretraining domains (protein needs `pdb`, MoleculeNet `unimol`) is skipped
+and listed under `all`, refused when named. A failing job is reported with its log and the others continue; the
+run ends with the list of what is missing and exit code 1. `PLAN=1` prints what would run (and recorded embedding
+times of other models, when there are any) and writes nothing. Logs and `summary.md` go to
+`logs/<Month><Year>/ds_run_<model>_<stamp>_<pid>/`; fine-tuning is not part of this command.

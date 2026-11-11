@@ -1,0 +1,597 @@
+"""Embed, probe and ledger every task for one MIND model, then print its final metrics (driver of ``make ds-run``).
+
+    python -m downstream.run_all --model <snapshot | path/to.ckpt> [--name NAME] --tasks all|ec,go_mf,...
+        --gpus 2,3 --heads linear,mlp --per-gpu 3 [--random-init] [--plan]
+
+Steps (fine-tuning is not part of it):
+
+1. A checkpoint path is snapshotted as NAME (``downstream.common.registry.snapshot_model``). NAME already naming
+   another checkpoint (sha256 differs from the snapshot card or from the results ledger) stops everything.
+2. Embeddings (``downstream.embed``), one job per task (LBA: one per required split tag), on the GPUs given,
+   at most ``--per-gpu`` jobs per GPU. Splits that already have an embedding (.npz and .json) are not redone.
+3. When every embedding job has ended: probes (``downstream.probe``, CPU) per task x head, seeds missing only.
+4. ``downstream.ledger add`` of the outputs root into ``$MIND_RESULTS_ROOT``.
+5. One table: the catalog's primary metric for every task x head (a failed or skipped one says why), and the
+   required cells still missing for this model (``ledger_report.missing_cells``).
+
+``all`` = EC, GO-MF/BP/CC, Fold, LBA (the catalog's required split tags, joint representation) and the 14
+MoleculeNet tasks. Reaction has no processed data (9 Nov 2026) and runs only when named. A task whose domain the
+model was not pretrained on (card ``domains``; protein needs ``pdb``, MoleculeNet needs ``unimol``) is skipped and
+listed under ``all`` and refused when named explicitly.
+
+A failing job (non-zero exit, or exit 0 without its output files) is reported with its log and the others go on;
+the run ends with the list of everything missing and exit code 1. Jobs have no timeout; a status line with each
+running PID, its age and its log's size and last write is printed every ``--status-every`` seconds.
+
+Logs: ``<log root>/ds_run_<model>_<stamp>_<pid>/<kind>_<task>_<model>_<YYYYMMDD_HHMMSS_mmm>_<child pid>.log``
+(kind ``embed`` / ``probe_linear`` / ``probe_mlp``), next to ``summary.md`` and ``missing.csv``; ``make ds-embed`` and
+``ds-probe`` logs are unchanged.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import subprocess
+import sys
+import time
+from collections import Counter, deque
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+from downstream import ledger, ledger_report
+from downstream.common import registry
+from downstream.tasks import MOLNET_TASKS, TASKS, load_task
+
+HEADS = ("linear", "mlp")  # downstream.common.heads.HEADS (not imported: it pulls torch into the plan step)
+ALL_TASKS = ("ec", "go_mf", "go_bp", "go_cc", "fold", "lba") + MOLNET_TASKS
+# Pretraining domains (card "domains", the enabled multi_domain datasets) a task's input needs. The LBA joint graph
+# is a protein graph (ligand atoms with pos_code sm), as for the protein-only results of October.
+MODALITY_DOMAINS = {"protein": ("pdb",), "complex": ("pdb",), "small_molecule": ("unimol",)}
+HF_PREFIXES = ("esm2_", "saprot_")
+
+
+class PlanError(RuntimeError):
+    """The run cannot start (bad arguments, model identity conflict, explicitly named task that cannot run)."""
+
+
+@dataclass(frozen=True)
+class Unit:
+    """One embedding set: a task, plus LBA's split tag and representation."""
+
+    task: str
+    split_tag: Optional[str] = None
+    representation: Optional[str] = None
+
+    @property
+    def key(self) -> str:
+        return ".".join(part for part in (self.task, self.split_tag, self.representation) if part)
+
+    @property
+    def prefix(self) -> str:
+        return f"{self.split_tag}.{self.representation}." if self.split_tag else ""
+
+    def protocol(self, head: str) -> str:
+        return f"{head}_probe" + (f".{self.split_tag}.{self.representation}" if self.split_tag else "")
+
+    def cli(self) -> list:
+        return ["--split-tag", self.split_tag, "--representation", self.representation] if self.split_tag else []
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Plan
+# ---------------------------------------------------------------------------------------------------------
+
+def expand_tasks(text: str, catalog: dict) -> tuple[list, bool]:
+    """Units for ``all`` or a comma list, and whether the tasks were named explicitly."""
+    explicit = text.strip() != "all"
+    names = list(ALL_TASKS) if not explicit else [t.strip() for t in text.split(",") if t.strip()]
+    unknown = [t for t in names if t not in TASKS]
+    if unknown or not names:
+        raise PlanError(f"unknown task(s) {unknown or names}; choose 'all' or a comma list of {', '.join(TASKS)}")
+    units = []
+    for name in dict.fromkeys(names):
+        if name == "lba":
+            for protocol in catalog["tasks"]["lba"]["required_protocols"]:
+                _, split_tag, representation = protocol.split(".")
+                units.append(Unit("lba", split_tag, representation))
+        else:
+            units.append(Unit(name))
+    return units, explicit
+
+
+def describe_task(unit: Unit) -> dict:
+    """Modality, split names, probe pooling and processed split files of one unit (reads task.yaml only)."""
+    task = load_task(unit.task)
+    config = task.load_task_config(task.TASK_YAML)
+    directory = task.processed_dir(config, unit.split_tag) if unit.task == "lba" else task.processed_dir(config)
+    splits = list(config["splits"])
+    return {"modality": config["modality"], "splits": splits, "pooling": config["probe"]["pooling"],
+            "processed": {split: Path(directory) / f"{split}.pt" for split in splits}}
+
+
+def _sha256_stable(path: Path) -> str:
+    before = path.stat()
+    sha = registry.sha256_file(path)
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise PlanError(f"{path} changed while hashing (a live run rewriting it?); try again when it is stable")
+    return sha
+
+
+@dataclass
+class ModelPlan:
+    name: str
+    model_id: str
+    sha256: str
+    domains: list
+    action: str  # "snapshot exists" | "create snapshot" | "snapshot exists (same checkpoint)"
+    ckpt: Optional[Path] = None
+    epoch: Optional[int] = None
+    notes: list = field(default_factory=list)
+
+
+def resolve_model(model: str, name: Optional[str], *, random_init: bool, outputs_root: Path,
+                  results_root: Optional[Path]) -> ModelPlan:
+    """Snapshot to use (or to create) for ``model``; every identity conflict is a ``PlanError``."""
+    if model.startswith(HF_PREFIXES):
+        raise PlanError(f"{model!r} is an HF baseline; ds-run drives MIND models only (use make ds-embed / ds-probe)")
+    is_path = model.endswith(".ckpt") or os.sep in model
+    if is_path:
+        ckpt = Path(model).resolve()
+        if not name:
+            raise PlanError("a checkpoint path needs NAME (the snapshot name the results are recorded under)")
+        if not ckpt.is_file():
+            raise PlanError(f"checkpoint not found: {ckpt}")
+        sha = _sha256_stable(ckpt)
+        try:
+            registry._check_name("snapshot name", name)
+        except ValueError as exc:
+            raise PlanError(str(exc)) from exc
+        card_path = outputs_root / "models" / name / "card.json"
+        if card_path.is_file():
+            card = json.loads(card_path.read_text())
+            if card["sha256"] != sha:
+                raise PlanError(f"snapshot {name!r} ({card_path}) is checkpoint sha256 {card['sha256']}, but {ckpt} is "
+                                f"{sha}; one name must name one checkpoint: choose another NAME")
+            plan = ModelPlan(name, name, sha, list(card.get("domains") or []), "snapshot exists (same checkpoint)",
+                             ckpt, card.get("epoch"))
+        elif (outputs_root / "models" / name).exists():
+            raise PlanError(f"{outputs_root / 'models' / name} exists without a card.json; inspect it by hand")
+        else:
+            summary = registry._checkpoint_summary(ckpt)
+            plan = ModelPlan(name, name, sha, summary["domains"], "create snapshot", ckpt, summary["epoch"])
+            hiding = (summary["hparams"] or {}).get("unimol_masked_geometry_hiding")
+            plan.notes.append(f"unimol_masked_geometry_hiding = {hiding}")
+    else:
+        if name and name != model:
+            raise PlanError(f"NAME={name} is only for a checkpoint path; MODEL={model} is already a snapshot name")
+        try:
+            resolved = registry.resolve_model(model, root=outputs_root)
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            raise PlanError(f"MODEL={model}: {exc}") from exc
+        card = resolved.card
+        plan = ModelPlan(resolved.model_id, resolved.model_id, card["sha256"], list(card.get("domains") or []),
+                         "snapshot exists", None, card.get("epoch"))
+        if resolved.model_id != model:
+            plan.notes.append(f"alias {model} -> {resolved.model_id}")
+    if not plan.domains:
+        raise PlanError(f"snapshot {plan.name}: no pretraining domains in its card; the domain check cannot run")
+    if results_root is not None and ledger.ledger_dir(results_root).exists():
+        for row in ledger.read_records(results_root, "models") + ledger.read_records(results_root, "measurements"):
+            key = row["model_key"]
+            if key in (plan.name, plan.name + registry.RANDOM_INIT_SUFFIX):
+                sha = row.get("sha256", row.get("model_sha256"))
+                if sha != plan.sha256:
+                    raise PlanError(f"the results ledger has {key!r} with checkpoint sha256 {sha}, not {plan.sha256}; "
+                                    "one name must name one checkpoint")
+    if random_init:
+        plan.model_id = plan.name + registry.RANDOM_INIT_SUFFIX
+    return plan
+
+
+def _known_timings(unit: Unit, splits: list, outputs_root: Path, model_id: str) -> list:
+    """Recorded embedding seconds of other models for the same task (the ``seconds`` field of embed.py)."""
+    found = []
+    for directory in sorted((outputs_root / "downstream" / unit.task).glob("*/embeddings")):
+        if directory.parent.name == model_id:
+            continue
+        total, used = 0.0, []
+        for split in splits:
+            path = directory / f"{unit.prefix}{split}.json"
+            if path.is_file():
+                record = json.loads(path.read_text())
+                if isinstance(record.get("seconds"), (int, float)):
+                    total += record["seconds"]
+                    used.append(split)
+        if used:
+            found.append(f"{directory.parent.name}: {total:.1f} s over {'/'.join(used)} (embed.py 'seconds'; {directory})")
+    return found[:2]
+
+
+def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, seeds: list, outputs_root: Path,
+               describe: Callable[[Unit], dict] = None) -> dict:
+    """What runs, what is skipped and what already cannot run, per unit and head."""
+    describe = describe or describe_task
+    plan = {"embed": [], "embed_done": [], "probe": [], "probe_done": [], "domain_skips": [], "failed": [],
+            "notes": [], "timings": {}, "units": [], "info": {}}
+    for unit in units:
+        try:
+            info = describe(unit)
+        except Exception as exc:  # noqa: BLE001 - any config error is reported for this unit, the others go on
+            plan["failed"].append((f"config {unit.key}", f"task config unreadable: {type(exc).__name__}: {exc}"))
+            continue
+        plan["info"][unit] = info
+        needed = MODALITY_DOMAINS.get(info["modality"])
+        if needed is None:
+            raise PlanError(f"{unit.key}: modality {info['modality']!r} has no domain rule in MODALITY_DOMAINS")
+        lacking = [d for d in needed if d not in model.domains]
+        if lacking:
+            reason = (f"alan uyumsuz: görev modality={info['modality']} {lacking} ister, model {model.name} "
+                      f"domains={model.domains}")
+            if explicit:
+                raise PlanError(f"{unit.key}: {reason}. Run it on purpose with make ds-embed / ds-probe.")
+            plan["domain_skips"].append((unit, reason))
+            continue
+        if info["modality"] == "complex" and not {"unimol", "metabolite"} & set(model.domains):
+            plan["notes"].append(f"{unit.key}: ligand atoms, but {model.name} saw no small-molecule domain")
+        plan["units"].append(unit)
+        missing, broken = [], []
+        for split in info["splits"]:
+            npz = registry.embeddings_path(unit.task, model.model_id, unit.prefix + split, root=outputs_root)
+            if npz.with_suffix(".json").is_file() and npz.is_file():
+                continue
+            if npz.is_file() or npz.with_suffix(".json").is_file():
+                broken.append(str(npz))
+            missing.append(split)
+        no_data = [str(info["processed"][s]) for s in missing if not info["processed"][s].is_file()]
+        if broken:
+            reason = (f"half-written embedding {broken} (.npz without .json or the reverse: an embed still running "
+                      "or one that crashed); inspect it by hand")
+            plan["failed"].append((f"embed {unit.key}", reason))
+        elif no_data:
+            plan["failed"].append((f"embed {unit.key}", f"no processed data: {no_data}"))
+        elif missing:
+            plan["embed"].append((unit, missing))
+            plan["timings"][unit] = _known_timings(unit, missing, outputs_root, model.model_id)
+        else:
+            plan["embed_done"].append(unit)
+        for head in heads:
+            done = [s for s in seeds if (registry.results_dir(unit.task, model.model_id, unit.protocol(head), s,
+                                                              pooling=info["pooling"], root=outputs_root)
+                                         / "metrics.json").is_file()]
+            todo = [s for s in seeds if s not in done]
+            if todo:
+                plan["probe"].append((unit, head, todo))
+            else:
+                plan["probe_done"].append((unit, head))
+    return plan
+
+
+def plan_text(model: ModelPlan, plan: dict, *, outputs_root: Path, results_root: Optional[Path], gpus: list,
+              per_gpu: int, probe_jobs: int, heads: list, seeds: list) -> str:
+    lines = [f"Model: {model.name} (model_id {model.model_id}), sha256 {model.sha256}, epoch {model.epoch}, "
+             f"domains {model.domains}; {model.action}" + (f" from {model.ckpt}" if model.ckpt else "")]
+    lines += [f"  not: {note}" for note in model.notes]
+    lines += [f"Outputs root: {outputs_root}", f"Results ledger: {results_root}",
+              f"GPU: {','.join(gpus) or '-'} x {per_gpu} jobs per GPU; probes: {probe_jobs} at a time on CPU; "
+              f"heads {','.join(heads)}; seeds {' '.join(map(str, seeds))}", "",
+              f"1. Embed ({len(plan['embed'])} jobs):"]
+    for unit, splits in plan["embed"]:
+        lines.append(f"   ÇALIŞACAK  embed {unit.key}: splits {' '.join(splits)}")
+        known = plan["timings"].get(unit)
+        lines += [f"     bilinen ölçüm: {entry}" for entry in known] if known else [
+            "     bilinen ölçüm: yok (bu görev için kayıtlı embed süresi bulunamadı)"]
+    lines += [f"   ATLANACAK  embed {unit.key}: zaten tamam" for unit in plan["embed_done"]]
+    lines.append(f"2. Probe ({len(plan['probe'])} jobs, after every embed has ended; süre ölçümü kayıtlı değil):")
+    lines += [f"   ÇALIŞACAK  probe {unit.key} {head}: seeds {' '.join(map(str, todo))}"
+              for unit, head, todo in plan["probe"]]
+    lines += [f"   ATLANACAK  probe {unit.key} {head}: zaten tamam" for unit, head in plan["probe_done"]]
+    lines += ["3. ledger add (outputs root -> results ledger)", "4. summary table + missing required cells"]
+    if plan["domain_skips"]:
+        lines += ["", "Atlanan görevler (alan uyumsuz):"] + [f"   ATLANDI  {u.key}: {r}" for u, r in plan["domain_skips"]]
+    if plan["notes"]:
+        lines += ["", "Notlar:"] + [f"   {note}" for note in plan["notes"]]
+    if plan["failed"]:
+        lines += ["", f"Koşulamayacak ({len(plan['failed'])}):"] + [f"   HATA  {label}: {reason}"
+                                                                     for label, reason in plan["failed"]]
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Execution
+# ---------------------------------------------------------------------------------------------------------
+
+def _stamp() -> str:
+    now = datetime.now()
+    return now.strftime("%Y%m%d_%H%M%S_") + f"{now.microsecond // 1000:03d}"
+
+
+@dataclass
+class Job:
+    kind: str  # embed | probe_linear | probe_mlp
+    unit: Unit
+    argv: Callable[[str], list]  # slot -> argv
+    env: Callable[[str], dict]  # slot -> extra environment
+    check: Callable[[], Optional[str]]  # None when the expected outputs exist
+    head: Optional[str] = None
+
+    @property
+    def label(self) -> str:
+        return f"{self.kind} {self.unit.key}"
+
+
+class Runner:
+    """Runs jobs on slots (one slot = one concurrent job on one GPU or on the CPU), waits for all, no timeout."""
+
+    def __init__(self, run_dir: Path, model_id: str, *, status_every: float, poll: float, out=print):
+        self.run_dir, self.model_id, self.status_every, self.poll, self.out = run_dir, model_id, status_every, poll, out
+        self.counter = 0
+
+    def _launch(self, job: Job, slot: str):
+        stamp = _stamp()
+        self.counter += 1
+        starting = self.run_dir / f".starting_{os.getpid()}_{self.counter}.log"
+        handle = open(starting, "x")
+        try:
+            process = subprocess.Popen(job.argv(slot), stdout=handle, stderr=subprocess.STDOUT,
+                                       env={**os.environ, **job.env(slot)}, cwd=registry.REPO_ROOT)
+        except OSError:
+            handle.close()
+            starting.unlink()
+            raise
+        handle.close()  # the child keeps its own descriptor
+        log = self.run_dir / f"{job.kind}_{job.unit.key}_{self.model_id}_{stamp}_{process.pid}.log"
+        try:
+            os.link(starting, log)  # never replaces an existing log
+        except FileExistsError:
+            process.kill()
+            raise
+        starting.unlink()
+        self.out(f"[{datetime.now():%H:%M:%S}] BAŞLADI {job.label} ({slot}) pid {process.pid} log {log}")
+        return process, log, time.monotonic()
+
+    def _status(self, running: dict, pending: int, finished: int, failed: int) -> None:
+        parts = []
+        now = time.time()
+        for slot, (job, process, log, started) in running.values():
+            stat = log.stat()
+            parts.append(f"{job.label} ({slot}) pid {process.pid} {int(time.monotonic() - started)} s, log "
+                         f"{stat.st_size} B, son yazma {int(now - stat.st_mtime)} s önce")
+        self.out(f"[{datetime.now():%H:%M:%S}] durum: koşan {len(running)}, bekleyen {pending}, biten {finished}, "
+                 f"hatalı {failed}" + "".join(f"\n    {p}" for p in parts))
+
+    def run(self, jobs: List[Job], slots: List[str]) -> Dict[int, tuple]:
+        """``{job index: (ok, reason, log)}``; every job runs even when others fail."""
+        pending = deque(enumerate(jobs))
+        free = list(range(len(slots)))
+        running, results = {}, {}
+        last_status = time.monotonic()
+        while pending or running:
+            while pending and free:
+                index, job = pending.popleft()
+                slot_index = free.pop(0)
+                process, log, started = self._launch(job, slots[slot_index])
+                running[index] = (slot_index, (job, process, log, started))
+            for index in list(running):
+                slot_index, (job, process, log, started) = running[index]
+                code = process.poll()
+                if code is None:
+                    continue
+                del running[index]
+                free.append(slot_index)
+                free.sort()
+                if code != 0:
+                    tail = _tail(log)
+                    reason = f"exit code {code}; log {log}" + (f"; last line: {tail}" if tail else "")
+                else:
+                    problem = job.check()
+                    reason = None if problem is None else f"exit code 0 but {problem}; log {log}"
+                results[index] = (reason is None, reason, log)
+                self.out(f"[{datetime.now():%H:%M:%S}] {'BİTTİ' if reason is None else 'HATA'} {job.label} pid "
+                         f"{process.pid} ({int(time.monotonic() - started)} s)" + (f": {reason}" if reason else ""))
+            if running and time.monotonic() - last_status >= self.status_every:
+                view = {i: (slots[s], rest) for i, (s, rest) in running.items()}
+                self._status(view, len(pending), sum(r[0] for r in results.values()),
+                             sum(not r[0] for r in results.values()))
+                last_status = time.monotonic()
+            if pending or running:
+                time.sleep(self.poll)
+        return results
+
+
+def _tail(path: Path) -> str:
+    try:
+        lines = [line.strip() for line in path.read_text(errors="replace").splitlines() if line.strip()]
+    except OSError as exc:
+        return f"(log unreadable: {exc})"
+    return lines[-1][:300] if lines else ""
+
+
+def default_commands() -> dict:
+    python = [sys.executable, "-u", "-m"]
+    return {"embed": python + ["downstream.embed"], "probe": python + ["downstream.probe"],
+            "ledger": python + ["downstream.ledger"]}
+
+
+def _thread_env(threads: int) -> dict:
+    return {name: str(threads) for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}
+
+
+def build_jobs(plan: dict, model: ModelPlan, *, commands: dict, outputs_root: Path, threads: int,
+               random_init: bool) -> tuple[list, list]:
+    embed_jobs, probe_jobs = [], []
+    common = ["--threads", str(threads), "--outputs-root", str(outputs_root)]
+    for unit, splits in plan["embed"]:
+        def argv(slot, unit=unit, splits=splits):
+            return (commands["embed"] + common + ["--task", unit.task, "--model", model.name, "--device", "cuda:0"]
+                    + (["--random-init"] if random_init else []) + unit.cli() + ["--splits", *splits])
+
+        def check(unit=unit, splits=splits):
+            absent = [str(p) for s in splits for p in (registry.embeddings_path(unit.task, model.model_id,
+                                                                                unit.prefix + s, root=outputs_root),)
+                      if not (p.is_file() and p.with_suffix(".json").is_file())]
+            return f"embedding files missing: {absent}" if absent else None
+        embed_jobs.append(Job("embed", unit, argv, lambda slot: {"CUDA_VISIBLE_DEVICES": slot, **_thread_env(threads)},
+                              check))
+    for unit, head, seeds in plan["probe"]:
+        pooling = plan["info"][unit]["pooling"]
+
+        def argv(slot, unit=unit, head=head, seeds=seeds):
+            return (commands["probe"] + common + ["--task", unit.task, "--model-id", model.model_id, "--head", head,
+                                                  "--seeds", *map(str, seeds)] + unit.cli())
+
+        def check(unit=unit, head=head, seeds=seeds, pooling=pooling):
+            absent = [s for s in seeds if not (registry.results_dir(unit.task, model.model_id, unit.protocol(head), s,
+                                                                    pooling=pooling, root=outputs_root)
+                                               / "metrics.json").is_file()]
+            return f"metrics.json missing for seeds {absent}" if absent else None
+        probe_jobs.append(Job(f"probe_{head}", unit, argv, lambda slot: {"CUDA_VISIBLE_DEVICES": "",
+                                                                         **_thread_env(threads)}, check, head))
+    return embed_jobs, probe_jobs
+
+
+def summary(results_root: Path, model: ModelPlan, plan: dict, heads: list, failures: list) -> tuple[str, list]:
+    """Markdown table of the primary metric per unit x head, plus the missing required cells of this model."""
+    state = ledger_report.load_state(results_root)
+    catalog = state["catalog"]
+    failed_units = {}
+    for label, reason in failures:
+        kind, _, key = label.partition(" ")
+        failed_units.setdefault(key, []).append((kind, f"{kind}: {reason}"))
+    lines = [f"# ds-run: {model.model_id}", "", f"Defter: {results_root} (measurements sha256 "
+             f"{state['header']['measurements_sha256']}); hücre = ort ± std (ddof={ledger_report.STD_DDOF}) tohumlar "
+             "üzerinde.", "", "| görev | protokol | birincil metrik | değer |", "|---|---|---|---|"]
+    for unit in plan["units"]:
+        spec = catalog["tasks"][unit.task]
+        primary = spec["primary"]
+        for head in heads:
+            protocol = unit.protocol(head)
+            found = ledger_report.lookup(state, unit.task, model.model_id, protocol, primary)
+            text = found["text"]
+            problems = [text for kind, text in failed_units.get(unit.key, []) if kind in ("embed", f"probe_{head}")]
+            if problems and not found["filled"]:
+                text = "HATA: " + " | ".join(problems)
+            lines.append(f"| {unit.key} | {protocol} | {primary['metric']} ({primary['eval_split']}/{primary['subset']}) "
+                         f"| {text} |")
+    for unit, reason in plan["domain_skips"]:
+        lines.append(f"| {unit.key} | - | - | ATLANDI: {reason} |")
+    tasks = sorted({unit.task for unit in plan["units"]})
+    missing = ledger_report.missing_cells(state, [model.model_id], tasks) if tasks else []
+    counts = Counter(entry["category"] for entry in missing)
+    lines += ["", f"## Eksik zorunlu hücreler ({len(missing)})", "",
+              "Kategori: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "yok"), ""]
+    lines += [f"- {e['task']} / {e['protocol_id']} / {e['eval_split']} / {e['subset']} / {e['metric']}: {e['category']}"
+              for e in missing]
+    return "\n".join(lines) + "\n", missing
+
+
+def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Callable] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--model", required=True, help="snapshot name/alias, or a .ckpt path (then --name)")
+    parser.add_argument("--name", default=None, help="snapshot name for a checkpoint path")
+    parser.add_argument("--tasks", default="all", help="'all' or a comma list (lba = its required split tags)")
+    parser.add_argument("--gpus", default="", help="comma list of GPU indices for the embeddings, e.g. 2,3")
+    parser.add_argument("--per-gpu", type=int, default=1, help="concurrent embedding jobs per GPU")
+    parser.add_argument("--heads", default="linear,mlp")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    parser.add_argument("--probe-jobs", type=int, default=1, help="concurrent probe jobs (CPU)")
+    parser.add_argument("--threads", type=int, default=8, help="CPU threads of every child process")
+    parser.add_argument("--random-init", action="store_true")
+    parser.add_argument("--outputs-root", type=Path, default=None, help="default: $MIND_OUTPUTS_ROOT or <repo>/outputs")
+    parser.add_argument("--results-root", type=Path, default=None, help=f"default: ${ledger.ENV_VAR}")
+    parser.add_argument("--log-root", type=Path, default=Path("logs") / datetime.now().strftime("%B%Y"))
+    parser.add_argument("--plan", action="store_true", help="print what would run and stop (writes nothing)")
+    parser.add_argument("--status-every", type=float, default=300.0, help="seconds between status lines")
+    parser.add_argument("--poll", type=float, default=5.0, help="seconds between process checks")
+    args = parser.parse_args(argv)
+    commands = commands or default_commands()
+    try:
+        heads = [h.strip() for h in args.heads.split(",") if h.strip()]
+        if not heads or any(h not in HEADS for h in heads):
+            raise PlanError(f"HEADS={args.heads}: choose from {HEADS}")
+        if args.per_gpu < 1 or args.probe_jobs < 1 or args.threads < 1:
+            raise PlanError("--per-gpu, --probe-jobs and --threads must be at least 1")
+        gpus = [g.strip() for g in args.gpus.split(",") if g.strip()]
+        outputs_root = registry.outputs_root(args.outputs_root).resolve()
+        results_root = ledger.results_root(args.results_root)
+        catalog = ledger.load_catalog()
+        units, explicit = expand_tasks(args.tasks, catalog)
+        model = resolve_model(args.model, args.name, random_init=args.random_init, outputs_root=outputs_root,
+                              results_root=results_root)
+        plan = plan_units(units, explicit, model, heads=heads, seeds=args.seeds, outputs_root=outputs_root,
+                          describe=describe)
+        if plan["embed"] and (not gpus or not all(g.isdigit() for g in gpus)):
+            raise PlanError(f"{len(plan['embed'])} embedding job(s) to run but GPU={args.gpus!r}: give GPU indices "
+                            "like GPU=2,3 (ds-run does not pick GPUs itself)")
+    except (PlanError, ledger.LedgerError) as exc:
+        print(f"HATA: {exc}", file=sys.stderr)
+        return 2
+    text = plan_text(model, plan, outputs_root=outputs_root, results_root=results_root, gpus=gpus,
+                     per_gpu=args.per_gpu, probe_jobs=args.probe_jobs, heads=heads, seeds=args.seeds)
+    print(text, flush=True)
+    if args.plan:
+        print("PLAN: hiçbir şey koşulmadı, hiçbir dosya yazılmadı.")
+        return 1 if plan["failed"] else 0
+
+    run_dir = Path(args.log_root) / f"ds_run_{model.model_id}_{_stamp()}_{os.getpid()}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    (run_dir / "plan.txt").write_text(text)
+    print(f"Run directory: {run_dir.resolve()}", flush=True)
+    failures = list(plan["failed"])
+    if model.action == "create snapshot":
+        destination = registry.snapshot_model(model.ckpt, model.name, root=outputs_root)
+        card = json.loads((destination / "card.json").read_text())
+        if card["sha256"] != model.sha256:
+            raise RuntimeError(f"snapshot {destination} has sha256 {card['sha256']}, the plan hashed {model.sha256}")
+        print(f"snapshot: {destination}", flush=True)
+    embed_jobs, probe_jobs = build_jobs(plan, model, commands=commands, outputs_root=outputs_root,
+                                        threads=args.threads, random_init=args.random_init)
+    runner = Runner(run_dir, model.model_id, status_every=args.status_every, poll=args.poll,
+                    out=lambda message: print(message, flush=True))
+    embed_failed = set()
+    slots = [g for _ in range(args.per_gpu) for g in gpus]  # interleaved: jobs spread over the GPUs first
+    for index, (ok, reason, _) in runner.run(embed_jobs, slots).items():
+        if not ok:
+            failures.append((embed_jobs[index].label, reason))
+            embed_failed.add(embed_jobs[index].unit)
+    failed_before = {label.partition(" ")[2] for label, _ in plan["failed"]}
+    runnable = []
+    for job in probe_jobs:
+        if job.unit in embed_failed or job.unit.key in failed_before:
+            failures.append((f"{job.kind} {job.unit.key}", "not run: the embedding of this task failed"))
+        else:
+            runnable.append(job)
+    for index, (ok, reason, _) in runner.run(runnable, [f"cpu{i}" for i in range(args.probe_jobs)]).items():
+        if not ok:
+            failures.append((runnable[index].label, reason))
+    add = Job("ledger_add", Unit("all"), lambda slot: commands["ledger"] + ["--results-root", str(results_root), "add",
+                                                                            "--outputs-root", str(outputs_root)],
+              lambda slot: {"CUDA_VISIBLE_DEVICES": ""}, lambda: None)
+    (ok, reason, _), = runner.run([add], ["cpu0"]).values()
+    if not ok:
+        failures.append(("ledger_add all", reason))
+    try:
+        table, missing = summary(results_root, model, plan, heads, failures)
+    except Exception as exc:  # noqa: BLE001 - the summary failing must not hide the job failures listed below
+        table, missing = f"Özet tablo üretilemedi: {type(exc).__name__}: {exc}\n", []
+        failures.append(("summary all", str(exc)))
+    if failures:
+        table += f"\n## EKSİK: {len(failures)} iş başarısız ya da koşulamadı\n\n" + "".join(
+            f"- {label}: {reason}\n" for label, reason in failures)
+    (run_dir / "summary.md").write_text(table)
+    with open(run_dir / "missing.csv", "w", newline="") as handle:
+        if missing:
+            writer = csv.DictWriter(handle, fieldnames=list(missing[0]), lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(missing)
+    print("\n" + table + f"\n(özet: {run_dir.resolve() / 'summary.md'})", flush=True)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
