@@ -3,7 +3,7 @@
 # ===================================================================
 # Usage:
 #   make train GPU=6 CONFIG=m                  # four-domain run, default log
-#   make train GPU=6 CONFIG=f                  # fast test (~10 min)
+#   make train GPU=6 CONFIG=f                  # fast test
 #   make train GPU=6 CONFIG=m LOG=my_run       # custom log name
 #   make train GPU=auto CONFIG=f               # auto-pick least used GPU
 #
@@ -114,9 +114,18 @@ test-unit:
 
 # Natural batch plan of the first PLAN_EPOCHS epochs from chunk metadata (CPU, reads only);
 # fails when a fixed epoch_num_batches would be exceeded. Run it before a long run.
+# The full output goes to logs/<MonthYear>/check_epoch_plan_*.log; the terminal gets the
+# PLAN_SUMMARY line and the log path (plus the log tail on failure).
 check-epoch-plan:
+	@mkdir -p $(LOG_MONTH_DIR); \
+	plan_log=$(LOG_MONTH_DIR)/check_epoch_plan_$(CONFIG_TAG)_$(_LOG_DATETIME).log; \
 	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" WANDB_MODE=disabled nice -n 19 python -m core.check_epoch_plan \
-		--config-yaml-path $(CONFIG_FILE) --epochs $(PLAN_EPOCHS) $(TRAIN_SEED_ARGS)
+		--config-yaml-path $(CONFIG_FILE) --epochs $(PLAN_EPOCHS) $(TRAIN_SEED_ARGS) > $$plan_log 2>&1; \
+	rc=$$?; \
+	grep -E '^PLAN_SUMMARY: ' $$plan_log; \
+	if [ $$rc -ne 0 ]; then tail -n 20 $$plan_log >&2; fi; \
+	echo "log: $$plan_log"; \
+	exit $$rc
 
 train:
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then \
