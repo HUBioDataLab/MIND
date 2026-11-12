@@ -860,6 +860,17 @@ def create_experiment_logger(
     return logger
 
 
+def describe_unimol_geometry_hiding(config: PretrainingConfig) -> str:
+    """One startup line for G1 (unimol_masked_geometry_hiding); the model treats a missing key as disabled."""
+    hiding = getattr(config, "unimol_masked_geometry_hiding", None) or {}
+    if not hiding.get("enabled", False):
+        return "G1 masked-geometry hiding: DISABLED"
+    return (
+        "G1 masked-geometry hiding: ENABLED "
+        f"(bond_threshold_angstrom={hiding['bond_threshold_angstrom']})"
+    )
+
+
 def train_universal_pretraining(
     config: PretrainingConfig,
     dataset_name: str,
@@ -889,6 +900,7 @@ def train_universal_pretraining(
             block_ratio = getattr(config, 'rna_block_mlm_ratio', 0.15)
             print(f"✅ RNA Block-MLM ENABLED — nucleotide-level mask "
                   f"(ratio={block_ratio}); non-enabled domains stay atom-level.")
+    print(describe_unimol_geometry_hiding(config))
     print("=" * 60)
 
     # Set random seed
