@@ -518,6 +518,17 @@ def _random_split_sizes(total_samples: int) -> list:
     return [train_size, val_size, test_size]
 
 
+def _require_train_and_val(subsets) -> None:
+    """Training needs a train split, and the checkpoint monitor needs a val split."""
+    if not len(subsets[0]):
+        raise ValueError("training split is empty")
+    if not len(subsets[1]):
+        raise ValueError(
+            "validation split is empty: the checkpoint monitor needs validation data; "
+            "tag a chunk as val or use more samples"
+        )
+
+
 def split_dataset(dataset, seed: int):
     """Return train/val/test subsets.
 
@@ -532,7 +543,9 @@ def split_dataset(dataset, seed: int):
         sizes = _random_split_sizes(len(dataset))
         print(f"📊 Total samples: {len(dataset)}, Splitting into: Train={sizes[0]}, Val={sizes[1]}, Test={sizes[2]}")
         # Use random_split to avoid materializing slices into memory
-        return tuple(random_split(dataset, sizes, generator=torch.Generator().manual_seed(seed)))
+        subsets = tuple(random_split(dataset, sizes, generator=torch.Generator().manual_seed(seed)))
+        _require_train_and_val(subsets)
+        return subsets
 
     fixed = {split: [] for split in SPLIT_NAMES}
     pooled = []
@@ -567,8 +580,7 @@ def split_dataset(dataset, seed: int):
                 dtype = dataset.sample_metadata_index[index]['dataset_type']
                 counts[dtype] = counts.get(dtype, 0) + 1
             print(f"   {split}: {counts}")
-    if not len(subsets[0]):
-        raise ValueError("training split is empty")
+    _require_train_and_val(subsets)
     return tuple(subsets)
 
 
