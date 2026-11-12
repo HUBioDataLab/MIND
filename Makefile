@@ -301,7 +301,8 @@ DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
 # Long ds-* jobs (ds-probe, ds-run) run in their own session (setsid + nohup, no terminal): closing the SSH/terminal
 # connection does not stop them. $(1) = log, $(2) = command; the log ends with EXIT_CODE=<n> of the command
 # (non-zero when the Python step fails, as pipefail gave in the foreground). FOREGROUND=1 = the old foreground run.
-DS_DETACH = log=$(1); echo "Log: $$log   (arka planda, bağlantı kesilse de sürer; bitince son satır EXIT_CODE=<n>; make ds-status)"; \
+# The terminal prints only the log path; follow the job with `make ds-status`.
+DS_DETACH = log=$(1); echo "Log: $$log"; \
 	setsid nohup bash -c '$(2); code=$$?; echo "EXIT_CODE=$$code"; exit $$code' > $$log 2>&1 < /dev/null &
 DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
 # Fine-tune overrides: a random-init encoder needs a far larger LR than a pretrained one.
