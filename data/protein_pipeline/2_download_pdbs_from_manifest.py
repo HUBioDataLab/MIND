@@ -84,16 +84,13 @@ def parallel_download_from_manifest(
     max_workers: int = 8
 ) -> Dict[str, int]:
     """Download structures from manifest CSV in parallel."""
-    try:
-        df = pd.read_csv(manifest_csv)
-    except Exception as e:
-        print(f"ERROR: Failed to read manifest file: {manifest_csv}\n{e}")
-        return {}
+    df = pd.read_csv(manifest_csv)
     
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Downloading {len(df):,} structures using {max_workers} workers...")
     
     stats = {"PDB_OK": 0, "CIF_OK": 0, "FAILED": 0, "SKIPPED_EXIST": 0, "TOTAL": len(df)}
+    failed_ids = []
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -105,6 +102,8 @@ def parallel_download_from_manifest(
         for future in pbar:
             uid, status = future.result()
             stats[status] = stats.get(status, 0) + 1
+            if status == "FAILED":
+                failed_ids.append(uid)
             pbar.set_postfix(
                 PDB=stats['PDB_OK'],
                 CIF=stats['CIF_OK'],
@@ -112,6 +111,7 @@ def parallel_download_from_manifest(
                 SKIP=stats['SKIPPED_EXIST']
             )
     
+    stats["FAILED_IDS"] = sorted(failed_ids)
     return stats
 
 
@@ -156,8 +156,13 @@ def main():
     print("=" * 60)
     print(f"Time: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
     print("Results:")
+    failed_ids = stats.pop("FAILED_IDS")
     print(json.dumps(stats, indent=2))
     print(f"\nFiles saved to: {args.structures_outdir}")
+    if failed_ids:
+        raise SystemExit(
+            f"{len(failed_ids)} of {stats['TOTAL']} downloads failed; first: {failed_ids[:10]}"
+        )
 
 
 if __name__ == "__main__":

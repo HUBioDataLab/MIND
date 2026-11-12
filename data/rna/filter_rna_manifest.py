@@ -34,7 +34,7 @@ def count_atoms_in_cif(cif_path: str) -> int:
         return atom_count
     except Exception as e:
         print(f"Error reading {cif_path}: {e}")
-        return -1
+        return -1  # counted by the caller as unreadable
 
 def filter_rna_manifest_by_size(
     input_manifest: str,
@@ -118,6 +118,13 @@ def filter_rna_manifest_by_size(
     else:
         print(f"\n💡 Dry run mode - no files saved")
         print(f"   Would keep {len(valid_df)}/{len(df)} structures")
+
+    if failed_mask.any():
+        names = df.loc[failed_mask, 'name'].tolist()
+        raise SystemExit(
+            f"{len(names)} of {len(df)} structures were missing or unreadable and are not in "
+            f"the output manifest; first: {names[:5]}"
+        )
 
 if __name__ == "__main__":
     import argparse

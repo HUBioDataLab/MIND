@@ -193,7 +193,7 @@ def main():
         # Show dataset info
         load_coconut()
     else:
-        print("\n❌ Dataset download failed!")
+        raise SystemExit("COCONUT download failed")
 
 if __name__ == "__main__":
     main()

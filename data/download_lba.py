@@ -77,8 +77,9 @@ def load_lba():
 
 def main():
     download_path = download_lba()
-    if download_path:
-        print("Download complete")
+    if not download_path:
+        raise SystemExit("LBA download failed")
+    print("Download complete")
     
     # Uncomment to test loading the dataset
     # load_lba()
