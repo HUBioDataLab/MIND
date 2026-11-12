@@ -602,6 +602,10 @@ def test_ds_jobs_survive_the_terminal_hangup_and_log_their_exit_code(tmp_path, t
 def test_ds_run_is_detached_by_default_and_plan_or_foreground_stay_in_the_terminal():
     text, _ = _make("ds-run", "MODEL=m", "GPU=2")
     assert "setsid nohup bash -c" in text and "EXIT_CODE=$code" in text and "> $log 2>&1 < /dev/null &" in text
+    # the terminal gets only the log path; the explanation lives in the Makefile comment
+    assert 'echo "Log: $log"' in text.replace("$$", "$") and "arka planda" not in text
+    text, _ = _make("ds-probe", "TASK=ec", "MODEL_ID=m", "HEAD=mlp")
+    assert "arka planda" not in text and "EXIT_CODE=$code" in text
     for extra in ("PLAN=1", "FOREGROUND=1"):
         text, _ = _make("ds-run", "MODEL=m", "GPU=2", extra)
         assert "setsid" not in text and "python -u -m downstream.run_all" in text
