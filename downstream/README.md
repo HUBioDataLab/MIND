@@ -245,7 +245,9 @@ Std: ledger reports and comparisons use the sample std over run seeds (ddof=1, u
 ## One command per model (`make ds-run`)
 
 `downstream/run_all.py`: `make ds-run MODEL=<snapshot | path/to.ckpt> [NAME=<snapshot>] [TASKS=all|ec,go_mf,...]
-GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp] [PROBE_JOBS=1] [RANDOM_INIT=1] [OUTPUTS_ROOT=<dir>] [PLAN=1] [DETACH=1]`.
+GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp] [PROBE_JOBS=1] [RANDOM_INIT=1] [OUTPUTS_ROOT=<dir>] [PLAN=1]
+[COMPARE_TO=<snapshot[.random_init],...>] [BOOTSTRAP=1000] [COUNTERFACTUAL=1 [CF_MODES="..."] [EVAL_CONFIG=<config>]]
+[FOREGROUND=1]`.
 A checkpoint path is first snapshotted as NAME (a NAME that already names another checkpoint, in the snapshot
 store or in the ledger, stops the run). Then one embedding job per task on the GPUs (at most PER_GPU per GPU; splits
 already embedded are skipped), then, after every embedding job has ended, the probes on CPU (SEEDS; seeds already
@@ -256,3 +258,23 @@ and listed under `all`, refused when named. A failing job is reported with its l
 run ends with the list of what is missing and exit code 1. `PLAN=1` prints what would run (and recorded embedding
 times of other models, when there are any) and writes nothing. Logs and `summary.md` go to
 `logs/<Month><Year>/ds_run_<model>_<stamp>_<pid>/`; fine-tuning is not part of this command.
+
+- `COMPARE_TO=a,b.random_init`: every listed model goes through the same tasks, heads and seeds (what is complete
+  is skipped; `.random_init` is the RANDOM_INIT=1 control of that snapshot), gets its own table, and at the end
+  `ds-compare A=<each> B=MODEL` runs (BOOTSTRAP resamples). The last step of every ds-run is the ledger report
+  (`make ds-ledger-report`: `tasks/`, `timeline/`, `ozet_hoca.md`, `eksik_hucreler.*` under `$MIND_RESULTS_ROOT/reports`).
+- `COUNTERFACTUAL=1` (MODEL must be a `.ckpt` path): the `make eval-counterfactual` sweep (same arguments; CF_MODES,
+  SEED, DOMAINS=unimol, EVAL_CONFIG) on the snapshot copy, one mode per GPU job after the embeddings, written to
+  `<outputs root>/eval/cf_<NAME>_<stamp>/<mode>` and added to the ledger. A failing mode is listed, the others go on.
+- Example (one model, two references, all tasks, two GPUs):
+  `make ds-run MODEL=/path/to/best-checkpoint.ckpt NAME=<new snapshot> OUTPUTS_ROOT=<outputs root> GPU=2,3
+  COMPARE_TO=<reference snapshot>,<reference snapshot>.random_init` (first with `PLAN=1`).
+
+**Every long ds-* job keeps running when the terminal or SSH connection closes.** `ds-run` and `ds-probe` start in
+their own session (`setsid nohup`, no terminal) and return at once with the log path; the log's last line is
+`EXIT_CODE=<n>` of the Python command (non-zero when it failed, as `pipefail` gave before). `make ds-status [N=15]`
+lists this month's `ds_*.log` files with that line (no line: still running or killed; check the process with
+`make status`). `FOREGROUND=1` runs them in the terminal as before (`| tee`); `PLAN=1` always runs in the terminal.
+`ds-embed`, `ds-finetune`, `eval-pretrain` and `eval-counterfactual` were already `nohup ... &`. Short CPU steps
+(`ds-snapshot`, `ds-report`, `ds-ledger-*`, `ds-compare`, `ds-summary`, `ds-missing`) and the data steps
+(`ds-download`/`ds-process`/`ds-validate`/`ds-leakage`, run on explicit decision) stay in the foreground.

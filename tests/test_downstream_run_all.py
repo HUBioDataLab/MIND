@@ -71,7 +71,7 @@ event["end"] = time.time()
 with open(os.environ["FAKE_EVENTS"], "a") as handle:
     handle.write(json.dumps(event) + "\n")
 '''
-LOG_NAME = re.compile(r"^(embed|probe_linear|probe_mlp|ledger_add)_([A-Za-z0-9_.]+)_(md4)_(\d{8}_\d{6}_\d{3})_(\d+)\.log$")
+LOG_NAME = re.compile(r"^(embed|probe_linear|probe_mlp|ledger_add|ledger_report)_([A-Za-z0-9_.]+)_(md4)_(\d{8}_\d{6}_\d{3})_(\d+)\.log$")
 
 
 @pytest.fixture
@@ -301,12 +301,12 @@ def test_log_names_are_unique_and_carry_the_child_pid(world):
     world.main("--model", "md4", "--tasks", "ec,mn_bace,mn_esol,mn_hiv,lba", "--gpus", "1", "--per-gpu", "6",
                "--probe-jobs", "4", "--heads", "linear,mlp")
     logs = sorted(p.name for p in next(world.logs.glob("ds_run_md4_*")).glob("*.log"))
-    assert len(logs) == len(set(logs)) == 6 + 12 + 1
+    assert len(logs) == len(set(logs)) == 6 + 12 + 1 + 1  # + the final ledger report
     pids = {e["pid"] for e in _events(world)}
     for name in logs:
         match = LOG_NAME.match(name)
         assert match, name
-        if match.group(1) != "ledger_add":
+        if match.group(1) not in ("ledger_add", "ledger_report"):
             assert int(match.group(5)) in pids
     assert not list(next(world.logs.glob("ds_run_md4_*")).glob(".starting_*"))
 
@@ -357,7 +357,7 @@ def test_ds_run_make_target(tmp_path):
 
 @pytest.mark.parametrize("args", [
     ["ds-embed", "TASK=ec", "MODEL=m", "GPU=1"], ["ds-embed", "TASK=lba", "MODEL=m", "GPU=1", "SPLIT_TAG=identity60"],
-    ["ds-probe", "TASK=ec", "MODEL_ID=m", "HEAD=mlp"], ["ds-finetune", "TASK=ec", "MODEL=m", "GPU=1"],
+    ["ds-probe", "TASK=ec", "MODEL_ID=m", "HEAD=mlp", "FOREGROUND=1"], ["ds-finetune", "TASK=ec", "MODEL=m", "GPU=1"],
     ["ds-snapshot", "CKPT=c", "NAME=n"], ["ds-report", "TASK=ec"], ["ds-ledger-add", "OUTPUTS_ROOT=/o"],
     ["ds-compare", "A=a", "B=b"], ["ds-summary"], ["ds-missing"], ["ds-ledger-verify"],
 ])
@@ -366,3 +366,244 @@ def test_existing_targets_are_unchanged(tmp_path, args):
     head.write_text(subprocess.run(["git", "show", "HEAD:Makefile"], cwd=REPO, capture_output=True, text=True,
                                    check=True).stdout)
     assert _make(*args)[0] == _make(*args, makefile=head)[0]
+
+
+# -- COMPARE_TO, final ledger report, COUNTERFACTUAL ---------------------------------------------------------
+
+SHA_WRAPPER = r'''
+import json, os, runpy, sys
+from pathlib import Path
+fake, args = sys.argv[1], sys.argv[3:]
+value = lambda flag: args[args.index(flag) + 1] if flag in args else None
+model = (value("--model") or value("--model-id")).removesuffix(".random_init")
+card = Path(value("--outputs-root")) / "models" / model / "card.json"
+os.environ["FAKE_SHA"] = json.loads(card.read_text())["sha256"]  # each model's results carry its own checkpoint sha
+with open(os.environ["MODEL_EVENTS"], "a") as handle:
+    handle.write(json.dumps({"kind": sys.argv[2], "model": model, "random_init": "--random-init" in args,
+                             "model_id": value("--model-id")}) + "\n")
+sys.argv = [fake] + sys.argv[2:]
+runpy.run_path(fake, run_name="__main__")
+'''
+FAKE_CF = r'''
+import argparse, hashlib, json, sys
+from pathlib import Path
+p = argparse.ArgumentParser()
+for name in ("--threads", "--ckpt", "--split", "--seed", "--output-dir", "--device", "--domains", "--counterfactual",
+             "--config-yaml-path"):
+    p.add_argument(name)
+a = p.parse_args()
+if a.counterfactual == "masked_pos_random":
+    print("cf boom", flush=True)
+    sys.exit(4)
+out = Path(a.output_dir)
+out.mkdir(parents=True)
+sha = hashlib.sha256(Path(a.ckpt).read_bytes()).hexdigest()
+summary = {"n_masked": 10, "top1_acc_real": 0.5, "top3_acc_real": 0.7, "ce_real": 1.0, "ece_real": 0.1,
+           "top1_acc_virtual": None}
+prov = {"checkpoint": {"path": a.ckpt, "sha256": sha, "epoch": 3}, "git": {"commit": "f" * 40, "dirty": False},
+        "split": a.split, "seed": int(a.seed), "masking_protocol": {"mlm_mask_ratio": 0.15},
+        "counterfactual": {"mode": a.counterfactual, "domains": ["unimol"]}}
+(out / "metrics.json").write_text(json.dumps({"provenance": prov, "plan": {}, "losses": {}, "mask_digest": {},
+                                               "domain_mlm": {"unimol": {"batches": 1, "summary": summary}},
+                                               "counterfactual": {"mode": a.counterfactual}}))
+'''
+
+
+@pytest.fixture
+def two_models(world, monkeypatch):
+    """md4 (snapshot) plus a new checkpoint file; the fake jobs write each model's own checkpoint sha."""
+    wrapper = world.tmp / "sha_wrapper.py"
+    wrapper.write_text(SHA_WRAPPER)
+    cf = world.tmp / "fake_cf.py"
+    cf.write_text(FAKE_CF)
+    monkeypatch.setenv("MODEL_EVENTS", str(world.tmp / "model_events.jsonl"))
+    fake = world.commands["embed"][1]
+    world.commands.update(embed=[sys.executable, str(wrapper), fake, "embed"],
+                          probe=[sys.executable, str(wrapper), fake, "probe"], cf=[sys.executable, str(cf)])
+    world.ckpt = _tiny_ckpt(world.tmp / "new.ckpt")
+    world.processed("ec", "mn_bace")
+    world.model_events = lambda: ([json.loads(line) for line in (world.tmp / "model_events.jsonl").read_text()
+                                   .splitlines()] if (world.tmp / "model_events.jsonl").exists() else [])
+    return world
+
+
+def test_compare_to_completes_every_model_skips_done_and_compares(two_models, capsys):
+    w = two_models
+    assert w.main("--model", "md4", "--tasks", "ec,mn_bace", "--gpus", "2", "--heads", "mlp") == 0  # md4 complete
+    done_before = len(w.model_events())
+    capsys.readouterr()
+    code = w.main("--model", str(w.ckpt), "--name", "newm", "--compare-to", "md4,md4.random_init",
+                  "--tasks", "ec,mn_bace", "--gpus", "2,3", "--heads", "mlp", "--bootstrap", "20")
+    out = capsys.readouterr().out
+    assert code == 0, out
+    events = w.model_events()[done_before:]
+    assert not [e for e in events if e["model"] == "md4" and not e["random_init"] and e["model_id"] != "md4.random_init"]
+    assert {(e["kind"], e["model"]) for e in events if e["kind"] == "embed"} == {("embed", "newm"), ("embed", "md4")}
+    assert all(e["random_init"] for e in events if e["kind"] == "embed" and e["model"] == "md4")
+    assert "Model: md4 (model_id md4)" in out and "ATLANACAK  embed ec: zaten tamam" in out
+    run_dir = next(w.logs.glob("ds_run_newm_*"))
+    names = sorted(p.name for p in run_dir.glob("*.log"))
+    assert any(n.startswith("compare_md4__vs__newm_") for n in names), names
+    assert any(n.startswith("compare_md4.random_init__vs__newm_") for n in names), names
+    assert any(n.startswith("ledger_report_all_") for n in names), names
+    assert any(n.startswith("embed_ec_md4.random_init_") for n in names), names  # log names carry their own model
+    summary = (run_dir / "summary.md").read_text()
+    for heading in ("# ds-run: newm", "# ds-run: md4\n", "# ds-run: md4.random_init"):
+        assert heading in summary, heading
+    assert "## EKSİK" not in summary  # no failed job (missing catalog cells are listed per model, that is fine)
+    assert (w.results / "reports" / "ozet_hoca.md").is_file()
+    assert (w.results / "reports" / "compare" / "md4__vs__newm.md").is_file()
+    models = {row["model_key"] for row in ledger.read_records(w.results, "models")}
+    assert {"newm", "md4"} <= models
+
+
+def test_compare_to_plan_lists_everything_and_writes_nothing(two_models, capsys):
+    w = two_models
+    before = sorted(p for p in w.tmp.rglob("*"))
+    code = w.main("--model", str(w.ckpt), "--name", "newm", "--compare-to", "md4,md4.random_init", "--tasks",
+                  "ec,mn_bace", "--gpus", "2", "--counterfactual", "--cf-modes", "none", "masked_pos_noise", "--plan")
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert sorted(p for p in w.tmp.rglob("*")) == before and not w.logs.exists()
+    assert "Model: newm (model_id newm)" in out and "Model: md4 (model_id md4.random_init)" in out
+    assert "ÇALIŞACAK  compare A=md4 B=newm" in out and "ÇALIŞACAK  compare A=md4.random_init B=newm" in out
+    assert "ÇALIŞACAK  counterfactual none" in out and "ÇALIŞACAK  counterfactual masked_pos_noise" in out
+    assert "ledger report" in out and "PLAN: hiçbir şey koşulmadı" in out
+
+
+def test_a_failing_compare_model_job_is_listed_and_the_rest_goes_on(two_models, capsys, monkeypatch):
+    w = two_models
+    monkeypatch.setenv("FAKE_FAIL", "mn_bace")
+    code = w.main("--model", str(w.ckpt), "--name", "newm", "--compare-to", "md4", "--tasks", "ec,mn_bace",
+                  "--gpus", "2", "--heads", "mlp", "--bootstrap", "20")
+    assert code == 1
+    summary = (next(w.logs.glob("ds_run_newm_*")) / "summary.md").read_text()
+    assert re.search(r"- embed mn_bace: exit code 3", summary)  # the main model keeps its labels
+    assert re.search(r"- \[md4\] embed mn_bace: exit code 3", summary)
+    assert re.search(r"\| ec \| mlp_probe \| fmax \(test/all\) \| 0\.500", summary)
+    assert (w.results / "reports" / "ozet_hoca.md").is_file()
+
+
+@pytest.mark.parametrize("args, message", [
+    (["--model", "md4", "--compare-to", "nosuch"], "no snapshot or alias"),
+    (["--model", "md4", "--compare-to", "md4"], "is the model itself"),
+    (["--model", "md4", "--counterfactual"], "needs MODEL=<path/to.ckpt>"),
+])
+def test_bad_compare_and_counterfactual_arguments_stop_before_anything(world, capsys, args, message):
+    world.processed("ec")
+    assert world.main(*args, "--tasks", "ec", "--gpus", "2") == 2
+    assert message in capsys.readouterr().err and not world.logs.exists()
+
+
+def test_counterfactual_runs_every_mode_goes_on_after_a_failure_and_adds_to_the_ledger(two_models, capsys):
+    w = two_models
+    code = w.main("--model", str(w.ckpt), "--name", "newm", "--tasks", "ec", "--gpus", "2,3", "--heads", "mlp",
+                  "--counterfactual", "--cf-modes", "none", "masked_pos_noise", "masked_pos_random")
+    out = capsys.readouterr().out
+    assert code == 1
+    done = sorted(p.name for p in (w.outputs / "eval").glob("cf_newm_*/*") if (p / "metrics.json").is_file())
+    assert done == ["masked_pos_noise", "none"]
+    assert re.search(r"HATA counterfactual newm\.masked_pos_random .*exit code 4", out)
+    rows = [r for r in ledger.read_records(w.results, "measurements") if r["task"] == "counterfactual"]
+    assert {r["model_key"] for r in rows} == {"newm"} and {r["protocol_id"] for r in rows} == {"none", "masked_pos_noise"}
+    summary = (next(w.logs.glob("ds_run_newm_*")) / "summary.md").read_text()
+    assert "counterfactual newm.masked_pos_random" in summary
+
+
+def test_ds_run_make_target_compare_and_counterfactual():
+    text, result = _make("ds-run", "MODEL=/x/b.ckpt", "NAME=n", "GPU=2", "COMPARE_TO=a,a.random_init",
+                         "COUNTERFACTUAL=1", "PLAN=1")
+    assert result.returncode == 0, result.stderr
+    assert ('--compare-to "a,a.random_init" --bootstrap 1000 --counterfactual --cf-split test --cf-seed 0 '
+            "--cf-domains unimol --cf-modes none masked_pos_noise masked_pos_random") in text
+    assert text.endswith("--plan")
+    text, _ = _make("ds-run", "MODEL=/x/b.ckpt", "NAME=n", "GPU=2", "COUNTERFACTUAL=1", "EVAL_CONFIG=cfg")
+    assert "--cf-eval-config core/cfg.yaml" in text
+    head = subprocess.run(["git", "show", "HEAD:Makefile"], cwd=REPO, capture_output=True, text=True, check=True).stdout
+    assert "eval-counterfactual:" in head  # the sweep ds-run mirrors exists in the Makefile it ships with
+
+
+# -- detached by default: closing the terminal does not stop ds-probe / ds-run ---------------------------------
+
+FAKE_PYTHON = """#!/bin/bash
+echo "fake python $*"
+ps -o sid=,pgid=,tty= -p $$ > "$FAKE_INFO.tmp"
+echo "$$" >> "$FAKE_INFO.tmp"
+mv "$FAKE_INFO.tmp" "$FAKE_INFO"
+sleep "${FAKE_SLEEP:-1}"
+exit "${FAKE_EXIT:-0}"
+"""
+
+
+def _wait_for(path: Path, seconds: float = 20.0) -> None:
+    import time
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{path} never appeared"
+        time.sleep(0.05)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return False
+    return state != "Z"
+
+
+@pytest.mark.parametrize("target, exit_code", [
+    (["ds-probe", "TASK=ec", "MODEL_ID=m", "HEAD=mlp"], 0),
+    (["ds-probe", "TASK=ec", "MODEL_ID=m", "HEAD=mlp"], 3),
+    (["ds-run", "MODEL=m", "GPU=2"], 0),
+])
+def test_ds_jobs_survive_the_terminal_hangup_and_log_their_exit_code(tmp_path, target, exit_code):
+    import signal
+    import time
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python").write_text(FAKE_PYTHON)
+    (bin_dir / "python").chmod(0o755)
+    info, logs = tmp_path / "info.txt", tmp_path / "logs"
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_INFO": str(info),
+           "FAKE_SLEEP": "2", "FAKE_EXIT": str(exit_code)}
+    # the "terminal": a shell in its own session running make, then lingering like an interactive login would
+    make = " ".join(["make", "--no-print-directory", *target, "CONDA_RUN=", f"LOG_MONTH_DIR={logs}"])
+    terminal = subprocess.Popen(["bash", "-c", f"{make}; sleep 60"], cwd=REPO, env=env, start_new_session=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        _wait_for(info)
+        sid, pgid, tty, pid = info.read_text().split()
+        pid = int(pid)
+        assert int(sid) != os.getsid(terminal.pid) and int(pgid) != terminal.pid  # its own session and group
+        assert tty == "?"  # no controlling terminal
+        os.killpg(terminal.pid, signal.SIGHUP)  # the SSH connection closes
+        terminal.wait(10)
+        assert terminal.returncode == -signal.SIGHUP
+        assert _alive(pid), "the detached job died with the terminal"
+        deadline = time.monotonic() + 20
+        while _alive(pid):
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+    finally:
+        if terminal.poll() is None:
+            os.killpg(terminal.pid, signal.SIGKILL)
+    log, = logs.glob("ds_*.log")
+    deadline = time.monotonic() + 10
+    while "EXIT_CODE=" not in log.read_text():
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    lines = log.read_text().splitlines()
+    assert lines[0].startswith("fake python -u -m downstream.") and lines[-1] == f"EXIT_CODE={exit_code}"
+    status = subprocess.run(["make", "--no-print-directory", "ds-status", f"LOG_MONTH_DIR={logs}"], cwd=REPO,
+                            capture_output=True, text=True)
+    assert f"EXIT_CODE={exit_code}  {log}" in status.stdout
+
+
+def test_ds_run_is_detached_by_default_and_plan_or_foreground_stay_in_the_terminal():
+    text, _ = _make("ds-run", "MODEL=m", "GPU=2")
+    assert "setsid nohup bash -c" in text and "EXIT_CODE=$code" in text and "> $log 2>&1 < /dev/null &" in text
+    for extra in ("PLAN=1", "FOREGROUND=1"):
+        text, _ = _make("ds-run", "MODEL=m", "GPU=2", extra)
+        assert "setsid" not in text and "python -u -m downstream.run_all" in text
+    text, _ = _make("ds-probe", "TASK=ec", "MODEL_ID=m", "HEAD=mlp", "FOREGROUND=1")
+    assert "set -o pipefail;" in text and "| tee logs/" in text and "setsid" not in text
