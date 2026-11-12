@@ -754,3 +754,48 @@ def test_a_protein_and_a_unimol_graph_in_one_batch_keep_independent_logits(sprea
     plain = _model(spread_setup, enabled=False)
     plain_logits, _ = _logits(plain, prepared([protein_item, unimol_item], [31, 32]))
     assert torch.equal(mixed_logits[~unimol_nodes], plain_logits[~unimol_nodes])  # protein graph unaffected
+
+
+# ---------------------------------------------------------------------------
+# Startup log line (the flag was invisible in run logs)
+# ---------------------------------------------------------------------------
+
+
+class _StopAfterBanner(Exception):
+    pass
+
+
+def _startup_output(monkeypatch, capsys, hiding, ckpt_path=None):
+    """Run train_universal_pretraining up to the dataset load and return what it printed."""
+    from core import train_pretrain
+
+    def stop(*args, **kwargs):
+        raise _StopAfterBanner
+
+    monkeypatch.setattr(train_pretrain, "load_universal_dataset", stop)
+    values = _base_config_kwargs()
+    values["unimol_masked_geometry_hiding"] = hiding
+    config = create_pretraining_config(**values)
+    with pytest.raises(_StopAfterBanner):
+        train_pretrain.train_universal_pretraining(
+            config, "d", "/nonexistent", "/nonexistent", "p", "r", ckpt_path=ckpt_path
+        )
+    return capsys.readouterr().out
+
+
+@pytest.mark.parametrize("ckpt_path", [None, "/nonexistent/last.ckpt"])
+def test_startup_logs_g1_enabled_with_threshold(monkeypatch, capsys, ckpt_path):
+    out = _startup_output(
+        monkeypatch, capsys, {"enabled": True, "bond_threshold_angstrom": 2.2}, ckpt_path
+    )
+    lines = [line for line in out.splitlines() if "G1 masked-geometry hiding" in line]
+    assert lines == ["G1 masked-geometry hiding: ENABLED (bond_threshold_angstrom=2.2)"]
+
+
+@pytest.mark.parametrize("ckpt_path", [None, "/nonexistent/last.ckpt"])
+def test_startup_logs_g1_disabled(monkeypatch, capsys, ckpt_path):
+    out = _startup_output(
+        monkeypatch, capsys, {"enabled": False, "bond_threshold_angstrom": 2.1}, ckpt_path
+    )
+    lines = [line for line in out.splitlines() if "G1 masked-geometry hiding" in line]
+    assert lines == ["G1 masked-geometry hiding: DISABLED"]
