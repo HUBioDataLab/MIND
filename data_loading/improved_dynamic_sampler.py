@@ -175,48 +175,12 @@ class ImprovedDynamicBatchSampler(BatchSampler):
         super().__init__(dummy_sampler, batch_size=1, drop_last=False)
 
     def _get_atom_count_fast(self, global_idx: int) -> int:
-        """Get atom count from metadata (FAST - no disk access)"""
-        try:
-            metadata = self.dataset.get_sample_metadata(global_idx)
-            if metadata and 'num_atoms' in metadata:
-                return metadata['num_atoms']
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to get atom count for sample {global_idx}. "
-                f"Metadata may be corrupted. Error: {e}"
-            )
-
-        # Fallback to conservative estimate (should rarely happen)
-        return 500
-
-    def _get_chunk_for_sample(self, global_idx: int) -> int:
-        """Get which chunk a sample belongs to"""
-        for chunk_idx, (start_idx, end_idx, _) in enumerate(self.dataset.file_ranges):
-            if start_idx <= global_idx < end_idx:
-                return chunk_idx
-        return -1
+        """Atom count from loaded metadata (no disk access)."""
+        return self.dataset.get_sample_metadata(global_idx)['num_atoms']
 
     def _get_dataset_type(self, chunk_idx: int) -> str:
-        """Get dataset type for a chunk"""
-        if hasattr(self.dataset, 'chunk_metadata') and chunk_idx < len(self.dataset.chunk_metadata):
-            metadata = self.dataset.chunk_metadata[chunk_idx]
-            if isinstance(metadata, dict) and 'dataset_type' in metadata:
-                return metadata['dataset_type']
-
-        # Fallback: infer from filename
-        if chunk_idx < len(self.dataset.file_ranges):
-            _, _, pt_file = self.dataset.file_ranges[chunk_idx]
-            filename = pt_file.lower()
-            if 'pdb' in filename or 'protein' in filename:
-                return 'protein'
-            elif 'qm9' in filename:
-                return 'qm9'
-            elif 'metabolite' in filename:
-                return 'metabolite'
-            elif 'rna' in filename:
-                return 'rna'
-
-        return 'unknown'
+        """Dataset type of a chunk, from its metadata."""
+        return self.dataset.chunk_metadata[chunk_idx]['dataset_type']
 
     def _organize_samples_by_chunk(self) -> dict:
         """
