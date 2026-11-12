@@ -1,9 +1,11 @@
 """Embed, probe and ledger every task for one MIND model, then print its final metrics (driver of ``make ds-run``).
 
     python -m downstream.run_all --model <snapshot | path/to.ckpt> [--name NAME] --tasks all|ec,go_mf,...
-        --gpus 2,3 --heads linear,mlp --per-gpu 3 [--random-init] [--plan]
+        --gpus 2,3 --heads linear,mlp --per-gpu 3 [--random-init] [--compare-to a,b.random_init] [--counterfactual]
+        [--plan]
 
-Steps (fine-tuning is not part of it):
+Steps (fine-tuning is not part of it). ``--compare-to`` models (snapshot names; ``.random_init`` = RANDOM_INIT=1)
+go through steps 2-5 the same way (what is complete is skipped):
 
 1. A checkpoint path is snapshotted as NAME (``downstream.common.registry.snapshot_model``). NAME already naming
    another checkpoint (sha256 differs from the snapshot card or from the results ledger) stops everything.
@@ -12,7 +14,14 @@ Steps (fine-tuning is not part of it):
 3. When every embedding job has ended: probes (``downstream.probe``, CPU) per task x head, seeds missing only.
 4. ``downstream.ledger add`` of the outputs root into ``$MIND_RESULTS_ROOT``.
 5. One table: the catalog's primary metric for every task x head (a failed or skipped one says why), and the
-   required cells still missing for this model (``ledger_report.missing_cells``).
+   required cells still missing for this model (``ledger_report.missing_cells``); one table per model.
+6. ``downstream.ledger_compare --a <each compare-to model> --b <model>``, then ``downstream.ledger_report report``
+   (what ``make ds-compare`` and ``make ds-ledger-report`` run).
+
+``--counterfactual`` (only for a checkpoint path): after the embeddings, the ``make eval-counterfactual`` sweep
+(``core.evaluate_pretrain`` with the target's arguments, one mode per job, one job per GPU) on the snapshot copy,
+written to ``<outputs root>/eval/cf_<name>_<stamp>/<mode>`` and added to the ledger with step 4. The Make target
+itself detaches and returns at once, so ds-run cannot wait for it; it refuses to start if the target is gone.
 
 ``all`` = EC, GO-MF/BP/CC, Fold, LBA (the catalog's required split tags, joint representation) and the 14
 MoleculeNet tasks. Reaction has no processed data (9 Nov 2026) and runs only when named. A task whose domain the
@@ -24,8 +33,9 @@ the run ends with the list of everything missing and exit code 1. Jobs have no t
 running PID, its age and its log's size and last write is printed every ``--status-every`` seconds.
 
 Logs: ``<log root>/ds_run_<model>_<stamp>_<pid>/<kind>_<task>_<model>_<YYYYMMDD_HHMMSS_mmm>_<child pid>.log``
-(kind ``embed`` / ``probe_linear`` / ``probe_mlp``), next to ``summary.md`` and ``missing.csv``; ``make ds-embed`` and
-``ds-probe`` logs are unchanged.
+(kind ``embed`` / ``probe_linear`` / ``probe_mlp`` / ``counterfactual`` / ``ledger_add`` / ``compare`` /
+``ledger_report``; ``<model>`` is the job's own model), next to ``summary.md`` and ``missing.csv``; ``make ds-embed``
+and ``ds-probe`` logs are unchanged.
 """
 
 from __future__ import annotations
@@ -319,6 +329,7 @@ class Job:
     env: Callable[[str], dict]  # slot -> extra environment
     check: Callable[[], Optional[str]]  # None when the expected outputs exist
     head: Optional[str] = None
+    model_id: Optional[str] = None  # the model in the log name (default: the Runner's)
 
     @property
     def label(self) -> str:
@@ -345,7 +356,7 @@ class Runner:
             starting.unlink()
             raise
         handle.close()  # the child keeps its own descriptor
-        log = self.run_dir / f"{job.kind}_{job.unit.key}_{self.model_id}_{stamp}_{process.pid}.log"
+        log = self.run_dir / f"{job.kind}_{job.unit.key}_{job.model_id or self.model_id}_{stamp}_{process.pid}.log"
         try:
             os.link(starting, log)  # never replaces an existing log
         except FileExistsError:
@@ -415,7 +426,8 @@ def _tail(path: Path) -> str:
 def default_commands() -> dict:
     python = [sys.executable, "-u", "-m"]
     return {"embed": python + ["downstream.embed"], "probe": python + ["downstream.probe"],
-            "ledger": python + ["downstream.ledger"]}
+            "ledger": python + ["downstream.ledger"], "report": python + ["downstream.ledger_report"],
+            "compare": python + ["downstream.ledger_compare"], "cf": python + ["core.evaluate_pretrain"]}
 
 
 def _thread_env(threads: int) -> dict:
@@ -490,6 +502,87 @@ def summary(results_root: Path, model: ModelPlan, plan: dict, heads: list, failu
     return "\n".join(lines) + "\n", missing
 
 
+CF_MODES = ("none", "masked_pos_noise", "masked_pos_random", "masked_dist_shuffle", "esa_edges_remove",
+            "esa_edges_shuffle", "masked_edges_remove")  # Makefile CF_MODES (eval-counterfactual)
+
+
+def resolve_compare_to(text: str, model: ModelPlan, *, outputs_root: Path, results_root: Optional[Path]) -> list:
+    """``(ModelPlan, random_init)`` of every COMPARE_TO entry; ``<snapshot>.random_init`` = RANDOM_INIT=1."""
+    refs = [t.strip() for t in text.split(",") if t.strip()]
+    if len(set(refs)) != len(refs):
+        raise PlanError(f"COMPARE_TO={text}: a model is listed twice")
+    found = []
+    for ref in refs:
+        random_init = ref.endswith(registry.RANDOM_INIT_SUFFIX)
+        base = ref[: -len(registry.RANDOM_INIT_SUFFIX)] if random_init else ref
+        other = resolve_model(base, None, random_init=random_init, outputs_root=outputs_root, results_root=results_root)
+        if other.model_id == model.model_id:
+            raise PlanError(f"COMPARE_TO={ref} is the model itself ({model.model_id})")
+        found.append((other, random_init))
+    return found
+
+
+def check_counterfactual(model: ModelPlan, *, random_init: bool, modes: list) -> None:
+    """COUNTERFACTUAL=1 mirrors ``make eval-counterfactual`` on the checkpoint MODEL names (a pretraining ckpt)."""
+    if model.ckpt is None:
+        raise PlanError(f"COUNTERFACTUAL=1 needs MODEL=<path/to.ckpt> (a pretraining checkpoint); MODEL={model.name} "
+                        "is a snapshot name")
+    if random_init:
+        raise PlanError("COUNTERFACTUAL=1 evaluates the pretrained checkpoint; it cannot go with RANDOM_INIT=1")
+    makefile = registry.REPO_ROOT / "Makefile"
+    if "\neval-counterfactual:" not in (makefile.read_text() if makefile.is_file() else ""):
+        raise PlanError(f"COUNTERFACTUAL=1: {makefile} has no eval-counterfactual target to mirror")
+    if not (registry.REPO_ROOT / "core" / "evaluate_pretrain.py").is_file():
+        raise PlanError("COUNTERFACTUAL=1: core/evaluate_pretrain.py is missing in this checkout")
+    unknown = [m for m in modes if m not in CF_MODES]
+    if not modes or unknown:
+        raise PlanError(f"CF_MODES {unknown or modes}: choose from {' '.join(CF_MODES)}")
+
+
+def extra_plan_text(model: ModelPlan, others: list, args, gpus: list, outputs_root: Path) -> str:
+    lines = ["", "Sonra (tüm modeller için embed'ler bitince):"]
+    if args.counterfactual:
+        target = outputs_root / "eval" / f"cf_{model.name}_<stamp>"
+        lines += [f"   ÇALIŞACAK  counterfactual {mode}: core.evaluate_pretrain --ckpt "
+                  f"{outputs_root / 'models' / model.name / 'model.ckpt'} --split {args.cf_split} --seed {args.cf_seed} "
+                  f"--domains {args.cf_domains} -> {target}/{mode} (make eval-counterfactual ile aynı argümanlar; "
+                  f"GPU {','.join(gpus)}, GPU başına 1)" for mode in args.cf_modes]
+    lines.append("   probe'lar, sonra tek ledger add" + (" (+ counterfactual dizinleri)" if args.counterfactual else ""))
+    lines += [f"   ÇALIŞACAK  compare A={other.model_id} B={model.model_id} (bootstrap {args.bootstrap})"
+              for other, _ in others]
+    lines.append("   ÇALIŞACAK  ledger report (make ds-ledger-report ile aynı: tasks/, timeline/, ozet_hoca.md, "
+                 "eksik_hucreler.*)")
+    return "\n".join(lines) + "\n"
+
+
+def counterfactual_jobs(model: ModelPlan, args, *, commands: dict, outputs_root: Path) -> tuple[list, list]:
+    """One job per mode, the arguments of ``make eval-counterfactual`` (one GPU per job)."""
+    ckpt = outputs_root / "models" / model.name / "model.ckpt"
+    root = outputs_root / "eval" / f"cf_{model.name}_{_stamp()}"
+    jobs, dirs = [], []
+    for mode in args.cf_modes:
+        out = root / mode
+
+        def argv(slot, mode=mode, out=out):
+            return (commands["cf"] + ["--threads", str(args.threads), "--ckpt", str(ckpt), "--split", args.cf_split,
+                                      "--seed", str(args.cf_seed), "--output-dir", str(out), "--device", "cuda:0",
+                                      "--domains", args.cf_domains, "--counterfactual", mode]
+                    + (["--config-yaml-path", args.cf_eval_config] if args.cf_eval_config else []))
+
+        def check(out=out):
+            return None if (out / "metrics.json").is_file() else f"{out / 'metrics.json'} missing"
+        jobs.append(Job("counterfactual", Unit(f"{model.name}.{mode}"), argv,
+                        lambda slot: {"CUDA_VISIBLE_DEVICES": slot, **_thread_env(args.threads)}, check,
+                        model_id=model.model_id))
+        dirs.append(out)
+    return jobs, dirs
+
+
+def _cpu_job(kind: str, key: str, argv: list, model_id: str) -> Job:
+    return Job(kind, Unit(key), lambda slot: argv, lambda slot: {"CUDA_VISIBLE_DEVICES": ""}, lambda: None,
+               model_id=model_id)
+
+
 def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Callable] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model", required=True, help="snapshot name/alias, or a .ckpt path (then --name)")
@@ -502,6 +595,15 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
     parser.add_argument("--probe-jobs", type=int, default=1, help="concurrent probe jobs (CPU)")
     parser.add_argument("--threads", type=int, default=8, help="CPU threads of every child process")
     parser.add_argument("--random-init", action="store_true")
+    parser.add_argument("--compare-to", default="", help="comma list of models (snapshot[.random_init]) completed the "
+                                                         "same way, then compared: ds-compare A=<each> B=<model>")
+    parser.add_argument("--bootstrap", type=int, default=1000, help="paired bootstrap resamples of each compare")
+    parser.add_argument("--counterfactual", action="store_true", help="also the eval-counterfactual sweep (ckpt path)")
+    parser.add_argument("--cf-modes", nargs="+", default=list(CF_MODES))
+    parser.add_argument("--cf-split", default="test", choices=("val", "test"))
+    parser.add_argument("--cf-seed", type=int, default=0)
+    parser.add_argument("--cf-domains", default="unimol")
+    parser.add_argument("--cf-eval-config", default=None, help="core/<EVAL_CONFIG>.yaml (default: the ckpt's config)")
     parser.add_argument("--outputs-root", type=Path, default=None, help="default: $MIND_OUTPUTS_ROOT or <repo>/outputs")
     parser.add_argument("--results-root", type=Path, default=None, help=f"default: ${ledger.ENV_VAR}")
     parser.add_argument("--log-root", type=Path, default=Path("logs") / datetime.now().strftime("%B%Y"))
@@ -509,13 +611,13 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
     parser.add_argument("--status-every", type=float, default=300.0, help="seconds between status lines")
     parser.add_argument("--poll", type=float, default=5.0, help="seconds between process checks")
     args = parser.parse_args(argv)
-    commands = commands or default_commands()
+    commands = {**default_commands(), **(commands or {})}
     try:
         heads = [h.strip() for h in args.heads.split(",") if h.strip()]
         if not heads or any(h not in HEADS for h in heads):
             raise PlanError(f"HEADS={args.heads}: choose from {HEADS}")
-        if args.per_gpu < 1 or args.probe_jobs < 1 or args.threads < 1:
-            raise PlanError("--per-gpu, --probe-jobs and --threads must be at least 1")
+        if args.per_gpu < 1 or args.probe_jobs < 1 or args.threads < 1 or args.bootstrap < 1:
+            raise PlanError("--per-gpu, --probe-jobs, --threads and --bootstrap must be at least 1")
         gpus = [g.strip() for g in args.gpus.split(",") if g.strip()]
         outputs_root = registry.outputs_root(args.outputs_root).resolve()
         results_root = ledger.results_root(args.results_root)
@@ -523,74 +625,121 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
         units, explicit = expand_tasks(args.tasks, catalog)
         model = resolve_model(args.model, args.name, random_init=args.random_init, outputs_root=outputs_root,
                               results_root=results_root)
+        others = resolve_compare_to(args.compare_to, model, outputs_root=outputs_root, results_root=results_root)
+        if args.counterfactual:
+            check_counterfactual(model, random_init=args.random_init, modes=args.cf_modes)
         plan = plan_units(units, explicit, model, heads=heads, seeds=args.seeds, outputs_root=outputs_root,
                           describe=describe)
-        if plan["embed"] and (not gpus or not all(g.isdigit() for g in gpus)):
-            raise PlanError(f"{len(plan['embed'])} embedding job(s) to run but GPU={args.gpus!r}: give GPU indices "
-                            "like GPU=2,3 (ds-run does not pick GPUs itself)")
+        runs = [(model, plan, args.random_init)] + [
+            (other, plan_units(units, explicit, other, heads=heads, seeds=args.seeds, outputs_root=outputs_root,
+                               describe=describe), random_init) for other, random_init in others]
+        n_embed = sum(len(p["embed"]) for _, p, _ in runs)
+        if (n_embed or args.counterfactual) and (not gpus or not all(g.isdigit() for g in gpus)):
+            raise PlanError(f"{n_embed} embedding job(s)" + (" and the counterfactual sweep" if args.counterfactual
+                                                             else "") + f" to run but GPU={args.gpus!r}: give GPU "
+                            "indices like GPU=2,3 (ds-run does not pick GPUs itself)")
     except (PlanError, ledger.LedgerError) as exc:
         print(f"HATA: {exc}", file=sys.stderr)
         return 2
-    text = plan_text(model, plan, outputs_root=outputs_root, results_root=results_root, gpus=gpus,
-                     per_gpu=args.per_gpu, probe_jobs=args.probe_jobs, heads=heads, seeds=args.seeds)
+    texts = []
+    for index, (m, p, _) in enumerate(runs):
+        text = plan_text(m, p, outputs_root=outputs_root, results_root=results_root, gpus=gpus,
+                         per_gpu=args.per_gpu, probe_jobs=args.probe_jobs, heads=heads, seeds=args.seeds)
+        texts.append(text if index == 0 else f"=== COMPARE_TO {m.model_id} ===\n{text}")
+    if others or args.counterfactual:
+        texts.append(extra_plan_text(model, others, args, gpus, outputs_root))
+    text = "\n".join(texts)
     print(text, flush=True)
     if args.plan:
         print("PLAN: hiçbir şey koşulmadı, hiçbir dosya yazılmadı.")
-        return 1 if plan["failed"] else 0
+        return 1 if any(p["failed"] for _, p, _ in runs) else 0
 
     run_dir = Path(args.log_root) / f"ds_run_{model.model_id}_{_stamp()}_{os.getpid()}"
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "plan.txt").write_text(text)
     print(f"Run directory: {run_dir.resolve()}", flush=True)
-    failures = list(plan["failed"])
+    failures = {m.model_id: list(p["failed"]) for m, p, _ in runs}  # per model, labels "<kind> <unit key>"
+    extra_failures = []  # counterfactual, ledger add, compare, report
     if model.action == "create snapshot":
         destination = registry.snapshot_model(model.ckpt, model.name, root=outputs_root)
         card = json.loads((destination / "card.json").read_text())
         if card["sha256"] != model.sha256:
             raise RuntimeError(f"snapshot {destination} has sha256 {card['sha256']}, the plan hashed {model.sha256}")
         print(f"snapshot: {destination}", flush=True)
-    embed_jobs, probe_jobs = build_jobs(plan, model, commands=commands, outputs_root=outputs_root,
-                                        threads=args.threads, random_init=args.random_init)
+    embed_jobs, probe_jobs = [], []
+    for m, p, random_init in runs:
+        embeds, probes = build_jobs(p, m, commands=commands, outputs_root=outputs_root, threads=args.threads,
+                                    random_init=random_init)
+        for job in embeds + probes:
+            job.model_id = m.model_id
+        embed_jobs += embeds
+        probe_jobs += probes
     runner = Runner(run_dir, model.model_id, status_every=args.status_every, poll=args.poll,
                     out=lambda message: print(message, flush=True))
     embed_failed = set()
     slots = [g for _ in range(args.per_gpu) for g in gpus]  # interleaved: jobs spread over the GPUs first
     for index, (ok, reason, _) in runner.run(embed_jobs, slots).items():
         if not ok:
-            failures.append((embed_jobs[index].label, reason))
-            embed_failed.add(embed_jobs[index].unit)
-    failed_before = {label.partition(" ")[2] for label, _ in plan["failed"]}
+            job = embed_jobs[index]
+            failures[job.model_id].append((job.label, reason))
+            embed_failed.add((job.model_id, job.unit))
+    eval_dirs = []
+    if args.counterfactual:
+        cf_jobs, cf_dirs = counterfactual_jobs(model, args, commands=commands, outputs_root=outputs_root)
+        for index, (ok, reason, _) in runner.run(cf_jobs, gpus).items():
+            if ok:
+                eval_dirs.append(cf_dirs[index])
+            else:
+                extra_failures.append((cf_jobs[index].label, reason))
+    failed_before = {m.model_id: {label.partition(" ")[2] for label, _ in p["failed"]} for m, p, _ in runs}
     runnable = []
     for job in probe_jobs:
-        if job.unit in embed_failed or job.unit.key in failed_before:
-            failures.append((f"{job.kind} {job.unit.key}", "not run: the embedding of this task failed"))
+        if (job.model_id, job.unit) in embed_failed or job.unit.key in failed_before[job.model_id]:
+            failures[job.model_id].append((f"{job.kind} {job.unit.key}", "not run: the embedding of this task failed"))
         else:
             runnable.append(job)
     for index, (ok, reason, _) in runner.run(runnable, [f"cpu{i}" for i in range(args.probe_jobs)]).items():
         if not ok:
-            failures.append((runnable[index].label, reason))
-    add = Job("ledger_add", Unit("all"), lambda slot: commands["ledger"] + ["--results-root", str(results_root), "add",
-                                                                            "--outputs-root", str(outputs_root)],
-              lambda slot: {"CUDA_VISIBLE_DEVICES": ""}, lambda: None)
+            failures[runnable[index].model_id].append((runnable[index].label, reason))
+    add = _cpu_job("ledger_add", "all", commands["ledger"] + ["--results-root", str(results_root), "add",
+                                                               "--outputs-root", str(outputs_root)]
+                   + [item for d in eval_dirs for item in ("--eval-dir", str(d))], model.model_id)
     (ok, reason, _), = runner.run([add], ["cpu0"]).values()
     if not ok:
-        failures.append(("ledger_add all", reason))
-    try:
-        table, missing = summary(results_root, model, plan, heads, failures)
-    except Exception as exc:  # noqa: BLE001 - the summary failing must not hide the job failures listed below
-        table, missing = f"Özet tablo üretilemedi: {type(exc).__name__}: {exc}\n", []
-        failures.append(("summary all", str(exc)))
-    if failures:
-        table += f"\n## EKSİK: {len(failures)} iş başarısız ya da koşulamadı\n\n" + "".join(
-            f"- {label}: {reason}\n" for label, reason in failures)
+        extra_failures.append(("ledger_add all", reason))
+    tables, missing = [], []
+    for m, p, _ in runs:
+        try:
+            table, cells = summary(results_root, m, p, heads, failures[m.model_id])
+        except Exception as exc:  # noqa: BLE001 - the summary failing must not hide the job failures listed below
+            table, cells = f"# ds-run: {m.model_id}\n\nÖzet tablo üretilemedi: {type(exc).__name__}: {exc}\n", []
+            extra_failures.append((f"summary {m.model_id}", str(exc)))
+        tables.append(table)
+        missing += cells
+    final = [_cpu_job("compare", f"{other.model_id}__vs__{model.model_id}",
+                      commands["compare"] + ["--a", other.model_id, "--b", model.model_id, "--bootstrap",
+                                             str(args.bootstrap), "--results-root", str(results_root)], model.model_id)
+             for other, _, _ in runs[1:]]
+    final.append(_cpu_job("ledger_report", "all", commands["report"] + ["report", "--results-root", str(results_root)],
+                          model.model_id))
+    for index, (ok, reason, _) in runner.run(final, ["cpu0"]).items():
+        if not ok:
+            extra_failures.append((final[index].label, reason))
+    table = "\n".join(tables)
+    listed = failures[model.model_id] + [(f"[{m.model_id}] {label}", reason) for m, _, _ in runs[1:]
+                                         for label, reason in failures[m.model_id]] + extra_failures
+    if listed:
+        table += f"\n## EKSİK: {len(listed)} iş başarısız ya da koşulamadı\n\n" + "".join(
+            f"- {label}: {reason}\n" for label, reason in listed)
     (run_dir / "summary.md").write_text(table)
     with open(run_dir / "missing.csv", "w", newline="") as handle:
         if missing:
             writer = csv.DictWriter(handle, fieldnames=list(missing[0]), lineterminator="\n")
             writer.writeheader()
             writer.writerows(missing)
-    print("\n" + table + f"\n(özet: {run_dir.resolve() / 'summary.md'})", flush=True)
-    return 1 if failures else 0
+    print("\n" + table + f"\n(özet: {run_dir.resolve() / 'summary.md'}; defter raporları: {results_root / 'reports'})",
+          flush=True)
+    return 1 if listed else 0
 
 
 if __name__ == "__main__":

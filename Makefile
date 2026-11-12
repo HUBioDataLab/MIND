@@ -281,9 +281,13 @@ eval-counterfactual:
 # MODELS defaults to summary_models in $(MIND_RESULTS_ROOT)/comparisons.yaml, else the list in ledger_report.py.
 # One command for one MIND model (downstream/run_all.py; GPU embeds + CPU probes, user-started, no fine-tune):
 #   make ds-run MODEL=<snapshot | path/to.ckpt> [NAME=<snapshot name, required with a ckpt>] [TASKS=all|ec,go_mf,...]
-#        GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp] [PROBE_JOBS=1] [RANDOM_INIT=1] [OUTPUTS_ROOT=<dir>] [PLAN=1] [DETACH=1]
-#   snapshot (ckpt) -> embeds on the GPUs -> probes (SEEDS) -> ledger add -> table of final metrics + missing cells.
-#   PLAN=1 prints what would run and writes nothing. DETACH=1 runs it in the background (log path printed).
+#        GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp] [PROBE_JOBS=1] [RANDOM_INIT=1] [OUTPUTS_ROOT=<dir>] [PLAN=1]
+#        [COMPARE_TO=<snapshot[.random_init],...> [BOOTSTRAP=1000]] [COUNTERFACTUAL=1 [CF_MODES=...] [EVAL_CONFIG=...]]
+#   snapshot (ckpt) -> embeds on the GPUs (every model) -> [counterfactual sweep] -> probes (SEEDS) -> ledger add ->
+#   final metrics + missing cells per model -> ds-compare A=<each COMPARE_TO> B=MODEL -> ledger report.
+#   PLAN=1 prints what would run and writes nothing. ds-run and ds-probe run detached by default (setsid + nohup:
+#   closing the terminal does not stop them; the log ends with EXIT_CODE=<n>; make ds-status lists the logs);
+#   FOREGROUND=1 runs them in the terminal as before.
 # ===================================================================
 
 TASK ?= ec
@@ -294,6 +298,11 @@ POOLING ?=
 DS_THREADS ?= 8
 DS_ENV := OMP_NUM_THREADS=$(DS_THREADS) OPENBLAS_NUM_THREADS=$(DS_THREADS) MKL_NUM_THREADS=$(DS_THREADS)
 DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
+# Long ds-* jobs (ds-probe, ds-run) run in their own session (setsid + nohup, no terminal): closing the SSH/terminal
+# connection does not stop them. $(1) = log, $(2) = command; the log ends with EXIT_CODE=<n> of the command
+# (non-zero when the Python step fails, as pipefail gave in the foreground). FOREGROUND=1 = the old foreground run.
+DS_DETACH = log=$(1); echo "Log: $$log   (arka planda, bağlantı kesilse de sürer; bitince son satır EXIT_CODE=<n>; make ds-status)"; \
+	setsid nohup bash -c '$(2); code=$$?; echo "EXIT_CODE=$$code"; exit $$code' > $$log 2>&1 < /dev/null &
 DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
 # Fine-tune overrides: a random-init encoder needs a far larger LR than a pretrained one.
 FT_ARGS ?=
@@ -315,7 +324,7 @@ DS_DOWNLOAD_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter l
 
 .PHONY: ds-snapshot ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
 	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify ds-ledger-recompute \
-	ds-run
+	ds-run ds-status
 
 ds-snapshot:
 	@test -n "$(CKPT)" -a -n "$(NAME)" || { echo "ERROR: set CKPT and NAME"; exit 1; }
@@ -351,12 +360,18 @@ ds-embed ds-finetune:
 		> $(call DS_LOG,$(patsubst ds-%,%,$@)) 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Log: $(call DS_LOG,$(patsubst ds-%,%,$@))"
 
+DS_PROBE_CMD = $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --threads $(DS_THREADS) \
+	--task $(TASK) --model-id "$(MODEL_ID)" --head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) \
+	$(DS_LBA_ARGS)
+
 ds-probe:
 	@test -n "$(MODEL_ID)" || { echo "ERROR: set MODEL_ID (snapshot, <snapshot>.random_init or ESM-2 name)"; exit 1; }
 	@mkdir -p $(LOG_MONTH_DIR)
-	set -o pipefail; $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --threads $(DS_THREADS) --task $(TASK) --model-id "$(MODEL_ID)" \
-		--head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) $(DS_LBA_ARGS) \
-		2>&1 | tee $(call DS_LOG,probe_$(HEAD))
+ifeq ($(FOREGROUND),1)
+	set -o pipefail; $(DS_PROBE_CMD) 2>&1 | tee $(call DS_LOG,probe_$(HEAD))
+else
+	$(call DS_DETACH,$(call DS_LOG,probe_$(HEAD)),$(DS_PROBE_CMD))
+endif
 
 ds-report:
 	$(CONDA_RUN) python -m downstream.report --task $(TASK)
@@ -402,17 +417,30 @@ PROBE_JOBS ?= 1
 DS_RUN_CMD = python -u -m downstream.run_all --model "$(MODEL)" $(if $(strip $(NAME)),--name "$(NAME)",) \
 	--tasks $(or $(strip $(TASKS)),all) --gpus "$(GPU)" --per-gpu $(PER_GPU) --heads $(HEADS) --seeds $(SEEDS) \
 	--probe-jobs $(PROBE_JOBS) --threads $(DS_THREADS) --log-root $(LOG_MONTH_DIR) $(DS_RANDOM_INIT_ARGS) \
-	$(if $(strip $(OUTPUTS_ROOT)),--outputs-root "$(OUTPUTS_ROOT)",) $(if $(filter 1,$(PLAN)),--plan,)
+	$(if $(strip $(OUTPUTS_ROOT)),--outputs-root "$(OUTPUTS_ROOT)",) \
+	$(if $(strip $(COMPARE_TO)),--compare-to "$(COMPARE_TO)" --bootstrap $(BOOTSTRAP),) \
+	$(if $(filter 1,$(COUNTERFACTUAL)),--counterfactual --cf-split $(or $(CF_SPLIT),test) --cf-seed $(or $(SEED),0) \
+		--cf-domains $(or $(DOMAINS),unimol) --cf-modes $(CF_MODES) \
+		$(if $(strip $(EVAL_CONFIG)),--cf-eval-config core/$(EVAL_CONFIG).yaml,),) \
+	$(if $(filter 1,$(PLAN)),--plan,)
 
+# Detached by default (DETACH=1 is still accepted); PLAN=1 and FOREGROUND=1 run in the terminal.
 ds-run:
 	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name or .ckpt path; a path also needs NAME)"; exit 1; }
-ifeq ($(DETACH),1)
+ifeq ($(filter 1,$(PLAN) $(FOREGROUND)),)
 	@mkdir -p $(LOG_MONTH_DIR)
-	log=$(LOG_MONTH_DIR)/ds_run_$(_LOG_DATETIME)_$$$$.log; echo "Log: $$log"; \
-	$(CONDA_RUN) $(LEDGER_ENV) setsid nohup $(DS_RUN_CMD) > $$log 2>&1 < /dev/null &
+	$(call DS_DETACH,$(LOG_MONTH_DIR)/ds_run_$(_LOG_DATETIME)_$$$$.log,$(CONDA_RUN) $(LEDGER_ENV) $(DS_RUN_CMD))
 else
 	$(CONDA_RUN) $(LEDGER_ENV) $(DS_RUN_CMD)
 endif
+
+# Newest ds_*.log files of this month with their EXIT_CODE line. No EXIT_CODE: still running, killed, or a
+# foreground log; check the process (make status) before concluding anything.
+ds-status:
+	@ls -t $(LOG_MONTH_DIR)/ds_*.log 2>/dev/null | head -$(or $(N),15) | while read -r f; do \
+		code=$$(grep -a '^EXIT_CODE=' "$$f" | tail -1); \
+		echo "$${code:-EXIT_CODE yok (koşuyor olabilir; make status ile doğrula)}  $$f  (son yazma $$(date -r "$$f" '+%F %T'))"; \
+	done
 
 test-downstream:
 	$(CONDA_RUN) CUDA_VISIBLE_DEVICES="" python -m pytest -q tests/test_downstream_*.py
