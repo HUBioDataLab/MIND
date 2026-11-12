@@ -353,24 +353,28 @@ class ProteinAdapter(BaseAdapter):
             
         Returns:
             List of UniversalBlock objects (one per residue)
+
+        Raises:
+            ValueError: If the file is unreadable or has an unsupported suffix
         """
+        suffix = raw_item.suffix.lower()
+        if suffix not in (".pdb", ".cif"):
+            raise ValueError(f"unsupported structure file suffix: {raw_item.name}")
         try:
-            suffix = raw_item.suffix.lower()
             if suffix == ".pdb":
                 structure = self.pdb_parser.get_structure(
                     id=raw_item.stem,
                     file=str(raw_item)
                 )
-            elif suffix == ".cif":
+            else:
                 structure = self.cif_parser.get_structure(
                     raw_item.stem,
                     str(raw_item)
                 )
-            else:
-                return []
         except Exception as e:
-            print(f"ERROR: File cannot be read {raw_item.name}: {type(e).__name__} - {e}")
-            return []
+            raise ValueError(
+                f"cannot read structure {raw_item.name}: {type(e).__name__}: {e}"
+            ) from e
 
         blocks: List[UniversalBlock] = []
         

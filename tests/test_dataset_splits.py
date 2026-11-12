@@ -89,7 +89,7 @@ def test_metadata_split_must_match_config(files):
 
 def test_oversized_skip_policy_records_and_excludes(tmp_path, monkeypatch):
     monkeypatch.setenv("MIND_INDEX_MAP_CACHE_DIR", str(tmp_path / "maps"))
-    pt = _write_chunk(tmp_path, "p", 0, [10, 50, 10, 70], "protein")
+    pt = _write_chunk(tmp_path, "p", 0, [10, 50, 10, 70] + [10] * 16, "protein")
     with pytest.raises(ValueError, match="Oversized graph"):
         _dataset([pt], max_graph_atoms_by_domain={"protein": 40})
     dataset = _dataset([pt], max_graph_atoms_by_domain={"protein": 40},
@@ -175,3 +175,17 @@ def test_chunk_directory_without_data_file_is_an_error(tmp_path, monkeypatch):
     config = _config({"unimol": {"enabled": True, "chunk_dir": str(tmp_path / "mol"), "chunk_range": None}})
     with pytest.raises(FileNotFoundError, match="has no processed data file"):
         load_universal_dataset(config, "PDB", "")
+
+
+def test_empty_val_split_is_refused(files):
+    # Only train and test chunks: nothing feeds validation, which the checkpoint monitor needs.
+    dataset = _dataset([files[0], files[1]], chunk_split_tags=["train", "test"])
+    with pytest.raises(ValueError, match="validation split is empty"):
+        split_dataset(dataset, seed=0)
+
+
+def test_empty_val_split_is_refused_for_a_tiny_random_split(tmp_path, monkeypatch):
+    monkeypatch.setenv("MIND_INDEX_MAP_CACHE_DIR", str(tmp_path / "maps"))
+    dataset = _dataset([_write_chunk(tmp_path, "t", 0, [5] * 9, "unimol")])
+    with pytest.raises(ValueError, match="validation split is empty"):
+        split_dataset(dataset, seed=0)

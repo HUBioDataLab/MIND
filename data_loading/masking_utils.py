@@ -11,7 +11,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-_warned_missing_bonds = False
+_random_walk_fallbacks = 0
 
 COCONUT_DATASET_TYPES = frozenset({"coconut", "metabolite"})
 
@@ -20,6 +20,33 @@ def is_coconut_dataset_type(dataset_type: Optional[str]) -> bool:
     if dataset_type is None:
         return False
     return str(dataset_type).lower() in COCONUT_DATASET_TYPES
+
+
+def random_walk_fallback_count() -> int:
+    """Graphs that requested random_walk masking but had no usable bonds (this process)."""
+    return _random_walk_fallbacks
+
+
+def reset_random_walk_fallback_count() -> None:
+    global _random_walk_fallbacks
+    _random_walk_fallbacks = 0
+
+
+def _record_random_walk_fallback() -> None:
+    """Count a bondless fallback and log it at 1, 10, 100, ... occurrences.
+
+    A multi-atom graph without bonds (for example disconnected ions) is valid, so the
+    fallback to random_atom is allowed, but it must stay countable.
+    """
+    global _random_walk_fallbacks
+    _random_walk_fallbacks += 1
+    count = _random_walk_fallbacks
+    if count == 10 ** (len(str(count)) - 1):
+        logger.warning(
+            "random_walk masking fell back to random_atom for %d graph(s) without usable "
+            "bonds (bond_edge_index missing, empty or self-loops only)",
+            count,
+        )
 
 
 def mask_count(num_nodes: int, ratio: float) -> int:
@@ -70,7 +97,6 @@ def select_random_walk_indices(
     Target size k = max(1, int(num_nodes * ratio)). Stays connected; does not add
     disconnected atoms if the largest component is smaller than k.
     """
-    global _warned_missing_bonds
     if device is None:
         device = bond_edge_index.device if bond_edge_index is not None else torch.device("cpu")
 
@@ -81,22 +107,14 @@ def select_random_walk_indices(
     if num_nodes == 1:
         return torch.tensor([0], dtype=torch.long, device=device)
 
-    if bond_edge_index is None or bond_edge_index.numel() == 0:
-        if not _warned_missing_bonds:
-            logger.warning(
-                "random_walk masking: missing bond_edge_index; falling back to random_atom"
-            )
-            _warned_missing_bonds = True
-        return select_random_atom_indices(num_nodes, ratio, device, generator)
-
-    adj = build_adjacency(num_nodes, bond_edge_index.cpu())
-    nodes_with_neighbors = [i for i in range(num_nodes) if adj[i]]
+    adj = (
+        build_adjacency(num_nodes, bond_edge_index.cpu())
+        if bond_edge_index is not None and bond_edge_index.numel() > 0
+        else None
+    )
+    nodes_with_neighbors = [i for i in range(num_nodes) if adj[i]] if adj else []
     if not nodes_with_neighbors:
-        if not _warned_missing_bonds:
-            logger.warning(
-                "random_walk masking: empty bond graph; falling back to random_atom"
-            )
-            _warned_missing_bonds = True
+        _record_random_walk_fallback()
         return select_random_atom_indices(num_nodes, ratio, device, generator)
 
     gen = generator

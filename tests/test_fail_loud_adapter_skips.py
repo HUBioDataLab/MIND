@@ -8,6 +8,8 @@ import lmdb
 import pytest
 
 from data_loading.adapters.base_adapter import BaseAdapter
+from data_loading.adapters.protein_adapter import ProteinAdapter
+from data_loading.adapters.rna_adapter import RNAAdapter
 from data_loading.adapters.unimol_adapter import UniMolAdapter
 from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 
@@ -100,3 +102,31 @@ def test_unimol_load_raw_data_raises_on_a_bad_record(tmp_path):
     path = _lmdb_with(tmp_path, [GOOD_RECORD, b"\x80garbage"])
     with pytest.raises(ValueError, match="not a pickle"):
         UniMolAdapter().load_raw_data(path)
+
+
+@pytest.mark.parametrize("adapter_cls, name", [
+    (ProteinAdapter, "missing.pdb"),
+    (ProteinAdapter, "missing.cif"),
+    (RNAAdapter, "missing.cif"),
+])
+def test_unreadable_structure_raises_instead_of_returning_no_blocks(tmp_path, adapter_cls, name):
+    with pytest.raises(Exception, match=r"missing"):
+        adapter_cls().create_blocks(tmp_path / name)
+
+
+def test_protein_adapter_rejects_an_unsupported_suffix(tmp_path):
+    path = tmp_path / "structure.xyz"
+    path.write_text("not a structure")
+    with pytest.raises(ValueError, match=r"unsupported structure file suffix.*structure\.xyz"):
+        ProteinAdapter().create_blocks(path)
+
+
+def test_unreadable_structure_is_reported_with_its_parse_error(tmp_path):
+    class _OneMissingFile(ProteinAdapter):
+        def load_raw_data(self, data_path, max_samples=None, **kwargs):
+            return [tmp_path / "missing.pdb"]
+
+    cache = tmp_path / "out" / "protein.pkl"
+    with pytest.raises(RuntimeError, match=r"skipped 1 of 1") as caught:
+        _OneMissingFile().process_dataset("unused", cache_path=str(cache))
+    assert "FileNotFoundError" in str(caught.value) and "missing.pdb" in str(caught.value)

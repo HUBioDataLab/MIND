@@ -393,6 +393,9 @@ class RNAAdapter(BaseAdapter):
             
         Returns:
             List of UniversalBlock objects (one per nucleotide)
+
+        Raises:
+            ValueError: If the file cannot be parsed
         """
         try:
             structure = self.cif_parser.get_structure(
@@ -400,8 +403,9 @@ class RNAAdapter(BaseAdapter):
                 filename=str(raw_item)
             )
         except Exception as e:
-            print(f"ERROR: File cannot be read {raw_item.name}: {type(e).__name__} - {e}")
-            return []
+            raise ValueError(
+                f"cannot read structure {raw_item.name}: {type(e).__name__}: {e}"
+            ) from e
 
         blocks: List[UniversalBlock] = []
         
@@ -528,6 +532,7 @@ if __name__ == "__main__":
     # Convert to universal format
     molecules = []
     skipped = 0
+    skipped_files = []
     
     for raw_file in tqdm(raw_files, desc="Processing RNA structures"):
         try:
@@ -536,9 +541,10 @@ if __name__ == "__main__":
                 molecules.append(mol)
             else:
                 skipped += 1
+                skipped_files.append(f"{raw_file.name}: no blocks")
         except Exception as e:
-            print(f"\n⚠️  Error processing {raw_file.name}: {e}")
             skipped += 1
+            skipped_files.append(f"{raw_file.name}: {e}")
     
     print(f"\n✅ Successfully converted {len(molecules)} structures")
     if skipped > 0:
@@ -555,3 +561,7 @@ if __name__ == "__main__":
     
     print(f"✅ Saved {len(molecules)} molecules to {args.output_path}")
     print(f"📊 File size: {os.path.getsize(args.output_path) / 1024 / 1024:.2f} MB")
+    if skipped_files:
+        raise SystemExit(
+            f"{skipped} of {len(raw_files)} structures skipped; first: {skipped_files[:5]}"
+        )

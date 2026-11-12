@@ -88,17 +88,16 @@ def load_metadata(metadata_path: Path) -> pd.DataFrame:
 
 
 def get_download_urls_from_api(uniprot_id: str) -> Tuple[Optional[str], Optional[str]]:
-    """Get PDB and CIF download URLs from AlphaFold DB API."""
-    api_url = f"{API_BASE_URL}/{uniprot_id}"
-    try:
-        r = requests.get(api_url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                entry = data[0]
-                return entry.get('pdbUrl'), entry.get('cifUrl')
-    except Exception:
-        pass
+    """Get PDB and CIF download URLs from AlphaFold DB API.
+
+    Network and HTTP errors raise; ``(None, None)`` means the API returned no entry.
+    """
+    r = requests.get(f"{API_BASE_URL}/{uniprot_id}", timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, list) and len(data) > 0:
+        entry = data[0]
+        return entry.get('pdbUrl'), entry.get('cifUrl')
     return None, None
 
 
@@ -141,11 +140,7 @@ def analyze_metadata(metadata_path: Path) -> None:
     """
     print(f"Loading and analyzing metadata: {metadata_path}")
     
-    try:
-        df = load_metadata(metadata_path)
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return
+    df = load_metadata(metadata_path)
     
     total_representatives = len(df)
     print(f"\nTotal representative proteins: {total_representatives:,}")
@@ -222,11 +217,7 @@ def create_manifest(
     
     # Load metadata
     print(f"Loading metadata from: {metadata_path}")
-    try:
-        df = load_metadata(metadata_path)
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return
+    df = load_metadata(metadata_path)
     
     # Apply filters: pLDDT score and sequence length
     print(
@@ -268,7 +259,7 @@ def create_manifest(
     uniprot_ids = final_df['repId'].tolist()
     pdb_urls = [None] * len(uniprot_ids)
     cif_urls = [None] * len(uniprot_ids)
-    failed_count = 0
+    failures = []  # (uniprot_id, reason)
     
     def fetch_urls_with_index(idx_uniprot_id):
         idx, uniprot_id = idx_uniprot_id
@@ -290,16 +281,15 @@ def create_manifest(
                     pdb_urls[idx] = pdb_url
                     cif_urls[idx] = cif_url
                 else:
-                    failed_count += 1
-            except Exception:
-                failed_count += 1
+                    failures.append((uniprot_ids[idx], "API returned no PDB/CIF URL"))
+            except Exception as e:
+                failures.append((uniprot_ids[futures[future]], f"{type(e).__name__}: {e}"))
     
     final_df['pdb_url'] = pdb_urls
     final_df['cif_url'] = cif_urls
     
-    if failed_count > 0:
-        print(f"Warning: Failed to get URLs for {failed_count} proteins")
-        # Remove entries without URLs
+    if failures:
+        # Entries without URLs are left out of the manifest and listed in a failure file.
         final_df = final_df[final_df['pdb_url'].notna() | final_df['cif_url'].notna()]
         print(f"Manifest will contain {len(final_df):,} proteins with valid URLs")
     
@@ -309,6 +299,13 @@ def create_manifest(
     
     print(f"\n✓ Manifest created successfully: {output_path}")
     print(f"  Contains {len(final_df):,} NEW proteins ready for download")
+    if failures:
+        failed_path = Path(f"{output_path}.failed.tsv")
+        failed_path.write_text("".join(f"{uid}\t{reason}\n" for uid, reason in failures))
+        raise RuntimeError(
+            f"URL lookup failed for {len(failures)} of {len(uniprot_ids)} proteins; "
+            f"they are not in the manifest. Failure list: {failed_path}"
+        )
 
 
 def main():
