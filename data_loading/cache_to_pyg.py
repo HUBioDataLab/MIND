@@ -113,19 +113,17 @@ def _init_conversion_worker(config: dict) -> None:
 
 
 def _convert_one_molecule(mol):
-    """ProcessPool worker: convert a single molecule, returning (data, reason).
+    """ProcessPool worker: convert a single molecule, returning (data, failure).
 
-    Returns (Data, None) on success, (None, reason_str) on skip/failure so the
-    parent can keep the original skip-accounting and first-fail diagnostics.
+    Returns (Data, None) on success, (None, None) when the molecule is dropped on
+    purpose (``molecule_max_atoms`` or ``pre_filter``) and (None, reason) when the
+    conversion failed, so the parent can fail the build with the molecule id.
     """
     conv = _WORKER_CONVERTER
     try:
-        pyg_data = conv._create_pyg_data_object(mol)
-        if pyg_data is not None:
-            return pyg_data, None
-        return None, conv._diagnose_skip(mol)
-    except Exception as e:  # noqa: BLE001 - mirror original broad catch
-        return None, f"Exception: {e}"
+        return conv._create_pyg_data_object(mol), None
+    except Exception as e:  # reported to the parent, which fails the build
+        return None, f"{getattr(mol, 'id', '?')}: {type(e).__name__}: {e}"
 
 
 class OptimizedUniversalDataset(InMemoryDataset):
@@ -233,8 +231,8 @@ class OptimizedUniversalDataset(InMemoryDataset):
         molecules = list(molecule_iterator)
 
         data_list: List[Data] = []
-        skipped_count = 0
-        first_fail_reason: Optional[str] = None
+        filtered_count = 0
+        failures: List[str] = []
 
         cpu = os.cpu_count() or 2
         if self.conversion_num_workers is None:
@@ -259,13 +257,13 @@ class OptimizedUniversalDataset(InMemoryDataset):
                 _convert_one_molecule(mol)
                 for mol in tqdm(molecules, desc="Converting molecules")
             )
-            for pyg_data, reason in results:
-                if pyg_data is not None:
+            for pyg_data, failure in results:
+                if failure is not None:
+                    failures.append(failure)
+                elif pyg_data is not None:
                     data_list.append(pyg_data)
                 else:
-                    if first_fail_reason is None:
-                        first_fail_reason = reason
-                    skipped_count += 1
+                    filtered_count += 1
         else:
             print(f"🚀 Converting with {num_workers} parallel workers...")
             # chunksize amortizes IPC; map preserves input order.
@@ -282,31 +280,34 @@ class OptimizedUniversalDataset(InMemoryDataset):
                 initializer=_init_conversion_worker,
                 initargs=(worker_config,),
             ) as executor:
-                for pyg_data, reason in tqdm(
+                for pyg_data, failure in tqdm(
                     executor.map(_convert_one_molecule, molecules, chunksize=chunksize),
                     total=len(molecules),
                     desc="Converting molecules",
                 ):
-                    if pyg_data is not None:
+                    if failure is not None:
+                        failures.append(failure)
+                    elif pyg_data is not None:
                         data_list.append(pyg_data)
                     else:
-                        if first_fail_reason is None:
-                            first_fail_reason = reason
-                        skipped_count += 1
+                        filtered_count += 1
 
-        if not data_list:
-            msg = (
-                f"No molecules were processed successfully. Skipped {skipped_count} molecules."
+        if failures:
+            raise RuntimeError(
+                f"{len(failures)} of {len(molecules)} molecules failed conversion "
+                f"(first: {failures[:3]}); fix the input cache and rebuild"
             )
-            if first_fail_reason:
-                msg += f" First skip reason: {first_fail_reason}"
-            raise RuntimeError(msg)
+        if not data_list:
+            raise RuntimeError(
+                f"No molecules were converted: all {filtered_count} were filtered out "
+                "by molecule_max_atoms or pre_filter"
+            )
 
         # Memory usage info
         ram_mb = len(data_list) * 20 / 1024
         print(f"✅ Converted {len(data_list):,} molecules to PyG format")
-        if skipped_count > 0:
-            print(f"⚠️  Skipped {skipped_count} molecules")
+        if filtered_count > 0:
+            print(f"⚠️  Filtered out {filtered_count} molecules (molecule_max_atoms or pre_filter)")
         print(f"💾 Estimated RAM usage: ~{ram_mb:.0f}MB")
         if ram_mb > 2000:
             print(f"⚠️  Large dataset! Consider using smaller chunks for 1M+ proteins.")
@@ -317,33 +318,17 @@ class OptimizedUniversalDataset(InMemoryDataset):
         torch.save((data, slices), self.processed_paths[0])
         print(f"✅ Processing complete! Saved to: {self.processed_paths[0]}")
 
-    def _diagnose_skip(self, mol: UniversalMolecule) -> str:
-        """Return a short reason why this molecule would be skipped (for error messages)."""
-        try:
-            atoms = mol.get_all_atoms()
-            if not atoms:
-                return "get_all_atoms() returned empty (molecule has no blocks or blocks have no atoms)"
-            if self.molecule_max_atoms is not None and len(atoms) > self.molecule_max_atoms:
-                return f"molecule has {len(atoms)} atoms > molecule_max_atoms={self.molecule_max_atoms}"
-            # Try actual conversion with raise_on_error to capture the real error
-            try:
-                out = self._universal_to_pyg(mol, raise_on_error=True)
-                if out is None:
-                    return "_universal_to_pyg returned None (empty atoms)"
-            except Exception as e:
-                return str(e)
-            return "unknown"
-        except Exception as e:
-            return str(e)
-
     def _create_pyg_data_object(self, mol: UniversalMolecule) -> Optional[Data]:
-        """Helper function to filter and convert a single UniversalMolecule."""
+        """Convert one molecule; None means dropped by molecule_max_atoms or pre_filter.
+
+        A molecule that cannot be converted raises.
+        """
         if self.molecule_max_atoms is not None and len(mol.get_all_atoms()) > self.molecule_max_atoms:
             return None
 
-        pyg_data = self._universal_to_pyg(mol)
+        pyg_data = self._universal_to_pyg(mol, raise_on_error=True)
         if pyg_data is None:
-            return None
+            raise ValueError("molecule has no atoms")
         if self.pre_filter is not None and not self.pre_filter(pyg_data):
             return None
         if self.pre_transform is not None:
