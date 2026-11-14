@@ -601,6 +601,11 @@ def flatten_eval(eval_dir: Path, catalog: dict, outputs_root: Optional[Path]) ->
     git = prov.get("git") or {}
     settings = {"masking_protocol": prov.get("masking_protocol"), "counterfactual": counterfactual,
                 "domains": prov.get("domains")}
+    hiding = prov.get("unimol_masked_geometry_hiding")
+    if hiding is not None:  # recorded since the eval-time override; older files keep their settings hash
+        if not isinstance(hiding, dict) or not isinstance(hiding.get("effective"), dict):
+            raise ValueError(f"{where}: provenance.unimol_masked_geometry_hiding has no 'effective' mapping")
+        settings["unimol_masked_geometry_hiding"] = hiding["effective"]
     base = {
         "schema_version": SCHEMA_VERSION, "model_key": card["name"] if card else f"ckpt_sha256:{sha[:12]}",
         "model_kind": "mind", "model_sha256": sha, "hf_revision": None, "hf_model": None,

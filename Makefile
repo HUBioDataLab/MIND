@@ -215,10 +215,13 @@ build-edge-free:
 # EVAL_CONFIG see identical masks. OUT must be a new directory.
 #   make eval-pretrain CKPT=<ckpt> SPLIT=test SEED=0 GPU=<id> OUT=<new dir> \
 #        [EVAL_CONFIG=pretraining_config_multidomain_1m_coconut] [DOMAINS=protein,rna] [MAX_BATCHES=N]
-#        [COUNTERFACTUAL=<mode> [CF_SIGMA=<Angstrom>]]
+#        [COUNTERFACTUAL=<mode> [CF_SIGMA=<Angstrom>]] [HIDING=on BOND_THRESHOLD=2.1 | HIDING=off]
+# HIDING overrides the checkpoint's UniMol masked-geometry hiding for the evaluation only (default: checkpoint).
 # COUNTERFACTUAL (G1 step 0, core/counterfactual_eval.py) corrupts what the encoder/ESA see of the
 # masked UniMol atoms, evaluation only: masked_pos_noise (CF_SIGMA, default 1.0), masked_pos_random,
 # masked_dist_shuffle, esa_edges_remove, esa_edges_shuffle, masked_edges_remove. Unset/none = unchanged.
+EVAL_HIDING_ARGS = $(if $(strip $(HIDING)),--unimol-geometry-hiding $(HIDING),) \
+	$(if $(strip $(BOND_THRESHOLD)),--unimol-bond-threshold $(BOND_THRESHOLD),)
 eval-pretrain:
 	@test -n "$(CKPT)" -a -n "$(SPLIT)" -a -n "$(OUT)" || { echo "ERROR: set CKPT, SPLIT and OUT"; exit 1; }
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; exit 1; fi
@@ -228,7 +231,7 @@ eval-pretrain:
 		$(if $(strip $(EVAL_CONFIG)),--config-yaml-path core/$(EVAL_CONFIG).yaml,) \
 		$(if $(strip $(DOMAINS)),--domains $(DOMAINS),) $(if $(strip $(MAX_BATCHES)),--max-batches $(MAX_BATCHES),) \
 		$(if $(strip $(COUNTERFACTUAL)),--counterfactual $(COUNTERFACTUAL),) \
-		$(if $(strip $(CF_SIGMA)),--counterfactual-sigma $(CF_SIGMA),) \
+		$(if $(strip $(CF_SIGMA)),--counterfactual-sigma $(CF_SIGMA),) $(EVAL_HIDING_ARGS) \
 		> $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Log: $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log"
 
@@ -236,7 +239,7 @@ eval-pretrain:
 # Runs the modes one after another in one detached shell on one GPU; each writes OUT_ROOT/<mode>/
 # (OUT_ROOT/<mode> must not exist). The loop stops at the first failing mode.
 #   make eval-counterfactual CKPT=<ckpt> SPLIT=test SEED=0 GPU=<id> OUT_ROOT=<new dir> \
-#        [CF_MODES="none masked_pos_noise ..."] [DOMAINS=unimol] [MAX_BATCHES=N]
+#        [CF_MODES="none masked_pos_noise ..."] [DOMAINS=unimol] [MAX_BATCHES=N] [HIDING=on BOND_THRESHOLD=2.1]
 CF_MODES ?= none masked_pos_noise masked_pos_random masked_dist_shuffle esa_edges_remove esa_edges_shuffle masked_edges_remove
 eval-counterfactual:
 	@test -n "$(CKPT)" -a -n "$(SPLIT)" -a -n "$(OUT_ROOT)" || { echo "ERROR: set CKPT, SPLIT and OUT_ROOT"; exit 1; }
@@ -248,7 +251,7 @@ eval-counterfactual:
 			--seed $(or $(SEED),0) --output-dir "$(OUT_ROOT)/$$mode" --device cuda:0 \
 			--domains $(or $(DOMAINS),unimol) --counterfactual $$mode \
 			$(if $(strip $(EVAL_CONFIG)),--config-yaml-path core/$(EVAL_CONFIG).yaml,) \
-			$(if $(strip $(MAX_BATCHES)),--max-batches $(MAX_BATCHES),); \
+			$(if $(strip $(MAX_BATCHES)),--max-batches $(MAX_BATCHES),) $(EVAL_HIDING_ARGS); \
 		done' > $(LOG_MONTH_DIR)/eval_counterfactual_$(SPLIT)_$(_LOG_DATETIME).log 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Modes: $(CF_MODES)   Log: $(LOG_MONTH_DIR)/eval_counterfactual_$(SPLIT)_$(_LOG_DATETIME).log"
 

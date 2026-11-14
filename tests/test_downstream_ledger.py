@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+from pathlib import Path
 
 import pytest
 
@@ -292,11 +293,13 @@ def test_embedding_only_sets_are_recorded_for_the_missing_report(tmp_path):
 
 # -- pretraining evaluations ---------------------------------------------------------------------------------
 
-def _eval_dir(path, *, counterfactual=None):
+def _eval_dir(path, *, counterfactual=None, hiding=None):
     path.mkdir(parents=True)
     provenance = {"checkpoint": {"path": "/m/model.ckpt", "sha256": SHA_A, "epoch": 98},
                   "git": {"commit": RUN_GIT, "dirty": True}, "split": "test", "seed": 0,
                   "masking_protocol": {"mlm_mask_ratio": 0.15}}
+    if hiding is not None:
+        provenance["unimol_masked_geometry_hiding"] = hiding
     summary = {"n_masked": 100, "top1_acc_real": 0.9, "top3_acc_real": 0.99, "ce_real": 0.2, "ece_real": 0.01,
                "top1_acc_virtual": None}
     metrics = {"provenance": provenance, "plan": {}, "losses": {}, "mask_digest": {},
@@ -320,6 +323,35 @@ def test_pretraining_and_counterfactual_evals_are_separate_tasks(tmp_path):
     cf = _rows(root, task="counterfactual", subset="unimol", metric="top1_acc_real")
     assert len(cf) == 1 and cf[0]["protocol_id"] == "masked_pos_noise"
     assert top1["protocol_settings_sha256"] != cf[0]["protocol_settings_sha256"]
+
+
+def test_eval_settings_carry_the_effective_geometry_hiding(tmp_path):
+    root, outputs = tmp_path / "results", tmp_path / "outputs"
+    card(outputs, "md4", SHA_A)
+    on = {"enabled": True, "bond_threshold_angstrom": 2.1}
+    off = {"enabled": False, "bond_threshold_angstrom": None}
+    dirs = {
+        "legacy": _eval_dir(tmp_path / "e" / "legacy", counterfactual="none"),  # metrics.json written before the record
+        "forced_on": _eval_dir(tmp_path / "e" / "forced_on", counterfactual="none",
+                               hiding={"source": "on", "checkpoint": off, "effective": on}),
+        "trained_on": _eval_dir(tmp_path / "e" / "trained_on", counterfactual="none",
+                                hiding={"source": "checkpoint", "checkpoint": on, "effective": on}),
+        "off": _eval_dir(tmp_path / "e" / "off", counterfactual="none",
+                         hiding={"source": "checkpoint", "checkpoint": off, "effective": off}),
+    }
+    ledger.ingest(root, outputs_root=outputs, eval_dirs=list(dirs.values()), command="test")
+    sha = {}
+    for row in _rows(root, task="counterfactual", subset="unimol", metric="top1_acc_real"):
+        name = Path(row["source_metrics_path"]).parent.name
+        sha[name] = row["protocol_settings_sha256"]
+    assert set(sha) == set(dirs)
+    # the same effective condition shares one settings hash, whatever the source of the flag
+    assert sha["forced_on"] == sha["trained_on"]
+    assert sha["off"] != sha["forced_on"]
+    # a legacy file keeps the hash it had before the record existed
+    legacy_settings = {"masking_protocol": {"mlm_mask_ratio": 0.15}, "counterfactual": {"mode": "none", "domains": ["unimol"]},
+                       "domains": None}
+    assert sha["legacy"] == ledger.sha256_json(legacy_settings)
 
 
 # -- annotations -------------------------------------------------------------------------------------------

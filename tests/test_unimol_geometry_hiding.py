@@ -799,3 +799,90 @@ def test_startup_logs_g1_disabled(monkeypatch, capsys, ckpt_path):
     )
     lines = [line for line in out.splitlines() if "G1 masked-geometry hiding" in line]
     assert lines == ["G1 masked-geometry hiding: DISABLED"]
+
+
+# ---------------------------------------------------------------------------
+# Evaluation override: one test condition for checkpoints trained with and without hiding
+# ---------------------------------------------------------------------------
+
+OFF = {"enabled": False, "bond_threshold_angstrom": None}
+ON = {"enabled": True, "bond_threshold_angstrom": THRESHOLD}
+
+
+def _checkpoint_without_the_key(src, dst):
+    """A checkpoint written before the flag existed: its config has no hiding key at all."""
+    checkpoint = torch.load(src, map_location="cpu", weights_only=False)
+    del checkpoint["hyper_parameters"]["config"]["unimol_masked_geometry_hiding"]
+    torch.save(checkpoint, dst)
+    return dst
+
+
+def _hidden_checkpoint(setup):
+    config = tev._config(setup["tmp"] / "data")
+    config.unimol_masked_geometry_hiding = dict(ON)
+    return tev._checkpoint(setup["tmp"] / "ckpts" / "hidden.ckpt", config, 0)  # same weights as "a" (seed 0)
+
+
+def test_eval_switches_hiding_on_for_a_checkpoint_without_the_key(spread_setup):
+    tmp = spread_setup["tmp"]
+    old = _checkpoint_without_the_key(spread_setup["a"], tmp / "ckpts" / "old.ckpt")
+    hidden = _hidden_checkpoint(spread_setup)
+    plain = tev._run(old, tmp / "plain", "--domains", "unimol")
+    forced = tev._run(old, tmp / "forced", "--domains", "unimol",
+                      "--unimol-geometry-hiding", "on", "--unimol-bond-threshold", str(THRESHOLD))
+    trained = tev._run(hidden, tmp / "trained", "--domains", "unimol")
+    assert forced["mask_digest"] == plain["mask_digest"] == trained["mask_digest"]
+    # same weights + forced hiding = the model whose checkpoint carries the flag
+    assert forced["domain_mlm"]["unimol"] == trained["domain_mlm"]["unimol"]
+    assert forced["domain_mlm"]["unimol"] != plain["domain_mlm"]["unimol"]
+    assert forced["provenance"]["unimol_masked_geometry_hiding"] == {"source": "on", "checkpoint": OFF, "effective": ON}
+    assert plain["provenance"]["unimol_masked_geometry_hiding"] == {"source": "checkpoint", "checkpoint": OFF,
+                                                                    "effective": OFF}
+    assert trained["provenance"]["unimol_masked_geometry_hiding"] == {"source": "checkpoint", "checkpoint": ON,
+                                                                      "effective": ON}
+
+
+def test_eval_switches_hiding_off_for_a_hidden_checkpoint(spread_setup):
+    tmp = spread_setup["tmp"]
+    hidden = _hidden_checkpoint(spread_setup)
+    off = tev._run(hidden, tmp / "off", "--domains", "unimol", "--unimol-geometry-hiding", "off")
+    plain = tev._run(spread_setup["a"], tmp / "plain", "--domains", "unimol")
+    assert off["domain_mlm"]["unimol"] == plain["domain_mlm"]["unimol"]
+    assert off["provenance"]["unimol_masked_geometry_hiding"] == {"source": "off", "checkpoint": ON, "effective": OFF}
+
+
+@pytest.mark.parametrize("extra", [
+    ["--unimol-geometry-hiding", "on"],                                     # on needs an explicit threshold
+    ["--unimol-bond-threshold", "2.1"],                                     # a threshold without on
+    ["--unimol-geometry-hiding", "off", "--unimol-bond-threshold", "2.1"],
+    ["--unimol-geometry-hiding", "maybe"],
+    ["--unimol-geometry-hiding", "on", "--unimol-bond-threshold", "-1"],
+    ["--unimol-geometry-hiding", "on", "--unimol-bond-threshold", "nan"],
+])
+def test_eval_hiding_arguments_fail_loudly(extra, tmp_path):
+    with pytest.raises(SystemExit):
+        ev.parse_args(["--ckpt", "x.ckpt", "--split", "test", "--seed", "0", "--output-dir", str(tmp_path / "o"), *extra])
+
+
+def test_yaml_key_absent_from_the_checkpoint_is_reported_not_dropped():
+    merged, ignored = ev.merge_eval_config({"mlm_mask_ratio": 0.15}, {"unimol_masked_geometry_hiding": dict(ON)})
+    assert "unimol_masked_geometry_hiding" not in merged
+    assert ignored == {"unimol_masked_geometry_hiding": {"checkpoint": ev.ABSENT_FROM_CHECKPOINT, "yaml": ON}}
+
+
+@pytest.mark.parametrize("target, out", [("eval-pretrain", "OUT=/nonexistent/o"),
+                                         ("eval-counterfactual", "OUT_ROOT=/nonexistent/o")])
+def test_eval_make_targets_pass_the_hiding_override(target, out):
+    import subprocess
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def dry_run(*extra):
+        result = subprocess.run(["make", "--no-print-directory", "-n", target, "CKPT=/c.ckpt", "SPLIT=test", "GPU=0",
+                                 out, *extra], cwd=repo, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        return " ".join(result.stdout.replace("\\\n", " ").split())
+
+    assert "--unimol-geometry-hiding on --unimol-bond-threshold 2.1" in dry_run("HIDING=on", "BOND_THRESHOLD=2.1")
+    assert "--unimol-geometry-hiding off" in dry_run("HIDING=off")
+    assert "--unimol-geometry-hiding" not in dry_run()

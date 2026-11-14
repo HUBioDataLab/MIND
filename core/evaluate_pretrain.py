@@ -5,6 +5,7 @@
         --output-dir /path/to/new_dir [--config-yaml-path core/<config>.yaml] \
         [--domains protein,rna] [--max-batches N] [--device cuda:0] \
         [--counterfactual MODE [--counterfactual-sigma ANGSTROM]]
+        [--unimol-geometry-hiding checkpoint|on|off [--unimol-bond-threshold ANGSTROM]]
 
 The checkpoint is only read (``torch.load`` with ``map_location='cpu'``); its
 sha256, size and mtime are recorded and re-checked at the end. Outputs go to
@@ -41,6 +42,12 @@ corrupts, at evaluation time only, what the encoder/ESA see of the masked UniMol
 (position, distances, ESA edges) while the targets, the mask and the distance-loss frame
 stay clean. protein/RNA/COCONUT graphs are untouched. The default ``none`` leaves the
 evaluation exactly as before; ``metrics.json`` gets a ``counterfactual`` block either way.
+
+UniMol masked-geometry hiding (``unimol_masked_geometry_hiding``) is a model setting, so it
+comes from the checkpoint by default (a checkpoint without the key: disabled). ``--unimol-geometry-hiding
+on --unimol-bond-threshold A`` / ``off`` override it for this evaluation only, so that checkpoints trained
+with and without hiding can be measured under one test condition. The effective setting is recorded in
+``provenance.unimol_masked_geometry_hiding``; a YAML value is never applied (it is listed as not applied).
 
 A real forward needs a GPU (flash_varlen). The CPU path exists for tests,
 which replace the flash kernel with an SDPA stand-in.
@@ -87,7 +94,12 @@ from core.metrics.domain_mlm_metrics_callback import DomainMLMMetricsCallback
 from core.metrics.protein_per_atom_metrics_callback import ProteinPerAtomMetricsCallback
 from core.metrics.rna_per_atom_metrics_callback import PerAtomMetricsCallback
 from core.metrics.virtual_slot_diagnostics_callback import VirtualSlotDiagnosticsCallback
-from core.pretraining_config import create_pretraining_config, load_config_yaml
+from core.pretraining_config import (
+    create_pretraining_config,
+    load_config_yaml,
+    normalize_unimol_masked_geometry_hiding_config,
+    validate_unimol_bond_threshold,
+)
 from core.pretraining_model import PretrainingESAModel
 from data_loading.lazy_universal_dataset import LazyUniversalDataset
 from data_loading.pt_schema import edge_free_runtime_contract_from_config
@@ -106,6 +118,9 @@ MASKING_KEYS = (
     "coconut_num_random_walks",
 )
 CONFIG_DOMAIN_KEYS = {"pdb": "protein", "metabolite": "coconut"}
+ABSENT_FROM_CHECKPOINT = "<absent from checkpoint>"
+HIDING_KEY = "unimol_masked_geometry_hiding"
+HIDING_MODES = ("checkpoint", "on", "off")
 EMBEDDING_NODES_PER_BATCH = 256
 EMBEDDING_MAX_NODES_PER_DOMAIN = 4096
 
@@ -205,9 +220,47 @@ def merge_eval_config(model_config: dict, yaml_config: Optional[dict]) -> tuple:
     for key, value in yaml_config.items():
         if key in DATA_SELECTION_KEYS or key in MASKING_KEYS:
             merged[key] = value
-        elif key in model_config and model_config[key] != value:
-            ignored[key] = {"checkpoint": model_config[key], "yaml": value}
+        elif model_config.get(key, ABSENT_FROM_CHECKPOINT) != value:
+            # also a key the checkpoint does not have (an older run): never dropped silently
+            ignored[key] = {"checkpoint": model_config.get(key, ABSENT_FROM_CHECKPOINT), "yaml": value}
     return merged, ignored
+
+
+def resolve_geometry_hiding(model_config: dict, mode: str, threshold: Optional[float]) -> tuple:
+    """Return (model config for this evaluation, provenance record) of the UniMol geometry hiding.
+
+    ``checkpoint`` keeps the checkpoint's setting (absent = disabled); ``on``/``off`` override it for the
+    evaluation only. A disabled setting is recorded without a threshold, so equal conditions compare equal.
+    """
+    if mode not in HIDING_MODES:
+        raise ValueError(f"unimol geometry hiding mode must be one of {HIDING_MODES}, got {mode!r}")
+    stored = normalize_unimol_masked_geometry_hiding_config(model_config.get(HIDING_KEY))
+    if mode == "checkpoint":
+        if threshold is not None:
+            raise ValueError("--unimol-bond-threshold applies to --unimol-geometry-hiding on only")
+        effective = dict(stored)
+    elif mode == "on":
+        if threshold is None:
+            raise ValueError("--unimol-geometry-hiding on needs an explicit --unimol-bond-threshold")
+        effective = normalize_unimol_masked_geometry_hiding_config(
+            {"enabled": True, "bond_threshold_angstrom": threshold})
+    else:
+        if threshold is not None:
+            raise ValueError("--unimol-bond-threshold applies to --unimol-geometry-hiding on only")
+        effective = normalize_unimol_masked_geometry_hiding_config(None)
+    if not effective["enabled"]:
+        effective = normalize_unimol_masked_geometry_hiding_config(None)
+    config = dict(model_config)
+    config[HIDING_KEY] = dict(effective)
+    return config, {"source": mode, "checkpoint": stored, "effective": effective}
+
+
+def describe_geometry_hiding(record: dict) -> str:
+    def text(value):
+        return (f"ENABLED (bond_threshold_angstrom={value['bond_threshold_angstrom']})"
+                if value["enabled"] else "DISABLED")
+    return (f"UniMol masked-geometry hiding: {text(record['effective'])}; source={record['source']} "
+            f"(checkpoint: {text(record['checkpoint'])})")
 
 
 def resolve_domains(config, requested: Optional[str]) -> List[str]:
@@ -585,6 +638,11 @@ def parse_args(argv=None):
                              + ", ".join(COUNTERFACTUAL_MODES) + " (default none = unchanged evaluation)")
     parser.add_argument("--counterfactual-sigma", type=float, default=None,
                         help=f"Angstrom, only for masked_pos_noise (default {DEFAULT_NOISE_SIGMA} for that mode)")
+    parser.add_argument("--unimol-geometry-hiding", choices=HIDING_MODES, default="checkpoint",
+                        help="UniMol masked-geometry hiding for this evaluation: checkpoint (default, the trained "
+                             "setting; absent = off), on (needs --unimol-bond-threshold) or off")
+    parser.add_argument("--unimol-bond-threshold", type=float, default=None,
+                        help="Angstrom, only with --unimol-geometry-hiding on (no default)")
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
     args = parser.parse_args(argv)
     if args.threads < 1:
@@ -597,6 +655,15 @@ def parse_args(argv=None):
         build_counterfactual_settings(args.counterfactual, args.counterfactual_sigma)
     except ValueError as error:
         parser.error(str(error))
+    if args.unimol_geometry_hiding == "on" and args.unimol_bond_threshold is None:
+        parser.error("--unimol-geometry-hiding on needs an explicit --unimol-bond-threshold")
+    if args.unimol_geometry_hiding != "on" and args.unimol_bond_threshold is not None:
+        parser.error("--unimol-bond-threshold applies to --unimol-geometry-hiding on only")
+    if args.unimol_bond_threshold is not None:
+        try:
+            validate_unimol_bond_threshold(args.unimol_bond_threshold, "--unimol-bond-threshold")
+        except (TypeError, ValueError) as error:
+            parser.error(str(error))
     return args
 
 
@@ -671,7 +738,10 @@ def _evaluate(args, ckpt: Path, out: Path, accelerator, devices, ckpt_sha256: st
     if masking_changes:
         print(f"ℹ️  Masking protocol differs from the checkpoint's training config: {masking_changes}")
 
-    model = PretrainingESAModel(config=dict(model_config))
+    model_eval_config, hiding_record = resolve_geometry_hiding(
+        model_config, args.unimol_geometry_hiding, args.unimol_bond_threshold)
+    print(describe_geometry_hiding(hiding_record))
+    model = PretrainingESAModel(config=model_eval_config)
     model.on_load_checkpoint(checkpoint)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     for key in MASKING_KEYS:
@@ -769,6 +839,7 @@ def _evaluate(args, ckpt: Path, out: Path, accelerator, devices, ckpt_sha256: st
             "yaml_keys_not_applied": ignored,
             "counterfactual": {k: counterfactual_block[k] for k in ("mode", "sigma", "domains", "mode_revision")
                                if k in counterfactual_block},
+            HIDING_KEY: hiding_record,
             "masking_protocol": {k: eval_dict.get(k) for k in MASKING_KEYS},
             "masking_differs_from_checkpoint": masking_changes,
             "max_atoms_per_batch": max_atoms,
