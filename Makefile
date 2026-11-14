@@ -72,7 +72,7 @@ else
   CONFIG_IS_FAST := 0
 endif
 
-# Log directory: logs/<MonthYear>/  e.g. logs/June2026/
+# Log directory: logs/<MonthYear>/
 LOG_MONTH_DIR := logs/$(shell date +%B%Y)
 
 # Log filename: <name><datetime>.log or <name>fast<datetime>.log

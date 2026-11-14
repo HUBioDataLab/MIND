@@ -43,8 +43,8 @@ multi_domain:
     
     rna:
       enabled: true
-      chunk_dir: "${MIND_DATA_ROOT}/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot_edgefree"  # edge-free June-equivalent copy
-      chunk_range: null  # All 67 June-equivalent 23-slot chunks (8,556 graphs <=5,000 real non-H atoms).
+      chunk_dir: "${MIND_DATA_ROOT}/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot_edgefree"  # edge-free baseline-subset copy
+      chunk_range: null  # All 67 baseline-subset 23-slot chunks (8,556 graphs <=5,000 real non-H atoms).
       max_graph_atoms: 6000
     
   # Natural full pass requested (atom quotas and domain cycling are off). Lightning may still

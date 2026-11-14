@@ -61,14 +61,14 @@ code is [`protein_adapter.py`](../../data_loading/adapters/protein_adapter.py),
 ## RNA subset derivation
 
 An RNA subset can be derived from existing PyG chunks without changing the production
-source. [`data_loading/build_rna_june_equivalent_manifest.py`](../../data_loading/build_rna_june_equivalent_manifest.py)
+source. [`data_loading/build_rna_baseline_subset_manifest.py`](../../data_loading/build_rna_baseline_subset_manifest.py)
 counts real non-hydrogen atoms (virtual padding excluded) and records stable molecule
 IDs with source chunk/index provenance;
-[`data_loading/derive_rna_june_equivalent_pt.py`](../../data_loading/derive_rna_june_equivalent_pt.py)
+[`data_loading/derive_rna_baseline_subset_pt.py`](../../data_loading/derive_rna_baseline_subset_pt.py)
 re-collates only the manifest-selected graphs into a new immutable output and refuses
 to overwrite an existing one. The selection is defined on real atoms, not on
 `num_nodes` (a 23-slot graph contains padding), and the source PTs are checked for
-unchanged fingerprints. `tests/test_rna_june_equivalent.py` covers the manifest
+unchanged fingerprints. `tests/test_rna_baseline_subset.py` covers the manifest
 semantics and source immutability.
 
 ## Chunk conversion and metadata
@@ -182,7 +182,7 @@ finite coordinates, molecule IDs, and domain labels. For a requested adapter
 or pipeline change, the focused checks are:
 
 ```bash
-pytest -v tests/test_adapters.py tests/test_build_edge_free_chunks.py tests/test_rna_june_equivalent.py
+pytest -v tests/test_adapters.py tests/test_build_edge_free_chunks.py tests/test_rna_baseline_subset.py
 ```
 
 Then inspect one generated graph with `torch.load` and confirm `pos` has shape

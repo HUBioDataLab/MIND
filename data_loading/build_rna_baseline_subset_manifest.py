@@ -199,7 +199,7 @@ def build_manifest(
     first_chunk: int = 0,
     last_chunk: int = 66,
     max_real_non_h_atoms: int = 5000,
-    historical_june_graphs: int = 9783,
+    reference_graphs: int = 9783,
     expected_historical_raw: int = 12316,
     expected_current: int = 12869,
     expected_raw_intersection: int = 12313,
@@ -262,7 +262,7 @@ def build_manifest(
             "source_base": str(source_base.resolve()),
             "chunk_range": [first_chunk, last_chunk],
             "max_real_non_h_atoms": max_real_non_h_atoms,
-            "historical_june_graphs_comparison_only": historical_june_graphs,
+            "reference_graphs_comparison_only": reference_graphs,
             "counts": {
                 "historical_raw_manifest": len(raw_names),
                 "current_manifest": len(current_names),
@@ -273,7 +273,7 @@ def build_manifest(
                 "pt_graphs_scanned": len(scanned_ids),
                 "selected": len(selected),
                 "rejected": len(rejected),
-                "selected_minus_historical_june": len(selected) - historical_june_graphs,
+                "selected_minus_reference": len(selected) - reference_graphs,
             },
             "raw_only_ids": sorted(raw_set - current_set),
             "legacy_filtered_stale_cif_sample": stale_cifs[:100],
@@ -303,8 +303,8 @@ def build_manifest(
         report_tmp.unlink(missing_ok=True)
 
     print(
-        "RNA_JUNE_MANIFEST=GO "
-        f"selected={len(selected)} historical_comparison={historical_june_graphs} "
+        "RNA_SUBSET_MANIFEST=GO "
+        f"selected={len(selected)} reference_comparison={reference_graphs} "
         f"manifest={output_manifest}",
         flush=True,
     )
@@ -322,7 +322,7 @@ def main() -> None:
     parser.add_argument("--first-chunk", type=int, default=0)
     parser.add_argument("--last-chunk", type=int, default=66)
     parser.add_argument("--max-real-non-h-atoms", type=int, default=5000)
-    parser.add_argument("--historical-june-graphs", type=int, default=9783)
+    parser.add_argument("--reference-graphs", type=int, default=9783)
     args = parser.parse_args()
     build_manifest(**vars(args))
 

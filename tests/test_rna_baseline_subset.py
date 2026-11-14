@@ -1,4 +1,4 @@
-"""Focused tests for June-equivalent RNA selection and PT derivation."""
+"""Focused tests for baseline-subset RNA selection and PT derivation."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ import torch
 from torch_geometric.data import Data
 from torch_geometric.data.collate import collate
 
-from data_loading.build_rna_june_equivalent_manifest import (
+from data_loading.build_rna_baseline_subset_manifest import (
     build_manifest,
     real_non_hydrogen_count,
 )
-from data_loading.derive_rna_june_equivalent_pt import derive_all_chunks
+from data_loading.derive_rna_baseline_subset_pt import derive_all_chunks
 
 
 def _write_manifest(path: Path, names: list[str]) -> None:
@@ -80,7 +80,7 @@ def _write_source_chunk(source_base: Path, chunk_index: int, graphs: list[Data])
     return pt_path
 
 
-class TestRnaJuneEquivalent(unittest.TestCase):
+class TestRnaBaselineSubset(unittest.TestCase):
     def test_manifest_uses_real_atoms_and_audits_stale_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -104,8 +104,8 @@ class TestRnaJuneEquivalent(unittest.TestCase):
             for name in ["a", "b", "c", "legacy_only", "stale"]:
                 (filtered_dir / f"{name}.cif").touch()
 
-            output_manifest = root / "june_v2.csv"
-            output_report = root / "june_v2.json"
+            output_manifest = root / "subset_v2.csv"
+            output_report = root / "subset_v2.json"
             report = build_manifest(
                 source_base=source_base,
                 historical_raw_manifest=raw_manifest,
@@ -116,7 +116,7 @@ class TestRnaJuneEquivalent(unittest.TestCase):
                 first_chunk=0,
                 last_chunk=1,
                 max_real_non_h_atoms=2,
-                historical_june_graphs=3,
+                reference_graphs=3,
                 expected_historical_raw=4,
                 expected_current=4,
                 expected_raw_intersection=3,
@@ -128,7 +128,7 @@ class TestRnaJuneEquivalent(unittest.TestCase):
 
             self.assertEqual(report["counts"]["selected"], 3)
             self.assertEqual(report["counts"]["rejected"], 1)
-            self.assertEqual(report["counts"]["selected_minus_historical_june"], 0)
+            self.assertEqual(report["counts"]["selected_minus_reference"], 0)
             with output_manifest.open(newline="") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual([row["name"] for row in rows], ["a", "b", "c"])

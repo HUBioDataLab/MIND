@@ -20,10 +20,10 @@ from torch_geometric.data.separate import separate
 
 try:
     from data_loading.create_chunk_metadata import assign_bucket
-    from data_loading.build_rna_june_equivalent_manifest import real_non_hydrogen_count
+    from data_loading.build_rna_baseline_subset_manifest import real_non_hydrogen_count
 except ModuleNotFoundError:
     from create_chunk_metadata import assign_bucket
-    from build_rna_june_equivalent_manifest import real_non_hydrogen_count
+    from build_rna_baseline_subset_manifest import real_non_hydrogen_count
 
 
 def _sha256(path: Path) -> str:
@@ -261,7 +261,7 @@ def derive_chunk(
         "dataset_type": "rna",
         "total_atoms": total_nodes,
         "total_edges": total_edges,
-        "selection_policy": "membership in reviewed June-equivalent manifest",
+        "selection_policy": "membership in reviewed baseline-subset manifest",
         "selection_manifest_sha256": manifest_sha256,
         "source_chunk_file": str(source_pt.resolve()),
         "samples": output_samples,
@@ -324,7 +324,7 @@ def derive_all_chunks(
             output_pt = (
                 output_dir
                 / "processed"
-                / f"rna_june_equivalent_v2_chunk_{chunk_index:03d}.pt"
+                / f"rna_baseline_subset_v2_chunk_{chunk_index:03d}.pt"
             )
             print(f"Deriving chunk {chunk_index:03d} from {source_pt}", flush=True)
             chunk_report = derive_chunk(
@@ -388,7 +388,7 @@ def derive_all_chunks(
         raise
 
     print(
-        f"RNA_JUNE_DERIVED_PT=GO graphs={len(found_ids)} output_root={output_root}",
+        f"RNA_SUBSET_DERIVED_PT=GO graphs={len(found_ids)} output_root={output_root}",
         flush=True,
     )
     return report
