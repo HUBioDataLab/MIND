@@ -27,28 +27,28 @@ multi_domain:
       max_graph_atoms: 14336      # 1,024 residues x 14 slots
       oversized_graphs: skip      # 25 raw files exceed 1,024 residues; logged and excluded
       splits:
-        train: {chunk_dir: "/home/yusuf/data/proteins/processed_14atom_1m_edgefree_train", chunk_range: null}
-        val: {chunk_dir: "/home/yusuf/data/proteins/processed_14atom_1m_edgefree_val", chunk_range: [0, 0]}
-        test: {chunk_dir: "/home/yusuf/data/proteins/processed_14atom_1m_edgefree_test", chunk_range: [0, 0]}
+        train: {chunk_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_1m_edgefree_train", chunk_range: null}
+        val: {chunk_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_1m_edgefree_val", chunk_range: [0, 0]}
+        test: {chunk_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_1m_edgefree_test", chunk_range: [0, 0]}
     rna:
       enabled: true
       max_graph_atoms: 6000       # full corpus has graphs up to 102k atoms; no windowing yet
       oversized_graphs: skip
       splits:
-        train: {chunk_dir: "/home/yusuf/data/rna/processed_23slot_full_edgefree_train", chunk_range: null}
-        val: {chunk_dir: "/home/yusuf/data/rna/processed_23slot_full_edgefree_val", chunk_range: null}
-        test: {chunk_dir: "/home/yusuf/data/rna/processed_23slot_full_edgefree_test", chunk_range: null}
+        train: {chunk_dir: "${MIND_DATA_ROOT}/rna/processed_23slot_full_edgefree_train", chunk_range: null}
+        val: {chunk_dir: "${MIND_DATA_ROOT}/rna/processed_23slot_full_edgefree_val", chunk_range: null}
+        test: {chunk_dir: "${MIND_DATA_ROOT}/rna/processed_23slot_full_edgefree_test", chunk_range: null}
     unimol:
       enabled: true
       max_graph_atoms: 12000
       # All 200 chunks; name-sorted index 198 = chunk_98 (val), 199 = chunk_99 (test).
       splits:
-        train: {chunk_dir: "/home/yusuf/data/small_molecules/unimol/universal_unimol", chunk_range: [0, 197]}
-        val: {chunk_dir: "/home/yusuf/data/small_molecules/unimol/universal_unimol", chunk_range: [198, 198]}
-        test: {chunk_dir: "/home/yusuf/data/small_molecules/unimol/universal_unimol", chunk_range: [199, 199]}
+        train: {chunk_dir: "${MIND_DATA_ROOT}/small_molecules/unimol/universal_unimol", chunk_range: [0, 197]}
+        val: {chunk_dir: "${MIND_DATA_ROOT}/small_molecules/unimol/universal_unimol", chunk_range: [198, 198]}
+        test: {chunk_dir: "${MIND_DATA_ROOT}/small_molecules/unimol/universal_unimol", chunk_range: [199, 199]}
     metabolite:
       enabled: false  # off in the 3-domain reference; the four-domain config is pretraining_config_multidomain_1m_coconut.yaml
-      chunk_dir: "/home/yusuf/data/metabolites/processed"
+      chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed"
       chunk_range: null
   # Budgeted virtual epochs: a fixed atom budget split by domain weights and a fixed
   # batch count (constant plan length, so Lightning consumes every planned batch).
@@ -65,7 +65,7 @@ multi_domain:
 
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
-dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"  # stale path, not read in multi-domain mode (train_pretrain.py still reads the attribute)
+dataset_download_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom"  # single-domain loader only; unused while multi_domain.enabled is true
 
 # -------------------------
 # Data Loading Settings
@@ -213,10 +213,10 @@ geometry_neutral_virtual_slots:
   context_audit_batches: 4
   gradient_audit_batches: 1
 
-# G1 candidate C (UniMol): a masked UniMol atom keeps only its binary bond topology in the encoder/ESA
+# UniMol masked-geometry hiding: a masked UniMol atom keeps only its binary bond topology in the encoder/ESA
 # view; position, distances and distance-derived features are hidden. OFF in this file: the
-# *_unimol_hidden.yaml child of this config switches it on (a separate, user-run decision). The threshold is the largest distance
-# that still counts as a bond (never chosen from the masked element); 2.1 A was picked from a
+# *_unimol_hidden.yaml child of this config switches it on. The threshold is the largest distance
+# that still counts as a bond (never chosen from the masked element); 2.1 A comes from a
 # false-bond measurement on real UniMol molecules (tests/test_unimol_geometry_hiding.py).
 unimol_masked_geometry_hiding:
   enabled: false

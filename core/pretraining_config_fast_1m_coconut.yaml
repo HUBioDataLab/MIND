@@ -2,7 +2,7 @@
 # MIND - Fast check with all four domains: 1M protein, full RNA, UniMol, COCONUT
 # ===================================================================
 # The three-domain fast 1M check (removed config pretraining_config_fast_1m.yaml) plus COCONUT (chunks 0-1 in name order,
-# random 80/10/10 split). Graph-local coordination was repaired on 10 October.
+# random 80/10/10 split).
 # This config provides the user-started routing/crash gate; learning effects
 # require a matched from-scratch comparison (see the validate-feature skill).
 # Usage: make train GPU=<id> CONFIG=pretraining_config_fast_1m_coconut EPOCHS=3 LOG=fast_1m_coconut
@@ -25,25 +25,25 @@ multi_domain:
       max_graph_atoms: 14336      # 1,024 residues x 14 slots
       oversized_graphs: skip      # 25 raw files exceed 1,024 residues; logged and excluded
       splits:
-        train: {chunk_dir: "/home/yusuf/data/proteins/processed_14atom_1m_edgefree_train", chunk_range: [0, 0]}
-        val: {chunk_dir: "/home/yusuf/data/proteins/processed_14atom_1m_edgefree_val", chunk_range: [0, 0]}
-        test: {chunk_dir: "/home/yusuf/data/proteins/processed_14atom_1m_edgefree_test", chunk_range: [0, 0]}
+        train: {chunk_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_1m_edgefree_train", chunk_range: [0, 0]}
+        val: {chunk_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_1m_edgefree_val", chunk_range: [0, 0]}
+        test: {chunk_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_1m_edgefree_test", chunk_range: [0, 0]}
     rna:
       enabled: true
       max_graph_atoms: 6000       # full corpus has graphs up to 102k atoms; no windowing yet
       oversized_graphs: skip
       splits:
-        train: {chunk_dir: "/home/yusuf/data/rna/processed_23slot_full_edgefree_train", chunk_range: [0, 1]}
-        val: {chunk_dir: "/home/yusuf/data/rna/processed_23slot_full_edgefree_val", chunk_range: [0, 0]}
-        test: {chunk_dir: "/home/yusuf/data/rna/processed_23slot_full_edgefree_test", chunk_range: [0, 0]}
+        train: {chunk_dir: "${MIND_DATA_ROOT}/rna/processed_23slot_full_edgefree_train", chunk_range: [0, 1]}
+        val: {chunk_dir: "${MIND_DATA_ROOT}/rna/processed_23slot_full_edgefree_val", chunk_range: [0, 0]}
+        test: {chunk_dir: "${MIND_DATA_ROOT}/rna/processed_23slot_full_edgefree_test", chunk_range: [0, 0]}
     unimol:
       enabled: true
-      chunk_dir: "/home/yusuf/data/small_molecules/unimol/universal_unimol"
+      chunk_dir: "${MIND_DATA_ROOT}/small_molecules/unimol/universal_unimol"
       chunk_range: [0, 0]
       max_graph_atoms: 12000
     metabolite:
       enabled: true
-      chunk_dir: "/home/yusuf/data/metabolites/processed"   # 497 sibling processed_chunk_* directories
+      chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed"   # 497 sibling processed_chunk_* directories
       chunk_range: [0, 1]
   # Budgeted virtual epochs: a fixed atom budget split by domain weights and a fixed
   # batch count (constant plan length, so Lightning consumes every planned batch).
@@ -61,7 +61,7 @@ multi_domain:
 
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
-dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom"
+dataset_download_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom"  # single-domain loader only; unused while multi_domain.enabled is true
 
 num_workers: 8  # same as the full four-domain config; this fast gate tests the worker setting
 max_samples: null

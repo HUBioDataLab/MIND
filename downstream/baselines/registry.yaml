@@ -1,11 +1,11 @@
 # Baseline models for MIND downstream tasks. Weights live outside Git under
-# MIND_MODELS_ROOT (default /home/yusuf/models): Hugging Face repos in
+# MIND_MODELS_ROOT (default <repo>/models): Hugging Face repos in
 # huggingface/hub (HF cache layout), other files in other/<name>/.
 # `python -m downstream.baselines.fetch_models` downloads the pinned revisions and
-# writes MANIFEST.json with a sha256 per file. Checked available on 2026-10-25.
+# writes MANIFEST.json with a sha256 per file.
 #
-# Not downloaded yet: ESM-C (biohub/ESMC-300M, biohub/ESMC-600M; MIT per the
-# Biohub/esm README, needs trust_remote_code) is waiting for a decision.
+# Not listed: ESM-C (biohub/ESMC-300M, biohub/ESMC-600M; MIT per the
+# Biohub/esm README) needs trust_remote_code.
 
 models:
   # ---------------- protein, sequence ----------------

@@ -424,7 +424,7 @@ def test_processed_split_rejects_corrupt_payloads(tmp_path):
             common.MolnetProcessedSplit(target)
 
 
-def test_prepare_cli_validates_without_writing_and_refuses_download(tmp_path, capsys):
+def test_prepare_cli_validates_without_writing(tmp_path, capsys):
     config = write_family(tmp_path)
     source = tmp_path / "unimol_molnet"
     args = ["--task", "mn_esol", "--data-root", str(source / "mn_esol")]
@@ -432,9 +432,6 @@ def test_prepare_cli_validates_without_writing_and_refuses_download(tmp_path, ca
     with pytest.raises(ValueError, match="expected 902"):
         prepare.main(["validate", *args])
     assert not (source / "mn_esol" / "processed").exists()
-    with pytest.raises(SystemExit) as stop:
-        prepare.main(["download", *args])
-    assert stop.value.code != 0
     assert config["task"] == "mn_esol"
 
 

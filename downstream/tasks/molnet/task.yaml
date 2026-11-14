@@ -1,13 +1,14 @@
 # MoleculeNet (QM9 excluded): 14 downstream tasks from the Uni-Mol LMDB release, one task family (GO-style),
 # one processed directory per task under <source_root>/<task>/processed/<revision>.
 #
-# Source (Yusuf-approved 2026-11-09): molecular_property_prediction.tar.gz of the Uni-Mol repository (DP Technology),
-# extracted under <source_root>/raw/extracted/molecular_property_prediction/<dataset>/{train,valid,test}.lmdb.
-# The archive was downloaded and verified (md5/sha256) before; see <source_root>/provenance.json. No licence text
-# ships with the data: local use only, no redistribution. The pickles come from a third party and are read with a
-# restricted unpickler (numpy arrays only).
+# Source: molecular_property_prediction.tar.gz of the Uni-Mol repository (DP Technology), linked from the
+# github.com/deepmodeling/Uni-Mol README (`archive` below). `download` fetches it into <source_root>/raw (an archive
+# already there is checked, never fetched again), checks its size, md5 and sha256 and extracts it to
+# <source_root>/raw/extracted/molecular_property_prediction/<dataset>/{train,valid,test}.lmdb; every run is recorded in
+# <source_root>/provenance.json. No licence text ships with the data: local use only, no redistribution. The pickles
+# come from a third party and are read with a restricted unpickler (numpy arrays only).
 #
-# Decisions (Yusuf, 2026-11-09):
+# Processing rules:
 #   split          Uni-Mol scaffold split as shipped in the LMDB files (train / valid / test); primary.
 #   conformer      the FIRST conformer (index 0) of the 11 stored per molecule. The last one (index 10) is the flat
 #                  fallback of Uni-Mol and is never used. Molecules whose 11 conformers are all flat (z = 0, RDKit
@@ -20,16 +21,26 @@
 #   empty/single   a molecule left with 0 heavy atoms (ion/salt/H-only) is kept in the processed file, flagged
 #                  `no_heavy_atoms` and counted; it cannot be embedded (the graph needs one atom) and any attempt
 #                  raises, so the embed step must decide on it explicitly. One heavy atom is flagged
-#                  `single_heavy_atom`; its graph has no edge. Inventory of 9 Nov 2026: no molecule of the 14
-#                  data sets has 0 heavy atoms.
+#                  `single_heavy_atom`; its graph has no edge. No molecule of the 14 data sets of this release
+#                  has 0 heavy atoms.
 #   labels         the LMDB codes a missing classification label as -1; stored as NaN plus a boolean mask.
 
 family: molnet
 modality: small_molecule
 processed_revision: v1
 source_name: unimol_molnet
-source_root: /home/yusuf/data/downstream/unimol_molnet      # task data_root = <source_root>/<task>
+source_root: ${MIND_DATA_ROOT}/downstream/unimol_molnet      # task data_root = <source_root>/<task>
 raw_subdir: raw/extracted/molecular_property_prediction
+
+# The release archive (about 3.5 GiB). `download` places it at <source_root>/raw/<name> and extracts it to
+# <source_root>/<extract_subdir>; the archive's top folder must then be <source_root>/<raw_subdir>.
+archive:
+  url: https://bioos-hermite-beijing.tos-cn-beijing.volces.com/unimol_data/finetune/molecular_property_prediction.tar.gz
+  name: molecular_property_prediction.tar.gz
+  bytes: 3764044131
+  md5: 007286c6367984876cfd05475d2489ac        # equals the md5 the server reports for the object
+  sha256: a59d465eb82d9498e2696a23b687a5e53d4b8545a8437816c9f7bc537ade8246
+  extract_subdir: raw/extracted
 
 splits: [train, valid, test]
 conformer: {policy: first, expected_per_molecule: 11}
@@ -72,7 +83,7 @@ finetune:
   mlp_hidden: 512
   mlp_dropout: 0.2
 
-# Counts are the entries of the LMDB files measured on 2026-11-09 (inventory); processing fails on any difference.
+# Counts are the entries of the LMDB files of this release; processing fails on any difference.
 # Classification: ROC-AUC (primary, Uni-Mol protocol) and PRC-AUC, mean over targets, per-target masking of missing
 # labels; targets with one class in a split are skipped and counted. Regression: RMSE and MAE averaged over targets;
 # the primary (early stopping) metric is the one Uni-Mol reports: RMSE for ESOL/FreeSolv/Lipophilicity, MAE for QM7/QM8.

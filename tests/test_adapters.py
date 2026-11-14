@@ -5,6 +5,7 @@ from pathlib import Path
 from data_loading.adapters.protein_adapter import ProteinAdapter
 from data_loading.adapters.rna_adapter import RNAAdapter
 from data_loading.atom_position_vocab import has_exact_rna_backbone
+from data_loading.data_root import data_root
 from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 
 
@@ -134,7 +135,7 @@ END
 
     def test_protein_adapter_real_sample_if_present(self):
         """Test ProteinAdapter on real structure if local raw data is available."""
-        real_data_dir = Path("/home/yusuf/data/proteins/raw_structures_hq_40k")
+        real_data_dir = data_root() / "proteins" / "raw_structures_hq_40k"
         if not real_data_dir.is_dir():
             self.skipTest(f"Real protein data dir not present: {real_data_dir}")
 
@@ -152,7 +153,7 @@ END
 
     def test_rna_adapter_23slot_uniform_representation_if_present(self):
         """Test RNAAdapter on real RNA sample if local raw data is available."""
-        real_rna_dir = Path("/home/yusuf/data/rna/raw_structures")
+        real_rna_dir = data_root() / "rna" / "raw_structures"
         if not real_rna_dir.is_dir():
             self.skipTest(f"Real RNA data dir not present: {real_rna_dir}")
 

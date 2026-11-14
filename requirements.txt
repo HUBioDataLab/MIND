@@ -31,7 +31,12 @@ rdkit-pypi==2022.9.5
 tabulate==0.10.0
 tqdm==4.67.1
 requests==2.32.4
+scipy==1.16.0
 
-# Only for UniMol LMDB preprocessing (data_loading/adapters/unimol_adapter.py);
-# not part of the reference environment.
-# lmdb
+# LMDB readers (UniMol pretraining preprocessing, LBA and MoleculeNet downstream data)
+lmdb==3.0.0
+# hdf5 structures of the Fold and Reaction downstream tasks
+h5py==3.16.0
+# ESM-2 and SaProt downstream baselines (downstream/baselines)
+transformers==4.35.0
+huggingface-hub==0.17.3

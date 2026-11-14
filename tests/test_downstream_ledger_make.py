@@ -47,7 +47,7 @@ def test_dry_run_commands(target, args, expected):
     result = _make("-n", target, *args)
     assert result.returncode == 0, result.stderr
     assert expected in result.stdout
-    assert 'MIND_RESULTS_ROOT="/home/yusuf/mind_results"' in result.stdout and 'CUDA_VISIBLE_DEVICES=""' in result.stdout
+    assert 'MIND_RESULTS_ROOT="' in result.stdout and 'CUDA_VISIBLE_DEVICES=""' in result.stdout
 
 
 def test_results_root_is_overridable_by_variable_and_environment():

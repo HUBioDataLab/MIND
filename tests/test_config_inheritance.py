@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from core.pretraining_config import create_pretraining_config, load_config_yaml
+from data_loading.data_root import expand_data_root
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASE = REPO_ROOT / "core" / "pretraining_config_multidomain_1m_coconut.yaml"
@@ -57,7 +58,7 @@ def test_base_config_cycle_raises(tmp_path):
 
 
 def test_plain_config_is_returned_unchanged():
-    assert load_config_yaml(BASE) == __import__("yaml").safe_load(BASE.read_text())
+    assert load_config_yaml(BASE) == expand_data_root(__import__("yaml").safe_load(BASE.read_text()))
 
 
 @pytest.mark.parametrize("domain", sorted(SINGLE_DOMAIN))

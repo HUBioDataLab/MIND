@@ -15,21 +15,21 @@ multi_domain:
   datasets:
     pdb:
       enabled: true
-      chunk_dir: "/home/yusuf/data/proteins/processed_14atom_edgefree"  # edge-free copy, graph-identical to the legacy chunks of the September/Atum runs (12,225 graphs checked)
+      chunk_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_edgefree"  # edge-free 40k protein chunks
       chunk_range: [0, 0]
       max_graph_atoms: 12000
     metabolite:
       enabled: false  # off in the fast 3-domain check; the four-domain check is pretraining_config_fast_1m_coconut.yaml
-      chunk_dir: "/home/yusuf/data/metabolites/processed"
+      chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed"
       chunk_range: [0, 0]
     unimol:
       enabled: true
-      chunk_dir: "/home/yusuf/data/small_molecules/unimol/universal_unimol"
+      chunk_dir: "${MIND_DATA_ROOT}/small_molecules/unimol/universal_unimol"
       chunk_range: [0, 0]
       max_graph_atoms: 12000
     rna:
       enabled: true
-      chunk_dir: "/home/yusuf/data/rna_small/processed_23slot_5k_edgefree"  # edge-free copy of the development RNA
+      chunk_dir: "${MIND_DATA_ROOT}/rna_small/processed_23slot_5k_edgefree"  # edge-free copy of the development RNA
       chunk_range: [0, 0]
       max_graph_atoms: 5000
   atom_sampling:
@@ -45,7 +45,7 @@ multi_domain:
 
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
-dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom_edgefree"
+dataset_download_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_edgefree"  # single-domain loader only; unused while multi_domain.enabled is true
 
 num_workers: 0
 max_samples: null

@@ -5,6 +5,8 @@ from typing import Optional, List, Dict
 
 import yaml
 
+from data_loading.data_root import expand_data_root
+
 
 # Mappings an override file replaces as a whole instead of merging key by key,
 # so a single-domain config does not inherit the other domains' weights.
@@ -28,7 +30,8 @@ def load_config_yaml(path, _chain: tuple = ()) -> dict:
     """Load a pretraining YAML; ``base_config`` names a file (relative to this one) to override.
 
     Override keys must already exist in the base, so a typo cannot silently add a
-    setting that nothing reads.
+    setting that nothing reads. ``${MIND_DATA_ROOT}`` in a value is expanded
+    (``data_loading.data_root``).
     """
     path = Path(path).resolve()
     if path in _chain:
@@ -37,6 +40,7 @@ def load_config_yaml(path, _chain: tuple = ()) -> dict:
         config_dict = yaml.safe_load(handle)
     if not isinstance(config_dict, dict):
         raise ValueError(f"{path}: config must be a YAML mapping")
+    config_dict = expand_data_root(config_dict)
     base_name = config_dict.pop("base_config", None)
     if base_name is None:
         return config_dict

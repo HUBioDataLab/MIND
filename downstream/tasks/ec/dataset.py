@@ -25,6 +25,7 @@ import numpy as np
 import torch
 import yaml
 
+from data_loading.data_root import expand_data_root
 from downstream.common.graph_builder import (
     build_node_sample, compact_sample, edge_free_schema, runtime_sample,
 )
@@ -43,7 +44,7 @@ LENGTH_POLICIES = ("skip", "crop_windows")
 
 def load_task_config(path: Path = TASK_YAML, *, data_root: Optional[Path] = None) -> dict:
     with open(path) as handle:
-        config = yaml.safe_load(handle)
+        config = expand_data_root(yaml.safe_load(handle))
     missing = [key for key in REQUIRED_KEYS if key not in config]
     if missing:
         raise ValueError(f"{path}: missing required keys {missing}")

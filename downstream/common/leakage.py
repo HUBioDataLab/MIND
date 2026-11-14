@@ -28,7 +28,7 @@ CLI (CPU, read-only on the references)::
     python -m downstream.common.leakage --task go_mf --reference protein_1m \\
         --query valid=splits/valid.txt --query test=splits/test.txt \\
         --query-namespace pdb_chain --id-map sifts_pdb_chain_uniprot.tsv \\
-        --provenance /home/yusuf/data/downstream/deepfri/go/provenance.json
+        --provenance <MIND_DATA_ROOT>/downstream/deepfri/go/provenance.json
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
+from data_loading.data_root import expand_data_root
 from downstream.common.registry import git_commit, sha256_file
 
 REFERENCES_YAML = Path(__file__).resolve().parents[1] / "leakage_references.yaml"
@@ -183,7 +184,7 @@ def load_reference(name: str, spec: Mapping, *, hash_file: bool = True) -> Refer
 
 def load_references_config(path: Path = REFERENCES_YAML) -> Dict[str, dict]:
     with open(path) as handle:
-        config = yaml.safe_load(handle)
+        config = expand_data_root(yaml.safe_load(handle))
     if not isinstance(config, dict) or "references" not in config:
         raise LeakageError(f"{path}: expected a top-level 'references' mapping")
     return config["references"]
@@ -192,7 +193,7 @@ def load_references_config(path: Path = REFERENCES_YAML) -> Dict[str, dict]:
 def load_task_queries(path: Path = REFERENCES_YAML) -> Dict[str, dict]:
     """Per-task identity format and the references it may be compared with (the ``queries`` section); validated."""
     with open(path) as handle:
-        config = yaml.safe_load(handle)
+        config = expand_data_root(yaml.safe_load(handle))
     queries = (config or {}).get("queries")
     if not isinstance(queries, dict) or not queries:
         raise LeakageError(f"{path}: expected a non-empty top-level 'queries' mapping")

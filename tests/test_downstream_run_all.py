@@ -347,7 +347,7 @@ def test_ds_run_make_target(tmp_path):
     assert result.returncode == 0, result.stderr
     assert ('python -u -m downstream.run_all --model "g1" --tasks ec,lba --gpus "2,3" --per-gpu 3 --heads linear,mlp '
             "--seeds 0 1 2 --probe-jobs 1 --threads 8 --log-root logs/") in text and text.endswith("--plan")
-    assert 'MIND_RESULTS_ROOT="/home/yusuf/mind_results"' in text
+    assert 'MIND_RESULTS_ROOT="' in text
     text, _ = _make("ds-run", "MODEL=/x/b.ckpt", "NAME=g1", "GPU=2", "RANDOM_INIT=1", "DETACH=1", "OUTPUTS_ROOT=/o")
     assert '--name "g1"' in text and "--random-init" in text and '--outputs-root "/o"' in text
     assert "setsid nohup" in text and "> $log 2>&1 < /dev/null &" in text
@@ -365,7 +365,8 @@ def test_existing_targets_are_unchanged(tmp_path, args):
     head = tmp_path / "Makefile.HEAD"
     head.write_text(subprocess.run(["git", "show", "HEAD:Makefile"], cwd=REPO, capture_output=True, text=True,
                                    check=True).stdout)
-    assert _make(*args)[0] == _make(*args, makefile=head)[0]
+    settings = ["MIND_CONDA_ENV=/env", "CONDA_ROOT=/conda", "MIND_HF_HOME=/hf", "MIND_RESULTS_ROOT=/results"]
+    assert _make(*args, *settings)[0] == _make(*args, *settings, makefile=head)[0]
 
 
 # -- COMPARE_TO, final ledger report, COUNTERFACTUAL ---------------------------------------------------------

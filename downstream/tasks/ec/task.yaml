@@ -5,15 +5,14 @@
 
 task: ec
 modality: protein
-# Suffix of the processed directory name. v2 (2026-11-09): the structure reader now handles 2- and 3-character
-# PDB chain ids (4V7G-AA, 4UE3-SSS); the unsuffixed directory lost 46 such chains (train 35, valid 5, test 6) as
-# parse_error. The old directory stays untouched; ds-embed/ds-probe read the v2 one.
+# Suffix of the processed directory name. v2 reads 2- and 3-character PDB chain ids (4V7G-AA, 4UE3-SSS);
+# ds-embed/ds-probe read the directory of this revision.
 processed_revision: v2
-data_root: /home/yusuf/data/downstream/ec/protein   # raw/, processed/, splits/, provenance.json
+data_root: ${MIND_DATA_ROOT}/downstream/ec/protein   # raw/, processed/, splits/, provenance.json
 
 # deepfri_rcsb: DeepFRI metadata (pinned commit, sha256 checked) + RCSB mmCIF per PDB entry.
 # torchdrug_zip: the per-chain PDB files packaged by TorchDrug/GearNet (Zenodo, md5 checked).
-source: torchdrug_zip   # decided 2026-10-25: the exact chain files GearNet and the literature numbers used
+source: torchdrug_zip   # the exact chain files GearNet and the literature numbers used
 sources:
   deepfri_rcsb:
     commit: 6caa96e086091152e74be5924be1fcde11ce2413
@@ -47,7 +46,7 @@ structure:
 #   {policy: drop_residue_missing_backbone, incomplete_sidechain: mask}
 #   {policy: drop_residue_missing_backbone, incomplete_sidechain: drop_chain_if_fraction_above,
 #    max_incomplete_sidechain_fraction: 0.1}
-# Decided 2026-10-25: drop residues with a missing backbone atom; a residue with an incomplete
+# Chosen policy: drop residues with a missing backbone atom; a residue with an incomplete
 # sidechain keeps its backbone and its whole sidechain block is masked like a pretraining MLM block.
 missing_atoms:
   policy: drop_residue_missing_backbone

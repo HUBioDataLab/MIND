@@ -8,18 +8,32 @@
 #   make train GPU=auto CONFIG=f               # auto-pick least used GPU
 #
 # CONFIG shortcuts:
-#   m  = pretraining_config_multidomain_1m_coconut.yaml   (four domains, latest)
+#   m  = pretraining_config_multidomain_1m_coconut.yaml   (four domains)
 #   f  = pretraining_config_fast.yaml
 #   (or pass full filename without .yaml)
 #
 # Defaults: GPU=auto, CONFIG=m, LOG=train_<config>
+# Machine-specific settings (MIND_CONDA_ENV, CONDA_ROOT, MIND_DATA_ROOT, MIND_MODELS_ROOT, MIND_HF_HOME,
+# MIND_RESULTS_ROOT) go in an untracked local.mk next to this file, or in $XDG_CONFIG_HOME/mind/local.mk
+# (default ~/.config/mind/local.mk) for all checkouts; the first file wins, and environment variables and
+# command-line assignments win over both. Write the values with ?=.
 # ===================================================================
 
 SHELL := /bin/bash
-CONDA_ROOT ?= /opt/miniconda3
-MIND_CONDA_ENV ?= /home/yusuf/.conda/envs/mind_esa3d
-MIND_HF_HOME ?= /home/yusuf/models/huggingface
-CONDA_RUN := source "$(CONDA_ROOT)/etc/profile.d/conda.sh" && conda activate "$(MIND_CONDA_ENV)" && export PATH="$(MIND_CONDA_ENV)/bin:$$PATH" HF_HOME="$(MIND_HF_HOME)" HUGGINGFACE_HUB_CACHE="$(MIND_HF_HOME)/hub" TRANSFORMERS_CACHE="$(MIND_HF_HOME)/hub" &&
+-include local.mk
+-include $(or $(XDG_CONFIG_HOME),$(HOME)/.config)/mind/local.mk
+# Conda environment (name or prefix) activated before each command; empty = the calling shell's environment.
+MIND_CONDA_ENV ?=
+CONDA_ROOT ?= $(shell conda info --base 2>/dev/null)
+# Data, baseline weights and results live outside Git. Configs name data paths as ${MIND_DATA_ROOT}/...
+MIND_DATA_ROOT ?= $(CURDIR)/datasets
+MIND_MODELS_ROOT ?= $(CURDIR)/models
+MIND_RESULTS_ROOT ?= $(CURDIR)/results
+# Hugging Face home exported to every command; empty = Hugging Face's own default.
+MIND_HF_HOME ?=
+export MIND_DATA_ROOT MIND_MODELS_ROOT
+HF_EXPORTS := $(if $(strip $(MIND_HF_HOME)),HF_HOME="$(MIND_HF_HOME)" HUGGINGFACE_HUB_CACHE="$(MIND_HF_HOME)/hub" TRANSFORMERS_CACHE="$(MIND_HF_HOME)/hub",)
+CONDA_RUN := $(if $(strip $(MIND_CONDA_ENV)),source "$(CONDA_ROOT)/etc/profile.d/conda.sh" && conda activate "$(MIND_CONDA_ENV)" && export PATH="$(MIND_CONDA_ENV)/bin:$$PATH" $(HF_EXPORTS) &&,$(if $(HF_EXPORTS),export $(HF_EXPORTS) &&,))
 
 GPU ?= auto
 CONFIG ?= m
@@ -74,9 +88,7 @@ else
   LOG_FILE := $(LOG_MONTH_DIR)/$(_LOG_BASE)_$(_LOG_DATETIME).log
 endif
 
-# A unique checkpoint directory is essential when independent validation runs
-# share the machine. The old single default directory allowed concurrent jobs
-# to overwrite each other's last.ckpt.
+# Every run gets its own checkpoint directory, so concurrent runs never overwrite each other's last.ckpt.
 # Single-domain configs (pretraining_config_<domain>_only) write under outputs/<domain>_only/.
 RUN_GROUP := $(if $(filter pretraining_config_%_only,$(CONFIG)),$(patsubst pretraining_config_%,%,$(CONFIG))/,)
 OUTPUT_DIR ?= outputs/$(RUN_GROUP)$(_LOG_BASE)_$(_LOG_DATETIME)
@@ -172,10 +184,6 @@ status:
 		sed -E 's/--threads [0-9]+ //' | cut -c1-150); \
 		[ -n "$$out" ] && echo "$$out" || echo "  (none)"
 	@echo ""
-	@echo "=== Chain scripts (run_*_chain.sh, run_*_finetune.sh) ==="
-	@out=$$(ps -eo user:12,pid,etime,args | grep '[r]un_[a-z_]*\.sh' | cut -c1-120); \
-		[ -n "$$out" ] && echo "$$out" || echo "  (none)"
-	@echo ""
 	@echo "=== MIND Data Processing (all users) ==="
 	@ps -eo user:12,pid,args | grep '[c]ache_to_pyg\|create_chunk' | grep -v grep | \
 		awk '{print $$1}' | sort | uniq -c | \
@@ -217,7 +225,7 @@ build-edge-free:
 #        [EVAL_CONFIG=pretraining_config_multidomain_1m_coconut] [DOMAINS=protein,rna] [MAX_BATCHES=N]
 #        [COUNTERFACTUAL=<mode> [CF_SIGMA=<Angstrom>]] [HIDING=on BOND_THRESHOLD=2.1 | HIDING=off]
 # HIDING overrides the checkpoint's UniMol masked-geometry hiding for the evaluation only (default: checkpoint).
-# COUNTERFACTUAL (G1 step 0, core/counterfactual_eval.py) corrupts what the encoder/ESA see of the
+# COUNTERFACTUAL (core/counterfactual_eval.py) corrupts what the encoder/ESA see of the
 # masked UniMol atoms, evaluation only: masked_pos_noise (CF_SIGMA, default 1.0), masked_pos_random,
 # masked_dist_shuffle, esa_edges_remove, esa_edges_shuffle, masked_edges_remove. Unset/none = unchanged.
 EVAL_HIDING_ARGS = $(if $(strip $(HIDING)),--unimol-geometry-hiding $(HIDING),) \
@@ -235,7 +243,7 @@ eval-pretrain:
 		> $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Log: $(LOG_MONTH_DIR)/eval_pretrain_$(SPLIT)_$(_LOG_DATETIME).log"
 
-# G1 step 0: UniMol counterfactual sweep on one frozen checkpoint (GPU workload, user-started).
+# UniMol counterfactual sweep on one frozen checkpoint (GPU workload, user-started).
 # Runs the modes one after another in one detached shell on one GPU; each writes OUT_ROOT/<mode>/
 # (OUT_ROOT/<mode> must not exist). The loop stops at the first failing mode.
 #   make eval-counterfactual CKPT=<ckpt> SPLIT=test SEED=0 GPU=<id> OUT_ROOT=<new dir> \
@@ -258,24 +266,30 @@ eval-counterfactual:
 # ===================================================================
 # Downstream evaluation (downstream/README.md)
 # ===================================================================
-# Data steps write under /home/yusuf/data/downstream/<task>/; run them only on an explicit
-# decision. embed and finetune are GPU workloads, probe trains small heads on CPU; all three
+# Data steps write under $(MIND_DATA_ROOT)/downstream/ (task.yaml data_root/source_root); run them
+# only on an explicit decision. embed and finetune are GPU workloads, probe trains small heads on CPU; all three
 # are user-started. Snapshots, embeddings and results go under outputs/ (MIND_OUTPUTS_ROOT
-# overrides it).
+# overrides it). Download sizes are approximate (GiB).
 #   make ds-snapshot CKPT=<ckpt> NAME=<snapshot> [ALIAS=current_best]
-#   make ds-download TASK=ec            make ds-process TASK=ec WORKERS=16
-#   make ds-download TASK=lba           make ds-process TASK=lba [TAGS="identity30 identity60"]
-#   make ds-download TASK=go_mf         (the three GO branches share one download and one processed file;
+#   make ds-download TASK=ec            (0.96 GiB; TorchDrug EnzymeCommission.zip, md5 pinned)
+#   make ds-process TASK=ec WORKERS=16
+#   make ds-download TASK=lba           (1.05 GiB for both split tags, 0.53 GiB each; md5 and size pinned)
+#   make ds-process TASK=lba [TAGS="identity30 identity60"]
+#   make ds-download TASK=go_mf         (1.58 GiB; the three GO branches share one download and one processed file;
 #   make ds-validate TASK=go_mf          ds-process TASK=go_mf WORKERS=16 builds all of them; validate is read-only)
-#   make ds-download TASK=fold         (GearNet Fold3D, Zenodo 7593591, 670,898,225 B; md5 and size are pinned)
+#   make ds-download TASK=fold          (0.62 GiB; GearNet Fold3D, Zenodo 7593591; md5 and size pinned)
 #   make ds-validate TASK=fold          ds-process TASK=fold WORKERS=16     (probe: one accuracy per test split)
-#   make ds-download TASK=reaction      (IEConv ProtFunct; Google Drive archive, size/md5 not published: the first
+#   make ds-download TASK=reaction      (size not published; IEConv ProtFunct Google Drive archive: the first
 #   make ds-validate TASK=reaction       download stops until archive_sha256/archive_bytes are pinned in task.yaml)
+#   make ds-fetch-models BASELINES="esm2_t33_650M_UR50D saprot_650m_pdb"   (baseline weights into MIND_MODELS_ROOT;
+#                                        about 0.03 GiB for esm2_t6_8M up to about 11 GiB for the 3B model, see
+#                                        downstream/baselines/registry.yaml; revisions and md5 are pinned)
 #   make ds-leakage LEAK_TASK=go REFERENCE=protein_1m NAMESPACE=pdb_chain PROVENANCE=<task dir>/provenance.json \
 #        QUERIES="valid=<dir>/splits/valid.txt test=<dir>/splits/test.txt" [ID_MAP=<pdb_chain->uniprot tsv>]
+#   make ds-download TASK=mn_esol       (3.5 GiB; one Uni-Mol archive for all 14 MoleculeNet tasks, url/size/md5/sha256
+#                                        pinned in molnet/task.yaml; an archive already in place is checked, not fetched)
 #   make ds-process TASK=mn_esol        (MoleculeNet mn_bbbp|bace|clintox|tox21|toxcast|sider|hiv|pcba|muv|esol|freesolv|lipo|qm7|qm8;
-#   make ds-validate TASK=mn_esol        the Uni-Mol LMDB archive is already extracted, so there is no ds-download; validate
-#                                        reads and checks without writing; probe/report work as for the other tasks)
+#   make ds-validate TASK=mn_esol        validate reads and checks without writing; probe/report work as for the other tasks)
 #   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D|saprot_650m_pdb> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
 #   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]
@@ -290,36 +304,37 @@ eval-counterfactual:
 #   make ds-compare A=<model> B=<model> [TASKS="ec lba"] [BOOTSTRAP=1000]
 #   make ds-ledger-recompute MODEL=<model> CONTROL=<model with macro AUPR> DATA_REVISION=<rev> [TASK=ec] [DRY_RUN=1]
 #        (macro AUPR a probe did not record, from its saved predictions.npz; four checks, nothing written on failure)
-# MODELS defaults to summary_models in $(MIND_RESULTS_ROOT)/comparisons.yaml, else the list in ledger_report.py.
+# MODELS defaults to summary_models in $(MIND_RESULTS_ROOT)/comparisons.yaml, else every model of the ledger.
 # One command for one MIND model (downstream/run_all.py; GPU embeds + CPU probes, user-started, no fine-tune):
-#   make ds-run MODEL=<snapshot | path/to.ckpt> [NAME=<snapshot name, required with a ckpt>] [TASKS=all|ec,go_mf,...]
+#   make ds-run MODEL=<snapshot | path/to.ckpt> [NAME=<snapshot name, required with a ckpt>] [TASKS=all|molnet|ec,go_mf,...]
 #        GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp] [PROBE_JOBS=1] [RANDOM_INIT=1] [OUTPUTS_ROOT=<dir>] [PLAN=1]
 #        [COMPARE_TO=<snapshot[.random_init],...> [BOOTSTRAP=1000]] [COUNTERFACTUAL=1 [CF_MODES=...] [EVAL_CONFIG=...]]
 #   snapshot (ckpt) -> embeds on the GPUs (every model) -> [counterfactual sweep] -> probes (SEEDS) -> ledger add ->
 #   final metrics + missing cells per model -> ds-compare A=<each COMPARE_TO> B=MODEL -> ledger report.
 #   PLAN=1 prints what would run and writes nothing. ds-run and ds-probe run detached by default (setsid + nohup:
 #   closing the terminal does not stop them; the log ends with EXIT_CODE=<n>; make ds-status lists the logs);
-#   FOREGROUND=1 runs them in the terminal as before.
+#   FOREGROUND=1 runs them in the terminal. TASKS=molnet stands for the 14 mn_* tasks (it may be combined: molnet,ec).
 # ===================================================================
 
 TASK ?= ec
 HEAD ?= linear
 SEEDS ?= 0 1 2
 POOLING ?=
-# CPU threads per downstream/eval process (unbounded torch threads slowed a live run on 25 Oct)
+# CPU threads per downstream/eval process (unbounded torch threads slow down other jobs on a shared machine)
 DS_THREADS ?= 8
 DS_ENV := OMP_NUM_THREADS=$(DS_THREADS) OPENBLAS_NUM_THREADS=$(DS_THREADS) MKL_NUM_THREADS=$(DS_THREADS)
 DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
 # Long ds-* jobs (ds-probe, ds-run) run in their own session (setsid + nohup, no terminal): closing the SSH/terminal
 # connection does not stop them. $(1) = log, $(2) = command; the log ends with EXIT_CODE=<n> of the command
-# (non-zero when the Python step fails, as pipefail gave in the foreground). FOREGROUND=1 = the old foreground run.
+# (non-zero when the Python step fails). FOREGROUND=1 runs the job in the terminal instead.
 # The terminal prints only the log path; follow the job with `make ds-status`.
 DS_DETACH = log=$(1); echo "Log: $$log"; \
 	setsid nohup bash -c '$(2); code=$$?; echo "EXIT_CODE=$$code"; exit $$code' > $$log 2>&1 < /dev/null &
 DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
 # Fine-tune overrides: a random-init encoder needs a far larger LR than a pretrained one.
 FT_ARGS ?=
-DS_HF_ARGS := $(if $(filter esm2_% saprot_%,$(MODEL)),--hf-cache-dir $(MIND_HF_HOME)/hub,)
+# Baseline weights: the Hugging Face cache of MIND_HF_HOME, else the one fetch_models fills under MIND_MODELS_ROOT.
+DS_HF_ARGS := $(if $(filter esm2_% saprot_%,$(MODEL)),--hf-cache-dir $(or $(strip $(MIND_HF_HOME)),$(MIND_MODELS_ROOT)/huggingface)/hub,)
 # LBA-only selectors; empty for every other task so their CLIs never see them.
 SPLIT_TAG ?=
 REPRESENTATION ?=
@@ -335,7 +350,7 @@ DS_MOLNET_ARGS = $(if $(filter mn_%,$(TASK)),--task $(TASK),)
 DS_PROCESS_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS)))
 DS_DOWNLOAD_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),))
 
-.PHONY: ds-snapshot ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
+.PHONY: ds-snapshot ds-fetch-models ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
 	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify ds-ledger-recompute \
 	ds-run ds-status
 
@@ -349,6 +364,11 @@ ds-download ds-process:
 	@mkdir -p $(LOG_MONTH_DIR)
 	set -o pipefail; $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare $(patsubst ds-%,%,$@) \
 		$(if $(filter ds-process,$@),$(DS_PROCESS_ARGS),$(DS_DOWNLOAD_ARGS)) 2>&1 | tee $(call DS_LOG,$(patsubst ds-%,%,$@))
+
+# Downloads the pinned baseline models of downstream/baselines/registry.yaml (network; writes under MIND_MODELS_ROOT).
+ds-fetch-models:
+	@test -n "$(strip $(BASELINES))" || { echo "ERROR: set BASELINES=\"<name> ...\" (names in downstream/baselines/registry.yaml) or BASELINES=all"; exit 1; }
+	$(CONDA_RUN) python -u -m downstream.baselines.fetch_models --root "$(MIND_MODELS_ROOT)" $(if $(filter all,$(BASELINES)),--all,--models $(BASELINES))
 
 # Read-only: re-checks labels and split lists against task.yaml (go, fold, reaction).
 ds-validate:
@@ -389,7 +409,6 @@ endif
 ds-report:
 	$(CONDA_RUN) python -m downstream.report --task $(TASK)
 
-MIND_RESULTS_ROOT ?= /home/yusuf/mind_results
 BOOTSTRAP ?= 1000
 LEDGER_ENV = MIND_RESULTS_ROOT="$(MIND_RESULTS_ROOT)" CUDA_VISIBLE_DEVICES="" $(DS_ENV)
 LEDGER_MODELS_ARGS = $(if $(strip $(MODELS)),--models $(MODELS),)
@@ -427,8 +446,14 @@ ds-ledger-recompute:
 HEADS ?= linear,mlp
 PER_GPU ?= 1
 PROBE_JOBS ?= 1
+# TASKS=molnet stands for the 14 MoleculeNet tasks (downstream.tasks.MOLNET_TASKS; a test keeps the lists equal).
+MOLNET_TASKS := mn_bbbp,mn_bace,mn_clintox,mn_tox21,mn_toxcast,mn_sider,mn_hiv,mn_pcba,mn_muv,mn_esol,mn_freesolv,mn_lipo,mn_qm7,mn_qm8
+_comma := ,
+_space := $(subst ,, )
+DS_RUN_TASKS = $(subst $(_space),$(_comma),$(strip $(foreach t,$(subst $(_comma), ,$(or $(strip $(TASKS)),all)),\
+	$(if $(filter molnet,$(t)),$(MOLNET_TASKS),$(t)))))
 DS_RUN_CMD = python -u -m downstream.run_all --model "$(MODEL)" $(if $(strip $(NAME)),--name "$(NAME)",) \
-	--tasks $(or $(strip $(TASKS)),all) --gpus "$(GPU)" --per-gpu $(PER_GPU) --heads $(HEADS) --seeds $(SEEDS) \
+	--tasks $(DS_RUN_TASKS) --gpus "$(GPU)" --per-gpu $(PER_GPU) --heads $(HEADS) --seeds $(SEEDS) \
 	--probe-jobs $(PROBE_JOBS) --threads $(DS_THREADS) --log-root $(LOG_MONTH_DIR) $(DS_RANDOM_INIT_ARGS) \
 	$(if $(strip $(OUTPUTS_ROOT)),--outputs-root "$(OUTPUTS_ROOT)",) \
 	$(if $(strip $(COMPARE_TO)),--compare-to "$(COMPARE_TO)" --bootstrap $(BOOTSTRAP),) \
@@ -437,7 +462,7 @@ DS_RUN_CMD = python -u -m downstream.run_all --model "$(MODEL)" $(if $(strip $(N
 		$(if $(strip $(EVAL_CONFIG)),--cf-eval-config core/$(EVAL_CONFIG).yaml,),) \
 	$(if $(filter 1,$(PLAN)),--plan,)
 
-# Detached by default (DETACH=1 is still accepted); PLAN=1 and FOREGROUND=1 run in the terminal.
+# Detached by default (DETACH=1 is accepted and changes nothing); PLAN=1 and FOREGROUND=1 run in the terminal.
 ds-run:
 	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name or .ckpt path; a path also needs NAME)"; exit 1; }
 ifeq ($(filter 1,$(PLAN) $(FOREGROUND)),)
@@ -452,7 +477,7 @@ endif
 ds-status:
 	@ls -t $(LOG_MONTH_DIR)/ds_*.log 2>/dev/null | head -$(or $(N),15) | while read -r f; do \
 		code=$$(grep -a '^EXIT_CODE=' "$$f" | tail -1); \
-		echo "$${code:-EXIT_CODE yok (koşuyor olabilir; make status ile doğrula)}  $$f  (son yazma $$(date -r "$$f" '+%F %T'))"; \
+		echo "$${code:-no EXIT_CODE (may still be running; check with make status)}  $$f  (last write $$(date -r "$$f" '+%F %T'))"; \
 	done
 
 test-downstream:
@@ -478,8 +503,14 @@ help:
 	@echo "    make eval-counterfactual CKPT=<ckpt> SPLIT=test GPU=<id> OUT_ROOT=<new dir>  UniMol counterfactual sweep (GPU)"
 	@echo ""
 	@echo "  Downstream (see downstream/README.md):"
+	@echo "    make ds-run MODEL=<snapshot|ckpt> [NAME=<name>] GPU=<ids> [TASKS=all|molnet|ec,go_mf,..] [PLAN=1]"
+	@echo "                                         Embed + probe + ledger for one model (GPU, detached)"
+	@echo "    make ds-status                       Recent ds-* logs with their EXIT_CODE"
 	@echo "    make ds-snapshot CKPT=<ckpt> NAME=<snapshot> ALIAS=current_best"
 	@echo "    make ds-download TASK=ec / ds-process TASK=ec WORKERS=16   (data, explicit decision)"
+	@echo "    make ds-validate TASK=go_mf          Re-check downloaded labels/splits (read-only)"
+	@echo "    MoleculeNet: make ds-download TASK=mn_bbbp (one archive for all mn_* tasks)"
+	@echo "         make ds-process TASK=mn_<bbbp|bace|clintox|tox21|toxcast|sider|hiv|pcba|muv|esol|freesolv|lipo|qm7|qm8>"
 	@echo "    make ds-embed TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]   (GPU)"
 	@echo "    make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp"
 	@echo "    make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id>   (GPU, long)"

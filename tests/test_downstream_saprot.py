@@ -6,6 +6,7 @@ binary / cached tokenizer are absent.
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -21,8 +22,9 @@ from downstream.tasks.ec import dataset
 from downstream_helpers import pdb_line, residue_atoms
 from test_downstream_ec_dataset import _write_task
 
-FOLDSEEK = os.environ.get("MIND_FOLDSEEK", "/home/yusuf/tools/foldseek/10-941cd33/foldseek/bin/foldseek")
-HF_CACHE = os.path.join(os.environ.get("MIND_MODELS_ROOT", "/home/yusuf/models"), "huggingface", "hub")
+FOLDSEEK = os.environ.get("MIND_FOLDSEEK") or shutil.which("foldseek") or ""
+HF_CACHE = os.path.join(os.environ.get("MIND_MODELS_ROOT") or os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "models"), "huggingface", "hub")
 AMINO = "ACDEFGHIKLMNPQRSTVWY"
 MASK = {"policy": "drop_residue_missing_backbone", "incomplete_sidechain": "mask"}
 
@@ -152,7 +154,7 @@ def test_parse_descriptor_tsv_rejects_bad_rows(tmp_path):
         fs.parse_descriptor_tsv(bad)
 
 
-@pytest.mark.skipif(not Path(FOLDSEEK).is_file(), reason="Foldseek binary not installed")
+@pytest.mark.skipif(not FOLDSEEK or not Path(FOLDSEEK).is_file(), reason="Foldseek binary not installed")
 def test_real_foldseek_matches_first_conformer_rule(tmp_path):
     path = tmp_path / "1XYZ-A_1.pdb"
     path.write_text(_microheterogeneity_pdb())
@@ -237,6 +239,8 @@ def test_unknown_saprot_name_fails():
 
 def _real_tokenizer():
     from transformers import EsmTokenizer
+    if not os.path.isdir(HF_CACHE):  # from_pretrained would create the cache directory
+        return None
     try:
         return EsmTokenizer.from_pretrained(saprot.SAPROT_MODELS["saprot_650m_pdb"], cache_dir=HF_CACHE,
                                             local_files_only=True)

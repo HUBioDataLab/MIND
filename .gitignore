@@ -96,3 +96,10 @@ MIGRATION.md
 Docs/experimental
 repomix-output.xml
 metrics.txt
+
+# Downloaded datasets and archives
+datasets/
+*.lmdb
+*.tar.gz
+*.zip
+*.npz

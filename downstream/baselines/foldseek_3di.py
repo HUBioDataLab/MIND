@@ -1,7 +1,7 @@
 """Foldseek 3Di states for the exact residues a processed MIND split kept (CPU data processing).
 
     python -m downstream.baselines.foldseek_3di --task ec --splits train valid test \\
-        --foldseek /home/yusuf/tools/foldseek/10-941cd33/foldseek/bin/foldseek --threads 16 --workers 8
+        --foldseek <path to the foldseek binary> --threads 16 --workers 8
 
 Foldseek runs once per split in batch mode (``structureto3didescriptor`` with
 ``--chain-name-mode 1``, the call SaProt's own ``get_struc_seq`` makes) over a

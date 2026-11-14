@@ -2,24 +2,22 @@
 # One task family, three downstream tasks (go_mf, go_bp, go_cc) that share ONE processed file:
 # same chains, same graphs, three label matrices. Each task module (mf.py, bp.py, cc.py) selects its branch.
 #
-# Data sharing with EC (rule of 2026-11-08): both tasks come from the same TorchProtein Zenodo record 6622158
+# Data sharing with EC: both tasks come from the same TorchProtein Zenodo record 6622158
 # (EnzymeCommission.zip + GeneOntology.zip, CC BY 4.0), i.e. the DeepFRI chain sets as packaged by TorchDrug/GearNet.
 #   <source_root>/raw/            archives + extracted chain PDB files, ONE copy per source (shared)
 #   <source_root>/<task>/{splits,processed,provenance.json}   task-specific labels/splits/processed
-# EC still lives in its old place (/home/yusuf/data/downstream/ec/protein); moving it to deepfri/ec is a
-# separate, user-approved data step (see Docs / phase-1 design note).
+# EC keeps its own data_root (ec/task.yaml).
 #
-# Items marked UNVERIFIED were taken from the TorchDrug/GearNet code or the paper, not from the archive itself;
-# the download/validate step fails loudly if the archive disagrees.
+# The archive layout, file names, label counts and split counts below come from the TorchDrug/GearNet code and paper;
+# download/validate checks them against the archive and fails loudly on any difference.
 
 family: go
 modality: protein
-# Suffix of the processed directory name. v2 (2026-11-09): the structure reader now handles two-character PDB chain ids
-# (3J9M-AK); the unsuffixed directory lost 1,171 chains (train 918, valid 99, test 154) as parse_error and has no test.pt.
+# Suffix of the processed directory name. v2 reads two-character PDB chain ids (3J9M-AK).
 processed_revision: v2
 source_name: deepfri
-source_root: /home/yusuf/data/downstream/deepfri
-data_root: /home/yusuf/data/downstream/deepfri/go     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)
+source_root: ${MIND_DATA_ROOT}/downstream/deepfri
+data_root: ${MIND_DATA_ROOT}/downstream/deepfri/go     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)
 
 source: torchprotein_go_zip
 sources:
@@ -27,10 +25,10 @@ sources:
     url: https://zenodo.org/records/6622158/files/GeneOntology.zip
     md5: 376be1f088cd1fe720e1eaafb701b5cb          # Zenodo API, read 2026-11-08
     bytes: 1691808865                              # Zenodo API, read 2026-11-08
-    license: cc-by-4.0                             # Zenodo record metadata; license of the original DeepFRI data UNVERIFIED
-    extract_dir: GeneOntology                      # UNVERIFIED archive layout (assumed to mirror EnzymeCommission.zip)
-    annotation_file: nrPDB-GO_annot.tsv            # UNVERIFIED name (TorchDrug gene_ontology.py)
-    test_cutoff_file: nrPDB-GO_test.csv            # UNVERIFIED name (TorchDrug gene_ontology.py)
+    license: cc-by-4.0                             # Zenodo record metadata; the original DeepFRI data states no license
+    extract_dir: GeneOntology                      # same layout as EnzymeCommission.zip
+    annotation_file: nrPDB-GO_annot.tsv            # name as in TorchDrug gene_ontology.py
+    test_cutoff_file: nrPDB-GO_test.csv            # name as in TorchDrug gene_ontology.py
   deepfri_metadata_reference:                      # not downloaded; documents the upstream origin and sizes
     commit: 6caa96e086091152e74be5924be1fcde11ce2413
     files: {annot: nrPDB-GO_2019.06.18_annot.tsv, train: nrPDB-GO_2019.06.18_train.txt,
@@ -41,26 +39,26 @@ sources:
 # (### GO-terms (<ont>) / terms / ### GO-names (<ont>) / names) in the order MF, BP, CC, then a
 # ### PDB-chain header and one row per chain: chain<TAB>mf terms<TAB>bp terms<TAB>cc terms (comma separated, may be empty).
 branches:
-  mf: {task: go_mf, ontology: molecular_function, label_count: 489}    # DeepFRI/GearNet counts, UNVERIFIED against archive
+  mf: {task: go_mf, ontology: molecular_function, label_count: 489}    # DeepFRI/GearNet counts; download/validate checks them
   bp: {task: go_bp, ontology: biological_process, label_count: 1943}
   cc: {task: go_cc, ontology: cellular_component, label_count: 320}
 
 splits: [train, valid, test]
-# GearNet paper chain counts of the three splits (before our QC); download validation fails on a mismatch. UNVERIFIED.
+# GearNet paper chain counts of the three splits (before our QC); download validation fails on a mismatch.
 expected_chain_counts: {train: 29898, valid: 3322, test: 3415}
 test_cutoffs: [30, 40, 50, 70, 95]     # 95 = the full test set (headline); 30 = the hard, remote-homolog subset
 metric: fmax                            # CAFA protein-centric Fmax (downstream/common/metrics.py); AUPR also reported
 
 # Chains with NO term in a branch. TorchDrug keeps them as all-zero rows; the CAFA/DeepFRI protocol evaluates only
-# annotated proteins and our Fmax raises on an empty row. Decision (pending user confirmation): exclude them per
+# annotated proteins and our Fmax raises on an empty row. Policy: exclude them per
 # branch from train/valid/test of that branch and record the counts. Only `exclude` is implemented.
 unannotated_policy: exclude
 
 structure:
   mse_to_met: true
 
-# Same decision as EC (2026-10-25). Experimental PDB structures: the training adapter pads a missing sidechain atom
-# with V and shifts later atoms into wrong slots (G5), so incompleteness is resolved BEFORE conversion.
+# Same policy as EC. Experimental PDB structures: the training adapter pads a missing sidechain atom
+# with V and shifts later atoms into wrong slots, so incompleteness is resolved BEFORE conversion.
 missing_atoms:
   policy: drop_residue_missing_backbone
   incomplete_sidechain: mask

@@ -1,32 +1,32 @@
 # Pretraining identity sets used by downstream/common/leakage.py.
 # plan:     chunk-build plan CSV (id,split,chunk,position); split is the pretraining split.
 # manifest: plain id list (no split information; every id counts as seen_train).
-# Paths are Atum-local data locations (outside Git); sizes verified on 2026-11-08.
+# Paths are data locations outside Git, below MIND_DATA_ROOT.
 
 references:
   protein_1m:
     description: AFDB 1M pretraining plan (1,117,868 UniProt accessions, split by structure-id hash)
     kind: plan
-    path: /home/yusuf/data/proteins/processed_14atom_1m_edgefree_plan.csv
+    path: ${MIND_DATA_ROOT}/proteins/processed_14atom_1m_edgefree_plan.csv
     namespace: uniprot
     id_column: id
     split_column: split
   protein_1m_manifest:
     description: AFDB 1M cluster-representative manifest (same ids as protein_1m, no split)
     kind: manifest
-    path: /home/yusuf/data/protein_1m/afdb_clusters/manifest_hq_1m_1024.csv
+    path: ${MIND_DATA_ROOT}/protein_1m/afdb_clusters/manifest_hq_1m_1024.csv
     namespace: uniprot
     id_column: repId
   protein_40k_manifest:
     description: AFDB 40k baseline manifest (chunks 0-9 of the 40k baseline)
     kind: manifest
-    path: /home/yusuf/data/proteins/afdb_clusters/manifest_hq_40k_len512.csv
+    path: ${MIND_DATA_ROOT}/proteins/afdb_clusters/manifest_hq_40k_len512.csv
     namespace: uniprot
     id_column: repId
   rna_full:
     description: Full RNA corpus plan (12,869 PDB chains, 5,057 entries, split by PDB entry)
     kind: plan
-    path: /home/yusuf/data/rna/processed_23slot_full_edgefree_plan.csv
+    path: ${MIND_DATA_ROOT}/rna/processed_23slot_full_edgefree_plan.csv
     namespace: pdb_chain
     id_column: id
     split_column: split

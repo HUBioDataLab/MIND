@@ -1,10 +1,10 @@
 # ===================================================================
-# MIND - G1 trial: pretraining_config_multidomain_1m_coconut.yaml with ONE change
+# MIND - pretraining_config_multidomain_1m_coconut.yaml with ONE change
 # ===================================================================
 # unimol_masked_geometry_hiding.enabled: true (bond threshold 2.1 A, set in the base file).
 # Masked UniMol atoms then keep only their binary bond topology in the encoder/ESA view
 # (no position, no distances). Everything else, including the data and sampling, comes
-# from the base file. Four-domain twin of the md4_1m_100ep_s42 reference run; not part of the default configs.
+# from the base file. Four domains (protein, RNA, UniMol, COCONUT); not part of the default configs.
 # Usage: make train GPU=<id> CONFIG=pretraining_config_multidomain_1m_coconut_unimol_hidden EPOCHS=<n> SEED=42 LOG=<name>
 # ===================================================================
 

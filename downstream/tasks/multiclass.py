@@ -30,6 +30,7 @@ import numpy as np
 import torch
 import yaml
 
+from data_loading.data_root import expand_data_root
 from downstream.common.graph_builder import edge_free_schema, runtime_sample
 from downstream.common.missing_atoms import parse_policy
 from downstream.tasks.ec.dataset import QC_COLUMNS, ChainResult, process_entry, read_split
@@ -50,7 +51,7 @@ REQUIRED_KEYS = (
 
 def load_config(path: Path, *, expected_task: str, data_root: Optional[Path] = None) -> dict:
     with open(path) as handle:
-        config = yaml.safe_load(handle)
+        config = expand_data_root(yaml.safe_load(handle))
     missing = [key for key in REQUIRED_KEYS if key not in config]
     if missing:
         raise ValueError(f"{path}: missing required keys {missing}")

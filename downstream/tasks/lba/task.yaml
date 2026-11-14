@@ -8,7 +8,7 @@
 
 task: lba
 modality: complex
-data_root: /home/yusuf/data/downstream/lba/complex   # raw/, processed/, provenance.json
+data_root: ${MIND_DATA_ROOT}/downstream/lba/complex   # raw/, processed/, provenance.json
 kind: regression
 
 source: zenodo_4914718

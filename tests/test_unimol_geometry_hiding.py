@@ -27,6 +27,7 @@ from torch_geometric.data.batch import Batch
 import test_evaluate_pretrain as tev
 from core import evaluate_pretrain as ev
 from core.pretraining_config import create_pretraining_config
+from data_loading.data_root import data_root
 from core.pretraining_model import PretrainingESAModel
 
 THRESHOLD = 2.1
@@ -606,7 +607,7 @@ def test_four_domain_evaluation_changes_only_unimol(spread_setup):
 # Real UniMol molecules: false-bond rate of the distance proxy (mandatory check)
 # ---------------------------------------------------------------------------
 
-UNIMOL_ROOT = "/home/yusuf/data/small_molecules/unimol"
+UNIMOL_ROOT = str(data_root() / "small_molecules" / "unimol")
 REAL_CHUNK = "universal_unimol_chunk_199"
 
 

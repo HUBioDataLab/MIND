@@ -7,19 +7,19 @@
 # test_superfamily, per-split <split>.zip holding *.hdf5, label files <split>.txt (label = LAST column), class_map.txt,
 # hdf5 keys atom_pos (frame 0 used), atom_types, atom_names, atom_residue_id, atom_residue_names; num_class 1195.
 # Verified from the IEConv repo copies of the lists (Datasets/data/HomologyTAPE, commit cc067a2): 12,312 / 736 / 718 / 1,254 /
-# 1,272 proteins, 1195 classes, no domain in two splits, every test label also occurs in train. The same numbers for the
-# Zenodo archive's own txt files are NOT yet verified (download/validate checks them and fails on a mismatch).
+# 1,272 proteins, 1195 classes, no domain in two splits, every test label also occurs in train. download/validate checks
+# the Zenodo archive's own txt files against these numbers and fails on a mismatch.
 #
 # Structures: the archive's own hdf5 files (coordinates of PDB-derived SCOP domains). No AFDB structure is needed.
-# UNVERIFIED until download: how many hdf5 files hold only CA atoms (the IEConv loader special-cases "only CA" proteins);
-# with the EC/GO missing-atom policy such domains are dropped and counted (qc), never silently kept.
+# Domains whose hdf5 file holds only CA atoms (the IEConv loader special-cases "only CA" proteins) are dropped and counted
+# (qc) under the EC/GO missing-atom policy, never silently kept.
 
 family: fold
 task: fold
 modality: protein
 source_name: gearnet
-source_root: /home/yusuf/data/downstream/gearnet
-data_root: /home/yusuf/data/downstream/gearnet/fold     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)
+source_root: ${MIND_DATA_ROOT}/downstream/gearnet
+data_root: ${MIND_DATA_ROOT}/downstream/gearnet/fold     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)
 
 source: fold3d_zenodo_zip
 sources:
@@ -31,7 +31,7 @@ sources:
     bytes: 670898225
     license: cc-by-4.0                   # Zenodo record metadata
     extract_dir: fold3d                  # extraction target below raw/; the folder holding class_map.txt is searched below it
-    class_map_file: class_map.txt        # UNVERIFIED location inside the archive (GearNet code reads <fold3d>/class_map.txt)
+    class_map_file: class_map.txt        # GearNet code reads <fold3d>/class_map.txt; download searches for it below extract_dir
     label_files: {train: train.txt, valid: valid.txt, test_fold: test_fold.txt,
                   test_family: test_family.txt, test_superfamily: test_superfamily.txt}
     inner_archives: {train: train.zip, valid: valid.zip, test_fold: test_fold.zip,
@@ -50,7 +50,7 @@ metric: accuracy
 structure:
   mse_to_met: true
 
-# Same decision as EC/GO (2026-10-25): drop residues missing a backbone atom, mask incomplete sidechains.
+# Same policy as EC/GO: drop residues missing a backbone atom, mask incomplete sidechains.
 missing_atoms:
   policy: drop_residue_missing_backbone
   incomplete_sidechain: mask

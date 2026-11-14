@@ -1,4 +1,4 @@
-"""Download the pinned baseline models of ``registry.yaml`` into MIND_MODELS_ROOT.
+"""Download the pinned baseline models of ``registry.yaml`` into MIND_MODELS_ROOT (default ``<repo>/models``).
 
 Hugging Face repos go to ``<root>/huggingface/hub`` (the HF cache layout, so
 ``from_pretrained(..., cache_dir=<root>/huggingface/hub, local_files_only=True)``
@@ -24,7 +24,7 @@ from pathlib import Path
 import yaml
 
 REGISTRY = Path(__file__).with_name("registry.yaml")
-DEFAULT_ROOT = Path(os.environ.get("MIND_MODELS_ROOT", "/home/yusuf/models"))
+DEFAULT_ROOT = Path(os.environ.get("MIND_MODELS_ROOT") or Path(__file__).resolve().parents[2] / "models")
 
 
 def load_registry(path: Path = REGISTRY) -> dict:

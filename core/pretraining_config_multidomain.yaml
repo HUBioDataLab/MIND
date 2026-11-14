@@ -26,24 +26,24 @@ multi_domain:
     # chunk_range: [start, end] inclusive; null = use all chunks.
     pdb:
       enabled: true
-      chunk_dir: "/home/yusuf/data/proteins/processed_14atom_edgefree"  # edge-free copy, graph-identical to the legacy chunks of the September/Atum runs (12,225 graphs checked)
+      chunk_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_edgefree"  # edge-free 40k protein chunks
       chunk_range: [0, 9]  # Use chunks 0..9 (all 10). Use [0, 2] to limit to first 3 chunks.
       max_graph_atoms: 12000
     
     metabolite:
       enabled: false  # off in this 3-domain config; the four-domain config is pretraining_config_multidomain_1m_coconut.yaml
-      chunk_dir: "/home/yusuf/data/metabolites/processed"
+      chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed"
       chunk_range: null
 
     unimol:
       enabled: true
-      chunk_dir: "/home/yusuf/data/small_molecules/unimol/universal_unimol"
+      chunk_dir: "${MIND_DATA_ROOT}/small_molecules/unimol/universal_unimol"
       chunk_range: [0, 9]  # Preserve logged lexicographic loader slice: 0, 1, 10, 100-106 (10 chunks).
       max_graph_atoms: 12000
     
     rna:
       enabled: true
-      chunk_dir: "/home/yusuf/data/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot_edgefree"  # edge-free June-equivalent copy
+      chunk_dir: "${MIND_DATA_ROOT}/rna/virtual_v1/june_equivalent_23slot_v2/processed_23slot_edgefree"  # edge-free June-equivalent copy
       chunk_range: null  # All 67 June-equivalent 23-slot chunks (8,556 graphs <=5,000 real non-H atoms).
       max_graph_atoms: 6000
     
@@ -59,7 +59,7 @@ multi_domain:
 # -------------------------
 dataset: PDB
 universal_cache_path: "data_loading/cache/universal_pdb_all.pkl"
-dataset_download_dir: "/home/yusuf/data/proteins/processed_14atom_edgefree"  # not read in multi-domain mode (train_pretrain.py still reads the attribute)
+dataset_download_dir: "${MIND_DATA_ROOT}/proteins/processed_14atom_edgefree"  # single-domain loader only; unused while multi_domain.enabled is true
 
 # -------------------------
 # Data Loading Settings

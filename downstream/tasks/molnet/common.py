@@ -4,7 +4,7 @@ One task per MoleculeNet data set (QM9 excluded). Each task has its own ``data_r
 (``<source_root>/<task>``) with ``processed/<revision>/{train,valid,test}.pt``, ``qc_<split>.{json,tsv}`` and a
 ``provenance.json``. The raw Uni-Mol LMDB files are read-only inputs shared by all 14 tasks.
 
-Processing rules (all decided by the user on 2026-11-09, see ``task.yaml``):
+Processing rules (``task.yaml``):
 
 * the Uni-Mol scaffold split of the LMDB files is the split; nothing is re-split;
 * the FIRST conformer (index 0) of the 11 per molecule is used; the last one is Uni-Mol's flat fallback and is ignored;
@@ -39,6 +39,7 @@ import numpy as np
 import torch
 import yaml
 
+from data_loading.data_root import expand_data_root
 from data_loading.atom_position_vocab import RARE_ATOMIC_NUMBER
 from data_loading.cache_to_pyg import element_to_atomic_number
 from downstream.common import complex_graph as cg
@@ -49,11 +50,12 @@ CLASSIFICATION_KIND = "multilabel_masked"
 REGRESSION_KIND = "multitarget_regression"
 MOLNET_KINDS = (CLASSIFICATION_KIND, REGRESSION_KIND)
 REQUIRED_KEYS = (
-    "family", "modality", "processed_revision", "source_name", "source_root", "raw_subdir", "splits", "conformer",
-    "hydrogens", "max_atoms_policy", "report_atom_threshold", "missing_classification_code", "embedding", "probe",
-    "finetune", "datasets",
+    "family", "modality", "processed_revision", "source_name", "source_root", "raw_subdir", "archive", "splits",
+    "conformer", "hydrogens", "max_atoms_policy", "report_atom_threshold", "missing_classification_code", "embedding",
+    "probe", "finetune", "datasets",
 )
 DATASET_KEYS = ("task", "kind", "num_targets", "metrics", "primary_metric", "expected_counts")
+ARCHIVE_KEYS = ("url", "name", "bytes", "md5", "sha256", "extract_subdir")
 REQUIRED_RECORD_KEYS = frozenset(("atoms", "coordinates", "smi", "scaffold", "target", "ori_index"))
 FLAG_NAMES = (
     "all_conformers_flat", "first_conformer_flat", "rare_element", "no_heavy_atoms", "single_heavy_atom",
@@ -70,7 +72,7 @@ _ELEMENT = re.compile(r"^(\*|[A-Z][a-z]{0,2})$")
 
 def _read_yaml(path: Path) -> dict:
     with open(path) as handle:
-        return yaml.safe_load(handle)
+        return expand_data_root(yaml.safe_load(handle))
 
 
 def _dataset_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
@@ -94,6 +96,9 @@ def load_task_config(path: Path = TASK_YAML, *, data_root: Optional[Path] = None
         raise ValueError(f"{path}: missing required keys {missing}")
     if dataset not in config["datasets"]:
         raise ValueError(f"unknown MoleculeNet dataset {dataset!r}; choose from {sorted(config['datasets'])}")
+    absent = [key for key in ARCHIVE_KEYS if not config["archive"].get(key)]
+    if absent:
+        raise ValueError(f"{path}: archive lacks {absent} (url, size and both checksums must be pinned)")
     entry = config["datasets"][dataset]
     absent = [key for key in DATASET_KEYS if key not in entry]
     if absent:

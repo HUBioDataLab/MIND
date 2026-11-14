@@ -1,5 +1,5 @@
 # ===================================================================
-# MIND - G1 trial: pretraining_config_multidomain_1m.yaml with ONE change
+# MIND - pretraining_config_multidomain_1m.yaml with ONE change
 # ===================================================================
 # unimol_masked_geometry_hiding.enabled: true (bond threshold 2.1 A, set in the base file).
 # Masked UniMol atoms then keep only their binary bond topology in the encoder/ESA view
