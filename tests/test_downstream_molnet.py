@@ -171,7 +171,7 @@ def test_config_loader_rejects_bad_decisions(tmp_path, edit, message):
 
 def test_prepare_end_to_end_uses_first_conformer_drops_hydrogens_and_writes_qc(tmp_path):
     config = write_family(tmp_path)
-    assert common.build_processed(config, splits=["train", "valid", "test"]) == 0
+    assert common.build_processed(config, splits=["train", "valid", "test"], config_path=common.TASK_YAML) == 0
     out = common.processed_dir(config)
     for split in ("train", "valid", "test"):
         assert (out / f"{split}.pt").is_file() and (out / f"qc_{split}.json").is_file() and (out / f"qc_{split}.tsv").is_file()
@@ -196,9 +196,29 @@ def test_prepare_end_to_end_uses_first_conformer_drops_hydrogens_and_writes_qc(t
     assert run["config_sha256"] and set(run["qc"]) == {"train", "valid", "test"}
 
 
+def test_provenance_records_the_config_file_that_was_used(tmp_path, monkeypatch):
+    import hashlib
+
+    config = write_family(tmp_path)
+    custom = tmp_path / "custom_task.yaml"
+    custom.write_text(common.TASK_YAML.read_text() + "\n# a custom copy\n")
+    loaded = []
+
+    def load(path, **kwargs):
+        loaded.append(path)
+        return config
+
+    monkeypatch.setattr(common, "load_task_config", load)
+    assert prepare.main(["process", "--task", "mn_esol", "--config", str(custom)]) == 0
+    assert loaded == [custom]
+    run = json.loads(common.task_paths(config)["provenance"].read_text())["runs"][-1]
+    assert run["config"] == str(custom)
+    assert run["config_sha256"] == hashlib.sha256(custom.read_bytes()).hexdigest()
+
+
 def test_ligand_graph_is_the_lba_separate_unimol_path(tmp_path):
     config = write_family(tmp_path)
-    common.build_processed(config, splits=["train", "valid", "test"])
+    common.build_processed(config, splits=["train", "valid", "test"], config_path=common.TASK_YAML)
     split = processed(config, "train")
     model_config = tiny_model_config()
     sample = split.runtime(0, model_config, seed=0)
@@ -221,7 +241,7 @@ def test_flat_conformers_rare_elements_single_atom_and_big_molecules_are_flagged
         big,
     ]
     config = write_family(tmp_path, train=train, valid=esol_records([5]), test=esol_records([6]))
-    assert common.build_processed(config, splits=["train", "valid", "test"]) == 0
+    assert common.build_processed(config, splits=["train", "valid", "test"], config_path=common.TASK_YAML) == 0
     split = processed(config, "train")
     flags = {name: values.tolist() for name, values in split.flags.items()}
     assert flags["all_conformers_flat"] == [False, True, False, False, False, False]
@@ -257,7 +277,7 @@ def test_test_subsets_read_the_qc_table_and_refuse_unlisted_molecules(tmp_path):
             make_molecule(["C", "C", "O", "H"], (0.1,), ori_index=11),
             make_molecule(["Si", "C"], (0.3,), ori_index=12)]
     config = write_family(tmp_path, test=test)
-    common.build_processed(config, splits=["train", "valid", "test"])
+    common.build_processed(config, splits=["train", "valid", "test"], config_path=common.TASK_YAML)
     subsets = common.test_subsets(config, ["esol_10", "esol_11", "esol_12"])
     assert subsets["all_conformers_flat"].tolist() == [True, False, False]
     assert subsets["rare_element"].tolist() == [False, False, True]
@@ -275,7 +295,7 @@ def test_classification_labels_become_nan_with_a_mask_and_qc_counts_them(tmp_pat
         valid=records([3], [(1, 0)]), test=records([4], [(0, 0)]),
         edit_config=lambda c: None)
     assert config["num_targets"] == 2 and config["kind"] == "multilabel_masked"
-    common.build_processed(config, splits=["train", "valid", "test"])
+    common.build_processed(config, splits=["train", "valid", "test"], config_path=common.TASK_YAML)
     split = processed(config, "train")
     assert np.isnan(split.labels).tolist() == [[False, True], [False, False], [True, False]]
     assert split.label_mask.tolist() == [[True, False], [True, True], [False, True]]
@@ -295,7 +315,7 @@ def test_regression_labels_keep_their_values_including_negatives_and_a_missing_v
     config = write_family(tmp_path, "qm8dft", train=train, valid=[make_molecule(["C", "O"], (0.0, 0.0), ori_index=2)],
                           test=[make_molecule(["C", "O"], (1.0, 1.0), ori_index=3)],
                           edit_config=lambda c: c.update(num_targets=2))
-    common.build_processed(config, splits=["train", "valid", "test"])
+    common.build_processed(config, splits=["train", "valid", "test"], config_path=common.TASK_YAML)
     split = processed(config, "train")
     assert split.labels[0].tolist() == [-1.0, 2.5] and np.isnan(split.labels[1, 0])
     assert split.label_mask.tolist() == [[True, True], [False, True]]
@@ -310,7 +330,7 @@ def test_a_missing_lmdb_key_is_refused(tmp_path):
     common.lmdb_path(config, "train").unlink()
     write_lmdb(common.lmdb_path(config, "train"), esol_records([0, 1, 2]), skip_keys=(1,))
     with pytest.raises(ValueError, match="molecules, expected 3"):
-        common.build_processed(config, splits=["train"])
+        common.build_processed(config, splits=["train"], config_path=common.TASK_YAML)
 
 
 def test_lmdb_with_a_gap_in_the_keys_is_refused(tmp_path):
@@ -323,7 +343,7 @@ def test_lmdb_with_a_gap_in_the_keys_is_refused(tmp_path):
             txn.put(key, pickle.dumps(record, protocol=4))
     env.close()
     with pytest.raises(KeyError, match="no key"):
-        common.build_processed(config, splits=["train"])
+        common.build_processed(config, splits=["train"], config_path=common.TASK_YAML)
 
 
 @pytest.mark.parametrize("mutate,message", [
@@ -343,7 +363,7 @@ def test_corrupt_records_are_refused_with_their_position(tmp_path, mutate, messa
     mutate(records[1])
     config = write_family(tmp_path, train=records)
     with pytest.raises((ValueError, KeyError), match=message):
-        common.build_processed(config, splits=["train"])
+        common.build_processed(config, splits=["train"], config_path=common.TASK_YAML)
     assert not (common.processed_dir(config) / "train.pt").exists()
 
 
@@ -351,7 +371,7 @@ def test_invalid_classification_codes_are_refused(tmp_path):
     records = [make_molecule(["C", "O"], (2, 0), ori_index=0)]
     config = write_family(tmp_path, "clintox", train=records, valid=records, test=records)
     with pytest.raises(ValueError, match="label code 2"):
-        common.build_processed(config, splits=["train"])
+        common.build_processed(config, splits=["train"], config_path=common.TASK_YAML)
 
 
 def test_blocked_pickle_globals_count_mismatch_duplicates_and_overwrite_are_refused(tmp_path):
@@ -363,31 +383,31 @@ def test_blocked_pickle_globals_count_mismatch_duplicates_and_overwrite_are_refu
         txn.put(b"0", pickle.dumps({"atoms": __import__("collections").OrderedDict()}, protocol=4))
     env.close()
     with pytest.raises(pickle.UnpicklingError, match="blocked global"):
-        common.build_processed(config, splits=["valid"])
+        common.build_processed(config, splits=["valid"], config_path=common.TASK_YAML)
 
     config = write_family(tmp_path / "count", counts={"train": 4, "valid": 1, "test": 2})
     with pytest.raises(ValueError, match="3 molecules, expected 4"):
-        common.build_processed(config, splits=["train"])
+        common.build_processed(config, splits=["train"], config_path=common.TASK_YAML)
 
     config = write_family(tmp_path / "dup", train=esol_records([0, 1, 2]), valid=esol_records([2]))
     with pytest.raises(ValueError, match="ori_index 2 .* both"):
-        common.build_processed(config, splits=["train", "valid", "test"])
+        common.build_processed(config, splits=["train", "valid", "test"], config_path=common.TASK_YAML)
 
     config = write_family(tmp_path / "again")
-    assert common.build_processed(config, splits=["train", "valid", "test"]) == 0
+    assert common.build_processed(config, splits=["train", "valid", "test"], config_path=common.TASK_YAML) == 0
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
-        common.build_processed(config, splits=["train"])
+        common.build_processed(config, splits=["train"], config_path=common.TASK_YAML)
 
 
 def test_missing_raw_data_is_refused(tmp_path):
     config = common.load_task_config(data_root=tmp_path / "unimol_molnet" / "mn_esol", dataset="esol")
     with pytest.raises(FileNotFoundError, match="train.lmdb"):
-        common.build_processed(config, splits=["train"])
+        common.build_processed(config, splits=["train"], config_path=common.TASK_YAML)
 
 
 def test_processed_split_rejects_corrupt_payloads(tmp_path):
     config = write_family(tmp_path)
-    common.build_processed(config, splits=["train", "valid", "test"])
+    common.build_processed(config, splits=["train", "valid", "test"], config_path=common.TASK_YAML)
     payload = torch.load(common.processed_dir(config) / "valid.pt", weights_only=False)
     cases = {
         "lacks 'flags'": {k: v for k, v in payload.items() if k != "flags"},

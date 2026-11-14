@@ -38,7 +38,7 @@ def main(argv: Optional[list] = None) -> int:
     unknown = [s for s in splits if s not in config["splits"]]
     if unknown:
         parser.error(f"unknown splits {unknown}; choose from {config['splits']}")
-    return common.build_processed(config, splits=splits, dry_run=args.command == "validate")
+    return common.build_processed(config, splits=splits, config_path=args.config, dry_run=args.command == "validate")
 
 
 if __name__ == "__main__":

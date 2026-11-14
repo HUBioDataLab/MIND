@@ -391,8 +391,11 @@ def _write_qc(out_dir: Path, split: str, ids: Sequence[str], molecules: Sequence
     (out_dir / f"qc_{split}.json").write_text(json.dumps(summary, indent=1))
 
 
-def build_processed(config: dict, *, splits: Sequence[str], dry_run: bool = False) -> int:
-    """Process the requested splits; returns 0 (every failure raises). ``dry_run`` reads and checks, writes nothing."""
+def build_processed(config: dict, *, splits: Sequence[str], config_path: Path, dry_run: bool = False) -> int:
+    """Process the requested splits; returns 0 (every failure raises). ``dry_run`` reads and checks, writes nothing.
+
+    ``config_path`` is the task YAML ``config`` was loaded from; the provenance record names and hashes it.
+    """
     out_dir = processed_dir(config)
     if not dry_run:
         existing = [out_dir / f"{s}.pt" for s in splits if (out_dir / f"{s}.pt").exists()]
@@ -414,7 +417,7 @@ def build_processed(config: dict, *, splits: Sequence[str], dry_run: bool = Fals
         print(f"[{split}] wrote {target} ({len(molecules)} molecules)", flush=True)
     if not dry_run:
         record_process_run(
-            task_paths(config)["provenance"], started_utc=started, config_path=TASK_YAML, processed_dir=out_dir,
+            task_paths(config)["provenance"], started_utc=started, config_path=config_path, processed_dir=out_dir,
             splits=list(splits), exit_code=0, inputs=[lmdb_path(config, s) for s in splits],
             extra={"dataset": config["dataset"], "task": config["task"],
                    "policy": {"conformer": "first (index 0)", "hydrogens": "dropped", "cropping": "none",
