@@ -349,3 +349,20 @@ def test_enabled_config_domains_maps_config_keys():
     assert enabled_config_domains(config) == ["protein", "unimol", "coconut"]
     assert BLOCK_SPECS["protein"].slots == 10 and BLOCK_SPECS["rna"].slots == 11
     assert len(RNA_BACKBONE_ATOMS) == 12
+
+
+def _callback_module():
+    tasks = SimpleNamespace(capture_distance_diagnostics=False)
+    config = SimpleNamespace(pretraining_tasks=["mlm"], multi_domain={}, dataset="unimol")
+    return SimpleNamespace(config=config, pretraining_tasks=tasks, eval_embedding_sample_nodes=0)
+
+
+def test_domain_mlm_callback_refuses_more_than_one_process():
+    from core.metrics.domain_mlm_metrics_callback import DomainMLMMetricsCallback
+
+    with pytest.raises(RuntimeError, match="world_size=2"):
+        DomainMLMMetricsCallback(enabled=True).setup(SimpleNamespace(world_size=2), _callback_module(), "fit")
+    single = DomainMLMMetricsCallback(enabled=True)
+    single.setup(SimpleNamespace(world_size=1), _callback_module(), "fit")
+    assert single.enabled and single.expected_domains == ["unimol"]
+    DomainMLMMetricsCallback(enabled=False).setup(SimpleNamespace(world_size=2), _callback_module(), "fit")

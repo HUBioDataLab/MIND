@@ -7,6 +7,9 @@ test epochs always print). Definitions: core/metrics/domain_mlm_metrics.py.
 
 The distance-head and embedding-health captures are off by default; when
 enabled they are armed on the model here and only taken in eval mode.
+
+The accumulators are process-local and are not reduced across ranks, so the
+callback refuses to run with more than one process.
 """
 
 from __future__ import annotations
@@ -77,6 +80,12 @@ class DomainMLMMetricsCallback(Callback):
             self.enabled = False
             print("ℹ️  Domain MLM metrics disabled: MLM is not a pretraining task")
             return
+        world_size = int(trainer.world_size)
+        if world_size > 1:
+            raise RuntimeError(
+                f"DomainMLMMetricsCallback: world_size={world_size}, but its metrics are process-local and "
+                "not reduced across ranks; each rank would report only its own shard. Run on one device."
+            )
         self.expected_domains = enabled_config_domains(pl_module.config)
         pl_module.pretraining_tasks.capture_distance_diagnostics = self.distance_diagnostics
         pl_module.eval_embedding_sample_nodes = self.embedding_sample_nodes_per_batch
