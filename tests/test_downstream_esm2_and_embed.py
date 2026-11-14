@@ -53,6 +53,40 @@ def test_unknown_esm_name_fails():
         esm2.load_esm2("esm2_t48_15B_UR50D", "cpu", cache_dir="/nonexistent")
 
 
+def hash_only_cache(root, repo, revision, tokenizer, model):
+    """HF cache holding only ``snapshots/<revision>`` (no ``refs/main``), as ``fetch_models`` leaves it."""
+    snapshot = root / f"models--{repo.replace('/', '--')}" / "snapshots" / revision
+    tokenizer.save_pretrained(snapshot)
+    model.save_pretrained(snapshot)
+    return root
+
+
+def test_esm2_loads_the_registry_revision_from_a_hash_only_cache(tiny_esm, tmp_path):
+    from downstream.baselines.fetch_models import load_registry
+
+    name = "esm2_t6_8M_UR50D"
+    revision = load_registry()[name]["revision"]
+    cache = hash_only_cache(tmp_path / "hub", esm2.ESM2_MODELS[name], revision, *tiny_esm)
+    _, model = esm2.load_esm2(name, "cpu", cache_dir=str(cache), local_files_only=True)
+    assert model.config._commit_hash == revision
+
+
+def test_registry_and_loader_repo_must_agree(monkeypatch):
+    monkeypatch.setitem(esm2.ESM2_MODELS, "esm2_t6_8M_UR50D", "someone/else")
+    with pytest.raises(ValueError, match="registry"):
+        esm2.load_esm2("esm2_t6_8M_UR50D", "cpu", cache_dir="/nonexistent", local_files_only=True)
+
+
+def test_a_loaded_revision_other_than_the_pin_fails(tiny_esm):
+    _, model = tiny_esm
+    model.config._commit_hash = "b" * 40
+    with pytest.raises(RuntimeError, match="revision"):
+        esm2.check_loaded_revision(model, "a" * 40, "facebook/esm2_t6_8M_UR50D")
+    model.config._commit_hash = None
+    with pytest.raises(RuntimeError, match="revision"):
+        esm2.check_loaded_revision(model, "a" * 40, "facebook/esm2_t6_8M_UR50D")
+
+
 def test_embed_split_mind_on_cpu_matches_chain_count(cpu_flash, tmp_path):
     config = _write_task(tmp_path / "data")
     assert dataset.build_processed(config, splits=["valid"], workers=1) == 0

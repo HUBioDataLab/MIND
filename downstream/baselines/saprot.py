@@ -11,7 +11,7 @@ Token ids are looked up directly in SaProt's vocabulary (no string splitting),
 and a residue that is not in the vocabulary raises. Chains longer than 1022
 residues are embedded in contiguous windows and averaged residue-weighted, as
 for ESM-2. Weights are downloaded by HF on first use into the explicit
-``cache_dir``.
+``cache_dir``, at the revision pinned in ``registry.yaml``.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import List, Sequence
 import numpy as np
 import torch
 
-from downstream.baselines.esm2 import MAX_RESIDUES
+from downstream.baselines.esm2 import MAX_RESIDUES, check_loaded_revision, pinned_revision
 from downstream.baselines.foldseek_3di import NO_STATE, THREE_DI_ALPHABET
 
 SAPROT_MODELS = {
@@ -56,10 +56,13 @@ def load_saprot(name: str, device, *, cache_dir: str, local_files_only: bool = F
     from transformers import EsmModel, EsmTokenizer
 
     repo = SAPROT_MODELS[name]
-    tokenizer = EsmTokenizer.from_pretrained(repo, cache_dir=cache_dir, local_files_only=local_files_only)
+    revision = pinned_revision(name, repo)
+    tokenizer = EsmTokenizer.from_pretrained(repo, revision=revision, cache_dir=cache_dir,
+                                             local_files_only=local_files_only)
     model = EsmModel.from_pretrained(
-        repo, cache_dir=cache_dir, local_files_only=local_files_only, add_pooling_layer=False
+        repo, revision=revision, cache_dir=cache_dir, local_files_only=local_files_only, add_pooling_layer=False
     )
+    check_loaded_revision(model, revision, repo)
     return tokenizer, model.to(device).eval()
 
 

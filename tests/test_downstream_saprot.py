@@ -188,6 +188,17 @@ def tiny_saprot(tmp_path):
     return tokenizer, EsmModel(config, add_pooling_layer=False).eval()
 
 
+def test_saprot_loads_the_registry_revision_from_a_hash_only_cache(tiny_saprot, tmp_path):
+    from downstream.baselines.fetch_models import load_registry
+    from test_downstream_esm2_and_embed import hash_only_cache
+
+    name = "saprot_35m_af2"
+    revision = load_registry()[name]["revision"]
+    cache = hash_only_cache(tmp_path / "hub", saprot.SAPROT_MODELS[name], revision, *tiny_saprot)
+    _, model = saprot.load_saprot(name, "cpu", cache_dir=str(cache), local_files_only=True)
+    assert model.config._commit_hash == revision
+
+
 def test_token_ids_match_string_tokenizer_and_reject_unknown(tiny_saprot):
     tokenizer, _ = tiny_saprot
     tokens = ["Md", "K#", "Av"]

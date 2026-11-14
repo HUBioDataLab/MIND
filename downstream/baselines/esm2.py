@@ -5,6 +5,7 @@ encoders see the same chain coverage. Chains longer than the ESM-2 context
 (1022 residues + BOS/EOS) are embedded in contiguous windows and averaged
 residue-weighted. Weights are downloaded by HF on first use into the explicit
 ``cache_dir`` (the environment's default HF cache is not writable here).
+Tokenizer and weights are loaded at the revision pinned in ``registry.yaml``.
 """
 
 from __future__ import annotations
@@ -25,16 +26,36 @@ MAX_RESIDUES = 1022
 POOLING = "mean_residues"
 
 
+def pinned_revision(name: str, repo: str) -> str:
+    """Commit of ``name`` pinned in ``registry.yaml``; the registry must name the same repo."""
+    from downstream.baselines.fetch_models import load_registry
+
+    spec = load_registry().get(name)
+    if spec is None or spec["kind"] != "hf" or spec["repo"] != repo:
+        raise ValueError(f"{name}: loader repo {repo!r} has no matching Hugging Face entry in the registry "
+                         f"({None if spec is None else spec.get('repo')!r})")
+    return spec["revision"]
+
+
+def check_loaded_revision(model, revision: str, repo: str) -> None:
+    loaded = getattr(model.config, "_commit_hash", None)
+    if loaded != revision:
+        raise RuntimeError(f"{repo}: loaded revision {loaded!r}, the registry pins {revision!r}")
+
+
 def load_esm2(name: str, device, *, cache_dir: str, local_files_only: bool = False):
     if name not in ESM2_MODELS:
         raise ValueError(f"unknown ESM-2 model {name!r}; choose from {sorted(ESM2_MODELS)}")
     from transformers import AutoTokenizer, EsmModel
 
     repo = ESM2_MODELS[name]
-    tokenizer = AutoTokenizer.from_pretrained(repo, cache_dir=cache_dir, local_files_only=local_files_only)
+    revision = pinned_revision(name, repo)
+    tokenizer = AutoTokenizer.from_pretrained(repo, revision=revision, cache_dir=cache_dir,
+                                              local_files_only=local_files_only)
     model = EsmModel.from_pretrained(
-        repo, cache_dir=cache_dir, local_files_only=local_files_only, add_pooling_layer=False
+        repo, revision=revision, cache_dir=cache_dir, local_files_only=local_files_only, add_pooling_layer=False
     )
+    check_loaded_revision(model, revision, repo)
     return tokenizer, model.to(device).eval()
 
 
