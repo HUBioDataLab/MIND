@@ -30,9 +30,9 @@ def _run(outputs, model, seed, sha, *, macro, macro_offset=0.0):
 
 def _setup(tmp_path, control_offset=0.0):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
+    card(outputs, "model_a", SHA_A)
     card(outputs, "po", SHA_B)
-    dirs = {seed: _run(outputs, "md4", seed, SHA_A, macro=False) for seed in (0, 1, 2)}
+    dirs = {seed: _run(outputs, "model_a", seed, SHA_A, macro=False) for seed in (0, 1, 2)}
     for seed in (0, 1, 2):
         _run(outputs, "po", seed, SHA_B, macro=True, macro_offset=control_offset)
     ledger.ingest(root, outputs_root=outputs, command="test")
@@ -40,11 +40,11 @@ def _setup(tmp_path, control_offset=0.0):
 
 
 def _recompute(root, *extra):
-    return ledger.main(["--results-root", str(root), "recompute-macro-aupr", "--task", "ec", "--model", "md4",
+    return ledger.main(["--results-root", str(root), "recompute-macro-aupr", "--task", "ec", "--model", "model_a",
                         "--control", "po", "--data-revision", "rev_v2", *extra])
 
 
-def _macro_rows(root, model="md4"):
+def _macro_rows(root, model="model_a"):
     return [r for r in ledger.read_records(root, "measurements") if r["model_key"] == model
             and r["metric"] == "macro_aupr" and (r["eval_split"], r["subset"]) == ("test", "all")]
 
@@ -54,7 +54,7 @@ def test_dry_run_writes_nothing(tmp_path, capsys):
     before = ledger.verify(root)
     assert _recompute(root, "--dry-run") == 0
     out = capsys.readouterr().out
-    assert "DRY-RUN" in out and out.count("kontrol po seed") == 3
+    assert "DRY-RUN" in out and out.count("control po seed") == 3
     assert ledger.verify(root) == before and not _macro_rows(root)
 
 
@@ -73,7 +73,7 @@ def test_recompute_adds_one_row_per_seed_with_its_source(tmp_path):
     # S1 + S2: the new rows join the setting of their source files and compare without an error
     state = ledger_report.load_state(root)
     assert len(ledger_report.sections(state, "ec")) == 1
-    pair = next(p for p in ledger_compare.compare(state, "po", "md4", n_boot=20)["pairs"]
+    pair = next(p for p in ledger_compare.compare(state, "po", "model_a", n_boot=20)["pairs"]
                 if (p["metric"], p["eval_split"], p["subset"]) == ("macro_aupr", "test", "all"))
     assert pair["mean_b"] == pytest.approx(np.mean([r["value"] for r in rows]))
 
@@ -114,8 +114,8 @@ def test_control_that_does_not_reproduce_its_stored_value_is_refused(tmp_path):
 def test_only_multilabel_tasks_and_a_known_setting(tmp_path):
     root, _ = _setup(tmp_path)
     with pytest.raises(ledger.LedgerError, match="multilabel"):
-        ledger.main(["--results-root", str(root), "recompute-macro-aupr", "--task", "lba", "--model", "md4",
+        ledger.main(["--results-root", str(root), "recompute-macro-aupr", "--task", "lba", "--model", "model_a",
                      "--control", "po", "--data-revision", "rev_v2", "--dry-run"])
     with pytest.raises(ledger.LedgerError, match="no ec test/all fmax row"):
-        ledger.main(["--results-root", str(root), "recompute-macro-aupr", "--task", "ec", "--model", "md4",
+        ledger.main(["--results-root", str(root), "recompute-macro-aupr", "--task", "ec", "--model", "model_a",
                      "--control", "po", "--data-revision", "other_rev", "--dry-run"])

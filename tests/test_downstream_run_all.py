@@ -71,19 +71,19 @@ event["end"] = time.time()
 with open(os.environ["FAKE_EVENTS"], "a") as handle:
     handle.write(json.dumps(event) + "\n")
 '''
-LOG_NAME = re.compile(r"^(embed|probe_linear|probe_mlp|ledger_add|ledger_report)_([A-Za-z0-9_.]+)_(md4)_(\d{8}_\d{6}_\d{3})_(\d+)\.log$")
+LOG_NAME = re.compile(r"^(embed|probe_linear|probe_mlp|ledger_add|ledger_report)_([A-Za-z0-9_.]+)_(model_a)_(\d{8}_\d{6}_\d{3})_(\d+)\.log$")
 
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
-    """Outputs root with snapshot md4 (all four domains), processed split files, fake commands, results root."""
+    """Outputs root with snapshot model_a (all four domains), processed split files, fake commands, results root."""
     outputs = tmp_path / "outputs"
-    models = outputs / "models" / "md4"
+    models = outputs / "models" / "model_a"
     models.mkdir(parents=True)
     (models / "model.ckpt").write_bytes(b"fake checkpoint")
     sha = hashlib.sha256(b"fake checkpoint").hexdigest()
-    card(outputs, "md4", sha)
-    _set_domains(outputs, "md4", ["metabolite", "pdb", "rna", "unimol"])
+    card(outputs, "model_a", sha)
+    _set_domains(outputs, "model_a", ["metabolite", "pdb", "rna", "unimol"])
     fake = tmp_path / "fake_job.py"
     fake.write_text(FAKE)
     events = tmp_path / "events.jsonl"
@@ -147,38 +147,38 @@ def _write_embedding(world, task, model_id, split, *, json_too=True, seconds=Non
 def test_plan_lists_runs_skips_and_known_timings_and_writes_nothing(world, capsys):
     world.processed("ec", "mn_bace", "lba.identity30.joint", "lba.identity60.joint")
     for split in ("train", "valid", "test"):
-        _write_embedding(world, "ec", "md4", split)  # complete: skipped
+        _write_embedding(world, "ec", "model_a", split)  # complete: skipped
         _write_embedding(world, "mn_bace", "other_model", split, seconds=12.5)  # another model's recorded time
     for seed in (0, 1, 2):  # ec mlp probe complete: skipped; ec linear runs
-        d = registry.results_dir("ec", "md4", "mlp_probe", seed, pooling="mean_atoms", root=world.outputs)
+        d = registry.results_dir("ec", "model_a", "mlp_probe", seed, pooling="mean_atoms", root=world.outputs)
         d.mkdir(parents=True)
         (d / "metrics.json").write_text("{}")
     before = sorted(p for p in world.tmp.rglob("*"))
-    assert world.main("--model", "md4", "--tasks", "ec,mn_bace,lba", "--gpus", "2,3", "--plan") == 0
+    assert world.main("--model", "model_a", "--tasks", "ec,mn_bace,lba", "--gpus", "2,3", "--plan") == 0
     out = capsys.readouterr().out
-    assert "ATLANACAK  embed ec: zaten tamam" in out
-    assert "ÇALIŞACAK  embed mn_bace: splits train valid test" in out
+    assert "WILL SKIP  embed ec: already complete" in out
+    assert "WILL RUN  embed mn_bace: splits train valid test" in out
     assert "other_model: 37.5 s over train/valid/test" in out
-    assert "ÇALIŞACAK  embed lba.identity30.joint" in out and "ÇALIŞACAK  embed lba.identity60.joint" in out
-    assert "ATLANACAK  probe ec mlp: zaten tamam" in out and "ÇALIŞACAK  probe ec linear: seeds 0 1 2" in out
-    assert "PLAN: hiçbir şey koşulmadı" in out
+    assert "WILL RUN  embed lba.identity30.joint" in out and "WILL RUN  embed lba.identity60.joint" in out
+    assert "WILL SKIP  probe ec mlp: already complete" in out and "WILL RUN  probe ec linear: seeds 0 1 2" in out
+    assert "PLAN: nothing was run" in out
     assert sorted(p for p in world.tmp.rglob("*")) == before and not world.logs.exists() and not _events(world)
 
 
 def test_partial_embedding_runs_only_missing_splits_and_half_written_one_is_an_error(world, capsys):
     world.processed("ec", "mn_bace")
-    _write_embedding(world, "ec", "md4", "train")
-    _write_embedding(world, "mn_bace", "md4", "train", json_too=False)
-    assert world.main("--model", "md4", "--tasks", "ec,mn_bace", "--gpus", "2", "--plan") == 1
+    _write_embedding(world, "ec", "model_a", "train")
+    _write_embedding(world, "mn_bace", "model_a", "train", json_too=False)
+    assert world.main("--model", "model_a", "--tasks", "ec,mn_bace", "--gpus", "2", "--plan") == 1
     out = capsys.readouterr().out
-    assert "ÇALIŞACAK  embed ec: splits valid test" in out
-    assert re.search(r"HATA  embed mn_bace: half-written embedding .*train\.npz", out)
+    assert "WILL RUN  embed ec: splits valid test" in out
+    assert re.search(r"ERROR  embed mn_bace: half-written embedding .*train\.npz", out)
 
 
 def test_missing_processed_data_is_reported_per_task(world, capsys):
     world.processed("ec")
-    assert world.main("--model", "md4", "--tasks", "ec,mn_bace", "--gpus", "2", "--plan") == 1
-    assert re.search(r"HATA  embed mn_bace: no processed data: .*mn_bace/train\.pt", capsys.readouterr().out)
+    assert world.main("--model", "model_a", "--tasks", "ec,mn_bace", "--gpus", "2", "--plan") == 1
+    assert re.search(r"ERROR  embed mn_bace: no processed data: .*mn_bace/train\.pt", capsys.readouterr().out)
 
 
 def test_real_task_configs_describe_every_unit_of_all():
@@ -196,13 +196,13 @@ def test_real_task_configs_describe_every_unit_of_all():
 # -- domains ------------------------------------------------------------------------------------------------
 
 def test_domain_mismatch_is_skipped_under_all_and_refused_when_named(world, capsys):
-    _set_domains(world.outputs, "md4", ["pdb"])
-    assert world.main("--model", "md4", "--tasks", "all", "--gpus", "2", "--plan") == 1  # no processed data
+    _set_domains(world.outputs, "model_a", ["pdb"])
+    assert world.main("--model", "model_a", "--tasks", "all", "--gpus", "2", "--plan") == 1  # no processed data
     out = capsys.readouterr().out
-    assert out.count("ATLANDI  mn_") == 14 and "small_molecule ['unimol'] ister" in out
-    assert "lba.identity30.joint: ligand atoms, but md4 saw no small-molecule domain" in out
-    assert world.main("--model", "md4", "--tasks", "ec,mn_esol", "--gpus", "2", "--plan") == 2
-    assert "mn_esol: alan uyumsuz" in capsys.readouterr().err
+    assert out.count("SKIPPED  mn_") == 14 and "modality=small_molecule and needs ['unimol']" in out
+    assert "lba.identity30.joint: ligand atoms, but model_a saw no small-molecule domain" in out
+    assert world.main("--model", "model_a", "--tasks", "ec,mn_esol", "--gpus", "2", "--plan") == 2
+    assert "mn_esol: domain mismatch" in capsys.readouterr().err
 
 
 # -- model identity -----------------------------------------------------------------------------------------
@@ -219,7 +219,7 @@ def test_checkpoint_path_snapshot_and_name_conflicts(world, capsys):
     world.processed("ec")
     ckpt = _tiny_ckpt(world.tmp / "best.ckpt")
     # same name as an existing snapshot with another checkpoint: refused before anything runs
-    assert world.main("--model", str(ckpt), "--name", "md4", "--tasks", "ec", "--gpus", "2", "--plan") == 2
+    assert world.main("--model", str(ckpt), "--name", "model_a", "--tasks", "ec", "--gpus", "2", "--plan") == 2
     assert "one name must name one checkpoint" in capsys.readouterr().err
     assert world.main("--model", str(ckpt), "--tasks", "ec", "--gpus", "2", "--plan") == 2
     assert "needs NAME" in capsys.readouterr().err
@@ -243,10 +243,10 @@ def test_checkpoint_path_snapshot_and_name_conflicts(world, capsys):
 
 @pytest.mark.parametrize("args, message", [
     (["--model", "esm2_t6_8M_UR50D"], "HF baseline"),
-    (["--model", "md4", "--name", "other"], "only for a checkpoint path"),
+    (["--model", "model_a", "--name", "other"], "only for a checkpoint path"),
     (["--model", "nosuch"], "no snapshot or alias"),
-    (["--model", "md4", "--heads", "mlp,cnn"], "HEADS="),
-    (["--model", "md4", "--gpus", "auto"], "ds-run does not pick GPUs"),
+    (["--model", "model_a", "--heads", "mlp,cnn"], "HEADS="),
+    (["--model", "model_a", "--gpus", "auto"], "ds-run does not pick GPUs"),
 ])
 def test_bad_arguments_stop_before_anything(world, capsys, args, message):
     world.processed("ec")
@@ -259,48 +259,48 @@ def test_bad_arguments_stop_before_anything(world, capsys, args, message):
 def test_failures_are_collected_others_continue_and_exit_is_nonzero(world, capsys, monkeypatch):
     world.processed("ec", "mn_bace", "lba.identity30.joint", "lba.identity60.joint")
     monkeypatch.setenv("FAKE_FAIL", "mn_bace")
-    code = world.main("--model", "md4", "--tasks", "ec,mn_bace,lba", "--gpus", "5,6", "--per-gpu", "2",
+    code = world.main("--model", "model_a", "--tasks", "ec,mn_bace,lba", "--gpus", "5,6", "--per-gpu", "2",
                       "--heads", "linear,mlp")
     out = capsys.readouterr().out
     assert code == 1
-    run_dir = next(world.logs.glob("ds_run_md4_*"))
+    run_dir = next(world.logs.glob("ds_run_model_a_*"))
     summary = (run_dir / "summary.md").read_text()
-    assert re.search(r"- embed mn_bace: exit code 3; log .*embed_mn_bace_md4_.*\.log; last line: boom mn_bace", summary)
+    assert re.search(r"- embed mn_bace: exit code 3; log .*embed_mn_bace_model_a_.*\.log; last line: boom mn_bace", summary)
     assert "- probe_linear mn_bace: not run: the embedding of this task failed" in summary
-    assert "EKSİK: 3 iş" in summary  # embed + two probes of mn_bace
-    rows = [line for line in summary.splitlines() if line.startswith("| ") and not line.startswith("| görev")]
+    assert "MISSING: 3 job(s)" in summary  # embed + two probes of mn_bace
+    rows = [line for line in summary.splitlines() if line.startswith("| ") and not line.startswith("| task")]
     assert len(rows) == 8 and all(line.rstrip(" |").split("|")[-1].strip() for line in rows)  # no empty cell
-    assert re.search(r"\| ec \| mlp_probe \| fmax \(test/all\) \| 0\.500 ± 0\.000 \(n_tohum=3", summary)
-    assert re.search(r"\| mn_bace \| mlp_probe \| roc_auc \(test/all\) \| HATA: embed: exit code 3", summary)
+    assert re.search(r"\| ec \| mlp_probe \| fmax \(test/all\) \| 0\.500 ± 0\.000 \(n_seeds=3", summary)
+    assert re.search(r"\| mn_bace \| mlp_probe \| roc_auc \(test/all\) \| ERROR: embed: exit code 3", summary)
     assert re.search(r"\| lba.identity60.joint \| mlp_probe.identity60.joint \| rmse \(test/all\) \| 1\.500", summary)
     probes = [e for e in _events(world) if e["kind"] == "probe"]
     assert sorted((e["task"], e["split_tag"]) for e in probes) == sorted(
         [("ec", None)] * 2 + [("lba", "identity30")] * 2 + [("lba", "identity60")] * 2)
     assert all(e["gpu"] == "" for e in probes)
-    assert "durum: koşan" in out and "son yazma" in out  # status lines of the running jobs
+    assert "status: running" in out and "last write" in out  # status lines of the running jobs
     assert ledger.verify(world.results)["lines"]["measurements"] > 0
     # a second run skips what is complete and retries only what failed
     monkeypatch.delenv("FAKE_FAIL")
     capsys.readouterr()
-    assert world.main("--model", "md4", "--tasks", "ec,mn_bace,lba", "--gpus", "5", "--heads", "linear,mlp") == 0
+    assert world.main("--model", "model_a", "--tasks", "ec,mn_bace,lba", "--gpus", "5", "--heads", "linear,mlp") == 0
     out = capsys.readouterr().out
-    assert "ÇALIŞACAK  embed mn_bace" in out and "ATLANACAK  embed ec: zaten tamam" in out
-    assert "ATLANACAK  probe lba.identity30.joint mlp: zaten tamam" in out
+    assert "WILL RUN  embed mn_bace" in out and "WILL SKIP  embed ec: already complete" in out
+    assert "WILL SKIP  probe lba.identity30.joint mlp: already complete" in out
 
 
 def test_exit_zero_without_outputs_is_a_failure(world, monkeypatch):
     world.processed("ec")
     monkeypatch.setenv("FAKE_SILENT", "ec")
-    assert world.main("--model", "md4", "--tasks", "ec", "--gpus", "1", "--heads", "mlp") == 1
-    summary = next(world.logs.glob("ds_run_md4_*/summary.md")).read_text()
+    assert world.main("--model", "model_a", "--tasks", "ec", "--gpus", "1", "--heads", "mlp") == 1
+    summary = next(world.logs.glob("ds_run_model_a_*/summary.md")).read_text()
     assert "- embed ec: exit code 0 but embedding files missing" in summary
 
 
 def test_log_names_are_unique_and_carry_the_child_pid(world):
     world.processed("ec", "mn_bace", "mn_esol", "mn_hiv", "lba.identity30.joint", "lba.identity60.joint")
-    world.main("--model", "md4", "--tasks", "ec,mn_bace,mn_esol,mn_hiv,lba", "--gpus", "1", "--per-gpu", "6",
+    world.main("--model", "model_a", "--tasks", "ec,mn_bace,mn_esol,mn_hiv,lba", "--gpus", "1", "--per-gpu", "6",
                "--probe-jobs", "4", "--heads", "linear,mlp")
-    logs = sorted(p.name for p in next(world.logs.glob("ds_run_md4_*")).glob("*.log"))
+    logs = sorted(p.name for p in next(world.logs.glob("ds_run_model_a_*")).glob("*.log"))
     assert len(logs) == len(set(logs)) == 6 + 12 + 1 + 1  # + the final ledger report
     pids = {e["pid"] for e in _events(world)}
     for name in logs:
@@ -308,14 +308,14 @@ def test_log_names_are_unique_and_carry_the_child_pid(world):
         assert match, name
         if match.group(1) not in ("ledger_add", "ledger_report"):
             assert int(match.group(5)) in pids
-    assert not list(next(world.logs.glob("ds_run_md4_*")).glob(".starting_*"))
+    assert not list(next(world.logs.glob("ds_run_model_a_*")).glob(".starting_*"))
 
 
 def test_each_gpu_runs_at_most_per_gpu_jobs(world, monkeypatch):
     keys = ("ec", "mn_bace", "mn_esol", "mn_hiv", "mn_bbbp", "mn_tox21")
     world.processed(*keys)
     monkeypatch.setenv("FAKE_SLEEP", "0.4")
-    world.main("--model", "md4", "--tasks", ",".join(keys), "--gpus", "3,4", "--per-gpu", "2", "--heads", "mlp")
+    world.main("--model", "model_a", "--tasks", ",".join(keys), "--gpus", "3,4", "--per-gpu", "2", "--heads", "mlp")
     embeds = [e for e in _events(world) if e["kind"] == "embed"]
     assert len(embeds) == 6 and {e["gpu"] for e in embeds} == {"3", "4"}
     for gpu in ("3", "4"):
@@ -328,9 +328,9 @@ def test_each_gpu_runs_at_most_per_gpu_jobs(world, monkeypatch):
 
 def test_random_init_uses_its_own_model_id(world):
     world.processed("ec")
-    world.main("--model", "md4", "--random-init", "--tasks", "ec", "--gpus", "1", "--heads", "mlp")
-    assert (world.outputs / "downstream" / "ec" / "md4.random_init" / "embeddings" / "test.json").is_file()
-    assert (world.outputs / "downstream" / "ec" / "md4.random_init" / "mlp_probe.mean_atoms" / "seed2"
+    world.main("--model", "model_a", "--random-init", "--tasks", "ec", "--gpus", "1", "--heads", "mlp")
+    assert (world.outputs / "downstream" / "ec" / "model_a.random_init" / "embeddings" / "test.json").is_file()
+    assert (world.outputs / "downstream" / "ec" / "model_a.random_init" / "mlp_probe.mean_atoms" / "seed2"
             / "metrics.json").is_file()
 
 
@@ -412,7 +412,7 @@ prov = {"checkpoint": {"path": a.ckpt, "sha256": sha, "epoch": 3}, "git": {"comm
 
 @pytest.fixture
 def two_models(world, monkeypatch):
-    """md4 (snapshot) plus a new checkpoint file; the fake jobs write each model's own checkpoint sha."""
+    """model_a (snapshot) plus a new checkpoint file; the fake jobs write each model's own checkpoint sha."""
     wrapper = world.tmp / "sha_wrapper.py"
     wrapper.write_text(SHA_WRAPPER)
     cf = world.tmp / "fake_cf.py"
@@ -430,65 +430,65 @@ def two_models(world, monkeypatch):
 
 def test_compare_to_completes_every_model_skips_done_and_compares(two_models, capsys):
     w = two_models
-    assert w.main("--model", "md4", "--tasks", "ec,mn_bace", "--gpus", "2", "--heads", "mlp") == 0  # md4 complete
+    assert w.main("--model", "model_a", "--tasks", "ec,mn_bace", "--gpus", "2", "--heads", "mlp") == 0  # model_a complete
     done_before = len(w.model_events())
     capsys.readouterr()
-    code = w.main("--model", str(w.ckpt), "--name", "newm", "--compare-to", "md4,md4.random_init",
+    code = w.main("--model", str(w.ckpt), "--name", "newm", "--compare-to", "model_a,model_a.random_init",
                   "--tasks", "ec,mn_bace", "--gpus", "2,3", "--heads", "mlp", "--bootstrap", "20")
     out = capsys.readouterr().out
     assert code == 0, out
     events = w.model_events()[done_before:]
-    assert not [e for e in events if e["model"] == "md4" and not e["random_init"] and e["model_id"] != "md4.random_init"]
-    assert {(e["kind"], e["model"]) for e in events if e["kind"] == "embed"} == {("embed", "newm"), ("embed", "md4")}
-    assert all(e["random_init"] for e in events if e["kind"] == "embed" and e["model"] == "md4")
-    assert "Model: md4 (model_id md4)" in out and "ATLANACAK  embed ec: zaten tamam" in out
+    assert not [e for e in events if e["model"] == "model_a" and not e["random_init"] and e["model_id"] != "model_a.random_init"]
+    assert {(e["kind"], e["model"]) for e in events if e["kind"] == "embed"} == {("embed", "newm"), ("embed", "model_a")}
+    assert all(e["random_init"] for e in events if e["kind"] == "embed" and e["model"] == "model_a")
+    assert "Model: model_a (model_id model_a)" in out and "WILL SKIP  embed ec: already complete" in out
     run_dir = next(w.logs.glob("ds_run_newm_*"))
     names = sorted(p.name for p in run_dir.glob("*.log"))
-    assert any(n.startswith("compare_md4__vs__newm_") for n in names), names
-    assert any(n.startswith("compare_md4.random_init__vs__newm_") for n in names), names
+    assert any(n.startswith("compare_model_a__vs__newm_") for n in names), names
+    assert any(n.startswith("compare_model_a.random_init__vs__newm_") for n in names), names
     assert any(n.startswith("ledger_report_all_") for n in names), names
-    assert any(n.startswith("embed_ec_md4.random_init_") for n in names), names  # log names carry their own model
+    assert any(n.startswith("embed_ec_model_a.random_init_") for n in names), names  # log names carry their own model
     summary = (run_dir / "summary.md").read_text()
-    for heading in ("# ds-run: newm", "# ds-run: md4\n", "# ds-run: md4.random_init"):
+    for heading in ("# ds-run: newm", "# ds-run: model_a\n", "# ds-run: model_a.random_init"):
         assert heading in summary, heading
-    assert "## EKSİK" not in summary  # no failed job (missing catalog cells are listed per model, that is fine)
-    assert (w.results / "reports" / "ozet_hoca.md").is_file()
-    assert (w.results / "reports" / "compare" / "md4__vs__newm.md").is_file()
+    assert "## MISSING" not in summary  # no failed job (missing catalog cells are listed per model, that is fine)
+    assert (w.results / "reports" / "summary.md").is_file()
+    assert (w.results / "reports" / "compare" / "model_a__vs__newm.md").is_file()
     models = {row["model_key"] for row in ledger.read_records(w.results, "models")}
-    assert {"newm", "md4"} <= models
+    assert {"newm", "model_a"} <= models
 
 
 def test_compare_to_plan_lists_everything_and_writes_nothing(two_models, capsys):
     w = two_models
     before = sorted(p for p in w.tmp.rglob("*"))
-    code = w.main("--model", str(w.ckpt), "--name", "newm", "--compare-to", "md4,md4.random_init", "--tasks",
+    code = w.main("--model", str(w.ckpt), "--name", "newm", "--compare-to", "model_a,model_a.random_init", "--tasks",
                   "ec,mn_bace", "--gpus", "2", "--counterfactual", "--cf-modes", "none", "masked_pos_noise", "--plan")
     out = capsys.readouterr().out
     assert code == 0, out
     assert sorted(p for p in w.tmp.rglob("*")) == before and not w.logs.exists()
-    assert "Model: newm (model_id newm)" in out and "Model: md4 (model_id md4.random_init)" in out
-    assert "ÇALIŞACAK  compare A=md4 B=newm" in out and "ÇALIŞACAK  compare A=md4.random_init B=newm" in out
-    assert "ÇALIŞACAK  counterfactual none" in out and "ÇALIŞACAK  counterfactual masked_pos_noise" in out
-    assert "ledger report" in out and "PLAN: hiçbir şey koşulmadı" in out
+    assert "Model: newm (model_id newm)" in out and "Model: model_a (model_id model_a.random_init)" in out
+    assert "WILL RUN  compare A=model_a B=newm" in out and "WILL RUN  compare A=model_a.random_init B=newm" in out
+    assert "WILL RUN  counterfactual none" in out and "WILL RUN  counterfactual masked_pos_noise" in out
+    assert "ledger report" in out and "PLAN: nothing was run" in out
 
 
 def test_a_failing_compare_model_job_is_listed_and_the_rest_goes_on(two_models, capsys, monkeypatch):
     w = two_models
     monkeypatch.setenv("FAKE_FAIL", "mn_bace")
-    code = w.main("--model", str(w.ckpt), "--name", "newm", "--compare-to", "md4", "--tasks", "ec,mn_bace",
+    code = w.main("--model", str(w.ckpt), "--name", "newm", "--compare-to", "model_a", "--tasks", "ec,mn_bace",
                   "--gpus", "2", "--heads", "mlp", "--bootstrap", "20")
     assert code == 1
     summary = (next(w.logs.glob("ds_run_newm_*")) / "summary.md").read_text()
     assert re.search(r"- embed mn_bace: exit code 3", summary)  # the main model keeps its labels
-    assert re.search(r"- \[md4\] embed mn_bace: exit code 3", summary)
+    assert re.search(r"- \[model_a\] embed mn_bace: exit code 3", summary)
     assert re.search(r"\| ec \| mlp_probe \| fmax \(test/all\) \| 0\.500", summary)
-    assert (w.results / "reports" / "ozet_hoca.md").is_file()
+    assert (w.results / "reports" / "summary.md").is_file()
 
 
 @pytest.mark.parametrize("args, message", [
-    (["--model", "md4", "--compare-to", "nosuch"], "no snapshot or alias"),
-    (["--model", "md4", "--compare-to", "md4"], "is the model itself"),
-    (["--model", "md4", "--counterfactual"], "needs MODEL=<path/to.ckpt>"),
+    (["--model", "model_a", "--compare-to", "nosuch"], "no snapshot or alias"),
+    (["--model", "model_a", "--compare-to", "model_a"], "is the model itself"),
+    (["--model", "model_a", "--counterfactual"], "needs MODEL=<path/to.ckpt>"),
 ])
 def test_bad_compare_and_counterfactual_arguments_stop_before_anything(world, capsys, args, message):
     world.processed("ec")
@@ -504,7 +504,7 @@ def test_counterfactual_runs_every_mode_goes_on_after_a_failure_and_adds_to_the_
     assert code == 1
     done = sorted(p.name for p in (w.outputs / "eval").glob("cf_newm_*/*") if (p / "metrics.json").is_file())
     assert done == ["masked_pos_noise", "none"]
-    assert re.search(r"HATA counterfactual newm\.masked_pos_random .*exit code 4", out)
+    assert re.search(r"ERROR counterfactual newm\.masked_pos_random .*exit code 4", out)
     rows = [r for r in ledger.read_records(w.results, "measurements") if r["task"] == "counterfactual"]
     assert {r["model_key"] for r in rows} == {"newm"} and {r["protocol_id"] for r in rows} == {"none", "masked_pos_noise"}
     summary = (next(w.logs.glob("ds_run_newm_*")) / "summary.md").read_text()

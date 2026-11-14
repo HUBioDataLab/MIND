@@ -1,10 +1,10 @@
 # Results-ledger catalog: which metrics each task must report (no numbers here; numbers live in the
 # results root outside Git). Rule: every metric a reference paper reports for a task is required; a
-# required metric our code does not compute is listed with `code: missing` and shows up as KOD-YOK.
+# required metric our code does not compute is listed with `code: missing` and shows up as NO-CODE.
 #
 # metrics:  name -> direction (higher | lower) and unit. `unit: task` takes the task's `target_unit`.
 # tasks:    kind (metrics.json `kind`), required protocols (protocol ids as in the results path, e.g.
-#           mlp_probe or mlp_probe.identity30.joint), summary protocol (the professor page), primary cell,
+#           mlp_probe or mlp_probe.identity30.joint), summary protocol (the summary page), primary cell,
 #           required cells (eval_split, subset, metric, source) and optional derived averages.
 schema_version: 1
 
@@ -21,7 +21,7 @@ metrics:
   spearman_rho: {direction: higher, unit: correlation}
   roc_auc: {direction: higher, unit: fraction}
   prc_auc: {direction: higher, unit: fraction}
-  # metrics a paper reports but our code does not compute (KOD-YOK); kept here so units/directions are known
+  # metrics a paper reports but our code does not compute (NO-CODE); kept here so units/directions are known
   coverage: {direction: higher, unit: fraction}
   ic_binned_macro_aupr: {direction: higher, unit: fraction}
   weighted_f1: {direction: higher, unit: fraction}

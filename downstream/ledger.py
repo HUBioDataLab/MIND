@@ -54,7 +54,7 @@ _SAMPLE_KEYS = ("num_proteins", "num_samples", "molecules")
 _LIST_KEYS = {"per_task", "per_task_prc_auc", "skipped_task_indices", "rmse_per_target", "mae_per_target",
               "num_labeled_per_target"}
 # Metrics a block of each kind always has; an undefined block (empty subset, single-class subset) gets one
-# row per metric with the reason, so the report can say TANIMSIZ instead of leaving a hole.
+# row per metric with the reason, so the report can say UNDEFINED instead of leaving a hole.
 _KIND_METRICS = {"multilabel": ("fmax", "pair_aupr", "top1_accuracy", "macro_aupr"),
                  "multiclass": ("accuracy", "balanced_accuracy"),
                  "regression": ("rmse", "mae", "pearson_r", "spearman_rho"),
@@ -508,7 +508,7 @@ def flatten_run(metrics_path: Path, catalog: dict, outputs_root: Optional[Path])
     task = metrics.get("task")
     spec = task_spec(catalog, task)
     missing: list = []
-    if "kind" not in metrics:  # EC probes written before the kind field existed (25 Oct 2026); listed, not hidden
+    if "kind" not in metrics:  # EC probes written before the kind field existed; listed, not hidden
         missing.append("kind")
     kind = metrics.get("kind", spec["kind"])
     if kind not in DOWNSTREAM_KINDS:
@@ -772,7 +772,7 @@ def recompute_macro_aupr(root: Optional[Path], *, task: str, model: str, control
             value = M.label_aupr(labels, scores)["macro_aupr"]
             if abs(value - stored["value"]) > RECOMPUTE_TOLERANCE:
                 raise LedgerError(f"control {control} seed {seed}: recomputed {value} != recorded {stored['value']}")
-            out(f"kontrol {control} seed {seed}: hesap {value:.10f} == kayitli {stored['value']:.10f}")
+            out(f"control {control} seed {seed}: recomputed {value:.10f} == recorded {stored['value']:.10f}")
         targets = _recompute_cells(rows, setting, model, "fmax")
         if not targets:
             raise LedgerError(f"{model}: no {task} test/all fmax row in setting {setting}")
@@ -799,22 +799,22 @@ def recompute_macro_aupr(root: Optional[Path], *, task: str, model: str, control
                                         "downstream.common.metrics.label_aupr (probe not re-run)"),
                        **metric_info(catalog, task, "macro_aupr"))
             new.append(row)
-            out(f"{model} seed {seed}: macro_aupr {row['value']:.10f} (terim {macro['num_terms_evaluated']}, atlanan "
-                f"{macro['num_terms_skipped_no_positive']}; fmax/pair_aupr yeniden hesap defterle birebir)")
+            out(f"{model} seed {seed}: macro_aupr {row['value']:.10f} (terms {macro['num_terms_evaluated']}, skipped "
+                f"{macro['num_terms_skipped_no_positive']}; recomputed fmax/pair_aupr equal the ledger values)")
         values = [row["value"] for row in new]
         spread = f" std(ddof=1) {float(np.std(values, ddof=1)):.6f}" if len(values) > 1 else ""
-        out(f"ortalama {float(np.mean(values)):.6f}{spread} n={len(values)}")
+        out(f"mean {float(np.mean(values)):.6f}{spread} n={len(values)}")
         record = {"ingest_id": ingest_id, "started_utc": stamp, "finished_utc": now_utc(),
                   "command": command or " ".join(sys.argv), "code_git": _code_git(), "outputs_root": None,
                   "eval_dirs": [], "files_seen": len(new), "rows_added": len(new), "models_added": [],
                   "files_skipped_same_sha": 0, "embedding_sets": [], "catalog_sha256": catalog["sha256"],
                   "note": f"macro_aupr of {model} recomputed from predictions.npz; control={control}; setting={setting}"}
         if dry_run:
-            out("DRY-RUN: yazilmadi")
+            out("DRY-RUN: nothing written")
             return dict(record, rows_added=0, dry_run=True)
         _append_locked(root, "measurements", new)
         _append_locked(root, "ingests", [record])
-    out(f"yazildi: {len(new)} satir, ingest {ingest_id}")
+    out(f"written: {len(new)} rows, ingest {ingest_id}")
     return record
 
 

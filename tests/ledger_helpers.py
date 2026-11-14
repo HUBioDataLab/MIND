@@ -22,7 +22,7 @@ PROBE_SETTINGS = {"pooling": "mean_atoms", "seeds": [0, 1, 2], "epochs": 300, "p
 
 
 def card(outputs: Path, name: str, sha: str, *, best: bool = True, epoch: int = 98) -> Path:
-    run = "/runs/md4_1m_100ep_s42_20261025_131601"
+    run = "/runs/model_a_run"
     source = f"{run}/best-checkpoint-epoch={epoch}-val_total_loss=0.7374.ckpt" if best else f"{run}/last.ckpt"
     directory = outputs / "models" / name
     directory.mkdir(parents=True, exist_ok=True)
@@ -32,9 +32,9 @@ def card(outputs: Path, name: str, sha: str, *, best: bool = True, epoch: int = 
         "pytorch_lightning_version": "2.5.2", "domains": ["pdb", "rna"],
         "val_metrics": {"monitor": "val_total_loss", "best_model_score": 0.7374, "current_score": 0.7374,
                         "best_model_path": f"{run}/best-checkpoint-epoch={epoch}-val_total_loss=0.7374.ckpt"},
-        "config_path": None, "config_sha256": None, "snapshot_repo_commit": "407e10e+dirty",
-        "wandb_runs": {"x": {"git": {"commit": "7074954"}, "args": ["--seed", "42"], "program": "-m core.train_pretrain"}},
-        "training_git_commits": ["7074954"], "notes": ""}))
+        "config_path": None, "config_sha256": None, "snapshot_repo_commit": "bbbbbbb+dirty",
+        "wandb_runs": {"x": {"git": {"commit": "aaaaaaa"}, "args": ["--seed", "42"], "program": "-m core.train_pretrain"}},
+        "training_git_commits": ["aaaaaaa"], "notes": ""}))
     return directory / "card.json"
 
 

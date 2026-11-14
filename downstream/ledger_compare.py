@@ -1,6 +1,6 @@
 """Compare two models cell by cell, with a paired bootstrap over the saved test predictions.
 
-    python -m downstream.ledger_compare --a hyp_md4_s42_ep98 --b <g1 snapshot> [--tasks ec lba] [--bootstrap 1000]
+    python -m downstream.ledger_compare --a <model_a> --b <model_b> [--tasks ec lba] [--bootstrap 1000]
 
 Writes ``$MIND_RESULTS_ROOT/reports/compare/<A>__vs__<B>.md|.csv``. Only cells with the same comparable
 setting (see ``downstream.ledger_report``: protocol, pooling, data revision and data fingerprint, settings
@@ -16,9 +16,9 @@ Three noise sources are reported separately:
 3. pretraining run: not measured (one pretraining seed per model); the report says so in a warning box.
 
 Sign: ``diff_b_better`` = B - A for higher-is-better metrics and A - B for lower-is-better ones, so + always
-means B is better. Decision: "B daha iyi" when the interval's lower bound is > 0 and |diff| > 2 x the larger
-seed std; "B daha kötü" symmetrically; otherwise "ayırt edilemez". Cells without an interval (subsets whose
-mask is not in predictions.npz, validation rows, metrics without a bootstrap implementation) get "karar yok".
+means B is better. Decision: "B better" when the interval's lower bound is > 0 and |diff| > 2 x the larger
+seed std; "B worse" symmetrically; otherwise "indistinguishable". Cells without an interval (subsets whose
+mask is not in predictions.npz, validation rows, metrics without a bootstrap implementation) get "no decision".
 """
 
 from __future__ import annotations
@@ -120,9 +120,9 @@ def _aligned(path: Path, eval_split: str, order: Optional[np.ndarray]):
 
 def _ci_reason(row: dict, spec: dict) -> Optional[str]:
     if row["eval_split"] == "val":
-        return "doğrulama etiketleri predictions.npz'de yok"
+        return "validation labels are not in predictions.npz"
     if row["subset"] != "all":
-        return "alt küme maskesi predictions.npz'de yok"
+        return "subset mask is not in predictions.npz"
     return None
 
 
@@ -148,9 +148,9 @@ def paired_bootstrap(rows_a: list, rows_b: list, spec: dict, *, sign: float, n_b
     first = rows_a[0]
     reason = _ci_reason(first, spec)
     if reason is None and not seeds:
-        reason = "ortak koşu tohumu yok"
+        reason = "no common run seed"
     if reason is None and any(by_seed_a[s]["value"] is None or by_seed_b[s]["value"] is None for s in seeds):
-        reason = "değer bazı tohumlarda tanımsız"
+        reason = "value undefined for some seeds"
     if reason is not None:
         return {"ci_low": None, "ci_high": None, "n_boot_failed": None, "common_seeds": seeds, "ci_reason": reason}
     parts = _parts(first, spec)
@@ -162,7 +162,7 @@ def paired_bootstrap(rows_a: list, rows_b: list, spec: dict, *, sign: float, n_b
             path = Path(row["source_metrics_path"]).with_name("predictions.npz")
             if not path.is_file():
                 return {"ci_low": None, "ci_high": None, "n_boot_failed": None, "common_seeds": seeds,
-                        "ci_reason": f"predictions.npz yok: {path}"}
+                        "ci_reason": f"predictions.npz missing: {path}"}
             fns = []
             for part in parts:
                 chains, scores, labels = _aligned(path, part, orders.get(part))
@@ -174,7 +174,7 @@ def paired_bootstrap(rows_a: list, rows_b: list, spec: dict, *, sign: float, n_b
                 function = metric_fn(row["kind"], row["metric"], labels, scores)
                 if function is None:
                     return {"ci_low": None, "ci_high": None, "n_boot_failed": None, "common_seeds": seeds,
-                            "ci_reason": f"bootstrap {row['kind']}/{row['metric']} için tanımlı değil"}
+                            "ci_reason": f"no bootstrap defined for {row['kind']}/{row['metric']}"}
                 fns.append(function)
             full = float(np.mean([f(np.arange(len(orders[p]))) for f, p in zip(fns, parts)]))
             if abs(full - row["value"]) > REPRODUCE_TOLERANCE:
@@ -199,7 +199,7 @@ def paired_bootstrap(rows_a: list, rows_b: list, spec: dict, *, sign: float, n_b
         differences.append(sign * float(np.mean(values)))
     if not differences:
         return {"ci_low": None, "ci_high": None, "n_boot_failed": failed, "common_seeds": seeds,
-                "ci_reason": "her bootstrap örneğinde metrik tanımsız"}
+                "ci_reason": "metric undefined in every bootstrap sample"}
     low, high = np.percentile(differences, [2.5, 97.5])
     return {"ci_low": float(low), "ci_high": float(high), "n_boot_failed": failed, "common_seeds": seeds,
             "ci_reason": None}
@@ -227,17 +227,17 @@ def _common_seed_stats(rows: list, seeds: set) -> dict:
 
 def _decision(diff, low, high, std_a, std_b, reason) -> str:
     if diff is None:
-        return "karar yok: değer tanımsız"
+        return "no decision: value undefined"
     if low is None:
-        return f"karar yok: {reason}"
+        return f"no decision: {reason}"
     if std_a is None or std_b is None:
-        return "karar yok: tek tohum, probe-tohumu std'si tanımsız"
+        return "no decision: single seed, probe-seed std undefined"
     margin = 2 * max(std_a, std_b)
     if low > 0 and abs(diff) > margin:
-        return "B daha iyi"
+        return "B better"
     if high < 0 and abs(diff) > margin:
-        return "B daha kötü"
-    return "ayırt edilemez"
+        return "B worse"
+    return "indistinguishable"
 
 
 def compare(state: dict, a: str, b: str, *, tasks: Optional[list] = None, n_boot: int = 1000,
@@ -271,60 +271,61 @@ def compare(state: dict, a: str, b: str, *, tasks: Optional[list] = None, n_boot
                       "n_seeds_b": stats_b["n_seeds"], "diff_b_better": diff, **boot, "n_boot": n_boot,
                       "rng_seed": rng_seed,
                       "decision": (_decision(diff, boot["ci_low"], boot["ci_high"], stats_a["std"], stats_b["std"],
-                                             boot["ci_reason"]) if common else f"karar yok: {boot['ci_reason']}")})
+                                             boot["ci_reason"]) if common else f"no decision: {boot['ci_reason']}")})
 
     def only(mine, other, name):
         loose = {(k[0], k[2], k[9], k[10], k[11]) for k in other}
         return [{"task": k[0], "protocol_id": k[2], "pooling": k[3], "data_revision": k[4], "eval_split": k[9],
                  "subset": k[10], "metric": k[11],
-                 "reason": ("farklı ayar (pooling / veri sürümü / veri parmak izi / protokol ayarı farklı)"
-                            if (k[0], k[2], k[9], k[10], k[11]) in loose else f"{name}'de yok")}
+                 "reason": ("different setting (pooling / data revision / data fingerprint / protocol settings differ)"
+                            if (k[0], k[2], k[9], k[10], k[11]) in loose else f"not in {name}")}
                 for k in sorted(set(mine) - set(other), key=str)]
     return {"a": a, "b": b, "pairs": pairs, "only_a": only(cells_a, cells_b, "B"), "only_b": only(cells_b, cells_a, "A"),
             "n_boot": n_boot, "rng_seed": rng_seed}
 
 
 def _num(value, digits=3) -> str:
-    return "tanımsız" if value is None else f"{value:.{digits}f}"
+    return "undefined" if value is None else f"{value:.{digits}f}"
 
 
 def compare_markdown(state: dict, result: dict) -> str:
     a, b = result["a"], result["b"]
-    lines = ledger_report.header_lines(state, f"Karşılaştırma: A = {a}, B = {b}")
+    lines = ledger_report.header_lines(state, f"Comparison: A = {a}, B = {b}")
     with_ci = [p for p in result["pairs"] if p["ci_low"] is not None]
     counts = defaultdict(int)
     for pair in result["pairs"]:
         counts[pair["decision"].split(":")[0]] += 1
-    lines += [f"> UYARI: {ledger_report.PRETRAIN_SEED_WARNING} Bu rapor \"B şunu iyileştirdi\" diyemez; en fazla \"bu iki "
-              "koşu arasında probe ve test gürültüsünün ötesinde fark var\" der.", "",
-              "Fark = B − A, yöne göre işaretli: + her zaman B daha iyi demek (RMSE/MAE gibi düşük-iyi metriklerde "
-              "işaret çevrildi).", "", "Üç gürültü kaynağı ayrı ayrı:", "",
-              f"1. Probe tohumu (başın rastgele başlatılması): std_A ve std_B sütunları (tohumlar arası, std: ddof="
-              f"{ledger_report.STD_DDOF} (örnek std); tek tohumda tanımsız).",
-              f"2. Test örneklemi: eşli bootstrap %95 güven aralığı ({result['n_boot']} yeniden örnekleme, RNG tohumu "
-              f"{result['rng_seed']}; aynı örnek indeksleri iki modele ve tüm ortak tohumlara uygulanır).",
-              "3. Ön-eğitim koşusu (aynı ayar, başka ön-eğitim tohumu): ÖLÇÜLMEDİ (yukarıdaki uyarı).", "",
-              "Karar: \"B daha iyi\" = aralığın alt sınırı > 0 ve |fark| > 2 × max(std_A, std_B); \"B daha kötü\" "
-              "simetrik; diğer her durum \"ayırt edilemez\". Aralık yoksa \"karar yok\" ve nedeni.", "",
-              f"Çoklu karşılaştırma: {len(with_ci)} karşılaştırma %95 düzeyinde yapıldı; gerçek fark olmasa bile "
-              f"şans eseri yaklaşık {0.05 * len(with_ci):.1f} tanesinin aralığı sıfırı dışlayabilir (beklenen yanlış "
-              "alarm).", "",
-              "Karar sayıları: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())), "",
-              "| görev | protokol | pooling | veri | eval_split | subset | metric | birim | A | B | fark (+ = B iyi) | "
-              "std_A | std_B | %95 GA | ortak tohum | karar |", "|" + "---|" * 16]
+    lines += [f"> WARNING: {ledger_report.PRETRAIN_SEED_WARNING} This report cannot say \"B improved X\"; at most it "
+              "says \"between these two runs there is a difference beyond probe and test noise\".", "",
+              "Difference = B - A, signed by direction: + always means B is better (the sign is flipped for "
+              "lower-is-better metrics such as RMSE/MAE).", "", "Three noise sources, separately:", "",
+              f"1. Probe seed (random initialization of the head): columns std_A and std_B (across seeds, std: ddof="
+              f"{ledger_report.STD_DDOF} (sample std); undefined for a single seed).",
+              f"2. Test sample: paired bootstrap 95 % confidence interval ({result['n_boot']} resamples, RNG seed "
+              f"{result['rng_seed']}; the same sample indices are applied to both models and to all common seeds).",
+              "3. Pretraining run (same settings, another pretraining seed): NOT MEASURED (warning above).", "",
+              "Decision: \"B better\" = interval lower bound > 0 and |diff| > 2 x max(std_A, std_B); \"B worse\" is "
+              "symmetric; every other case is \"indistinguishable\". Without an interval: \"no decision\" and the "
+              "reason.", "",
+              f"Multiple comparisons: {len(with_ci)} comparisons were made at the 95 % level; even with no real "
+              f"difference, about {0.05 * len(with_ci):.1f} of them can have an interval that excludes zero by chance "
+              "(expected false alarms).", "",
+              "Decision counts: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())), "",
+              "| task | protocol | pooling | data | eval_split | subset | metric | unit | A | B | diff (+ = B better) | "
+              "std_A | std_B | 95 % CI | common seeds | decision |", "|" + "---|" * 16]
     for p in sorted(result["pairs"], key=lambda p: (p["task"], not p["is_primary"], p["eval_split"], p["subset"],
                                                     p["metric"])):
         interval = "-" if p["ci_low"] is None else f"[{p['ci_low']:+.3f}, {p['ci_high']:+.3f}]"
         if p["n_boot_failed"]:
-            interval += f" ({p['n_boot_failed']} örnek tanımsız)"
+            interval += f" ({p['n_boot_failed']} samples undefined)"
         lines.append(f"| {p['task']} | {p['protocol_id']} | {p['pooling']} | {p['data_revision']} | {p['eval_split']} | "
                      f"{p['subset']} | {p['metric']} | {p['unit']} | {_num(p['mean_a'])} | {_num(p['mean_b'])} | "
-                     f"{'tanımsız' if p['diff_b_better'] is None else format(p['diff_b_better'], '+.3f')} | "
+                     f"{'undefined' if p['diff_b_better'] is None else format(p['diff_b_better'], '+.3f')} | "
                      f"{_num(p['std_a'])} | {_num(p['std_b'])} | {interval} | {len(p['common_seeds'])} | {p['decision']} |")
     for name, entries in (("A", result["only_a"]), ("B", result["only_b"])):
-        lines += ["", f"## Yalnız {name}'de olan hücreler ({len(entries)})", ""]
+        lines += ["", f"## Cells only in {name} ({len(entries)})", ""]
         lines += [f"- {e['task']} / {e['protocol_id']} / {e['pooling']} / {e['data_revision']} / {e['eval_split']} / "
-                  f"{e['subset']} / {e['metric']}: {e['reason']}" for e in entries] or ["- yok"]
+                  f"{e['subset']} / {e['metric']}: {e['reason']}" for e in entries] or ["- none"]
     return "\n".join(lines) + "\n"
 
 

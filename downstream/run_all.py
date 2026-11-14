@@ -24,7 +24,7 @@ written to ``<outputs root>/eval/cf_<name>_<stamp>/<mode>`` and added to the led
 itself detaches and returns at once, so ds-run cannot wait for it; it refuses to start if the target is gone.
 
 ``all`` = EC, GO-MF/BP/CC, Fold, LBA (the catalog's required split tags, joint representation) and the 14
-MoleculeNet tasks. Reaction has no processed data (9 Nov 2026) and runs only when named. A task whose domain the
+MoleculeNet tasks. Reaction has no processed data and runs only when named. A task whose domain the
 model was not pretrained on (card ``domains``; protein needs ``pdb``, MoleculeNet needs ``unimol``) is skipped and
 listed under ``all`` and refused when named explicitly.
 
@@ -60,7 +60,7 @@ from downstream.tasks import MOLNET_TASKS, TASKS, load_task
 HEADS = ("linear", "mlp")  # downstream.common.heads.HEADS (not imported: it pulls torch into the plan step)
 ALL_TASKS = ("ec", "go_mf", "go_bp", "go_cc", "fold", "lba") + MOLNET_TASKS
 # Pretraining domains (card "domains", the enabled multi_domain datasets) a task's input needs. The LBA joint graph
-# is a protein graph (ligand atoms with pos_code sm), as for the protein-only results of October.
+# is a protein graph (ligand atoms with pos_code sm).
 MODALITY_DOMAINS = {"protein": ("pdb",), "complex": ("pdb",), "small_molecule": ("unimol",)}
 HF_PREFIXES = ("esm2_", "saprot_")
 
@@ -241,8 +241,8 @@ def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, se
             raise PlanError(f"{unit.key}: modality {info['modality']!r} has no domain rule in MODALITY_DOMAINS")
         lacking = [d for d in needed if d not in model.domains]
         if lacking:
-            reason = (f"alan uyumsuz: görev modality={info['modality']} {lacking} ister, model {model.name} "
-                      f"domains={model.domains}")
+            reason = (f"domain mismatch: the task has modality={info['modality']} and needs {lacking}, model "
+                      f"{model.name} has domains={model.domains}")
             if explicit:
                 raise PlanError(f"{unit.key}: {reason}. Run it on purpose with make ds-embed / ds-probe.")
             plan["domain_skips"].append((unit, reason))
@@ -292,23 +292,23 @@ def plan_text(model: ModelPlan, plan: dict, *, outputs_root: Path, results_root:
               f"heads {','.join(heads)}; seeds {' '.join(map(str, seeds))}", "",
               f"1. Embed ({len(plan['embed'])} jobs):"]
     for unit, splits in plan["embed"]:
-        lines.append(f"   ÇALIŞACAK  embed {unit.key}: splits {' '.join(splits)}")
+        lines.append(f"   WILL RUN  embed {unit.key}: splits {' '.join(splits)}")
         known = plan["timings"].get(unit)
-        lines += [f"     bilinen ölçüm: {entry}" for entry in known] if known else [
-            "     bilinen ölçüm: yok (bu görev için kayıtlı embed süresi bulunamadı)"]
-    lines += [f"   ATLANACAK  embed {unit.key}: zaten tamam" for unit in plan["embed_done"]]
-    lines.append(f"2. Probe ({len(plan['probe'])} jobs, after every embed has ended; süre ölçümü kayıtlı değil):")
-    lines += [f"   ÇALIŞACAK  probe {unit.key} {head}: seeds {' '.join(map(str, todo))}"
+        lines += [f"     known timing: {entry}" for entry in known] if known else [
+            "     known timing: none (no recorded embed time for this task)"]
+    lines += [f"   WILL SKIP  embed {unit.key}: already complete" for unit in plan["embed_done"]]
+    lines.append(f"2. Probe ({len(plan['probe'])} jobs, after every embed has ended; no timing recorded):")
+    lines += [f"   WILL RUN  probe {unit.key} {head}: seeds {' '.join(map(str, todo))}"
               for unit, head, todo in plan["probe"]]
-    lines += [f"   ATLANACAK  probe {unit.key} {head}: zaten tamam" for unit, head in plan["probe_done"]]
+    lines += [f"   WILL SKIP  probe {unit.key} {head}: already complete" for unit, head in plan["probe_done"]]
     lines += ["3. ledger add (outputs root -> results ledger)", "4. summary table + missing required cells"]
     if plan["domain_skips"]:
-        lines += ["", "Atlanan görevler (alan uyumsuz):"] + [f"   ATLANDI  {u.key}: {r}" for u, r in plan["domain_skips"]]
+        lines += ["", "Skipped tasks (domain mismatch):"] + [f"   SKIPPED  {u.key}: {r}" for u, r in plan["domain_skips"]]
     if plan["notes"]:
-        lines += ["", "Notlar:"] + [f"   {note}" for note in plan["notes"]]
+        lines += ["", "Notes:"] + [f"   {note}" for note in plan["notes"]]
     if plan["failed"]:
-        lines += ["", f"Koşulamayacak ({len(plan['failed'])}):"] + [f"   HATA  {label}: {reason}"
-                                                                     for label, reason in plan["failed"]]
+        lines += ["", f"Cannot run ({len(plan['failed'])}):"] + [f"   ERROR  {label}: {reason}"
+                                                           for label, reason in plan["failed"]]
     return "\n".join(lines) + "\n"
 
 
@@ -363,7 +363,7 @@ class Runner:
             process.kill()
             raise
         starting.unlink()
-        self.out(f"[{datetime.now():%H:%M:%S}] BAŞLADI {job.label} ({slot}) pid {process.pid} log {log}")
+        self.out(f"[{datetime.now():%H:%M:%S}] STARTED {job.label} ({slot}) pid {process.pid} log {log}")
         return process, log, time.monotonic()
 
     def _status(self, running: dict, pending: int, finished: int, failed: int) -> None:
@@ -372,9 +372,9 @@ class Runner:
         for slot, (job, process, log, started) in running.values():
             stat = log.stat()
             parts.append(f"{job.label} ({slot}) pid {process.pid} {int(time.monotonic() - started)} s, log "
-                         f"{stat.st_size} B, son yazma {int(now - stat.st_mtime)} s önce")
-        self.out(f"[{datetime.now():%H:%M:%S}] durum: koşan {len(running)}, bekleyen {pending}, biten {finished}, "
-                 f"hatalı {failed}" + "".join(f"\n    {p}" for p in parts))
+                         f"{stat.st_size} B, last write {int(now - stat.st_mtime)} s ago")
+        self.out(f"[{datetime.now():%H:%M:%S}] status: running {len(running)}, pending {pending}, finished {finished}, "
+                 f"failed {failed}" + "".join(f"\n    {p}" for p in parts))
 
     def run(self, jobs: List[Job], slots: List[str]) -> Dict[int, tuple]:
         """``{job index: (ok, reason, log)}``; every job runs even when others fail."""
@@ -403,7 +403,7 @@ class Runner:
                     problem = job.check()
                     reason = None if problem is None else f"exit code 0 but {problem}; log {log}"
                 results[index] = (reason is None, reason, log)
-                self.out(f"[{datetime.now():%H:%M:%S}] {'BİTTİ' if reason is None else 'HATA'} {job.label} pid "
+                self.out(f"[{datetime.now():%H:%M:%S}] {'FINISHED' if reason is None else 'ERROR'} {job.label} pid "
                          f"{process.pid} ({int(time.monotonic() - started)} s)" + (f": {reason}" if reason else ""))
             if running and time.monotonic() - last_status >= self.status_every:
                 view = {i: (slots[s], rest) for i, (s, rest) in running.items()}
@@ -475,9 +475,11 @@ def summary(results_root: Path, model: ModelPlan, plan: dict, heads: list, failu
     for label, reason in failures:
         kind, _, key = label.partition(" ")
         failed_units.setdefault(key, []).append((kind, f"{kind}: {reason}"))
-    lines = [f"# ds-run: {model.model_id}", "", f"Defter: {results_root} (measurements sha256 "
-             f"{state['header']['measurements_sha256']}); hücre = ort ± std (ddof={ledger_report.STD_DDOF}) tohumlar "
-             "üzerinde.", "", "| görev | protokol | birincil metrik | değer |", "|---|---|---|---|"]
+    lines = [f"# ds-run: {model.model_id}", "", f"Ledger: {results_root} (measurements sha256 "
+             f"{state['header']['measurements_sha256']}); cell = mean ± std (ddof={ledger_report.STD_DDOF}) over "
+             "seeds.", "", f"Primary metric only; all catalog metrics of a task are in "
+             f"{results_root / 'reports' / 'tasks'}/<task>.md (written by the ledger report at the end of the run).", "",
+             "| task | protocol | primary metric | value |", "|---|---|---|---|"]
     for unit in plan["units"]:
         spec = catalog["tasks"][unit.task]
         primary = spec["primary"]
@@ -487,16 +489,16 @@ def summary(results_root: Path, model: ModelPlan, plan: dict, heads: list, failu
             text = found["text"]
             problems = [text for kind, text in failed_units.get(unit.key, []) if kind in ("embed", f"probe_{head}")]
             if problems and not found["filled"]:
-                text = "HATA: " + " | ".join(problems)
+                text = "ERROR: " + " | ".join(problems)
             lines.append(f"| {unit.key} | {protocol} | {primary['metric']} ({primary['eval_split']}/{primary['subset']}) "
                          f"| {text} |")
     for unit, reason in plan["domain_skips"]:
-        lines.append(f"| {unit.key} | - | - | ATLANDI: {reason} |")
+        lines.append(f"| {unit.key} | - | - | SKIPPED: {reason} |")
     tasks = sorted({unit.task for unit in plan["units"]})
     missing = ledger_report.missing_cells(state, [model.model_id], tasks) if tasks else []
     counts = Counter(entry["category"] for entry in missing)
-    lines += ["", f"## Eksik zorunlu hücreler ({len(missing)})", "",
-              "Kategori: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "yok"), ""]
+    lines += ["", f"## Missing required cells ({len(missing)})", "",
+              "Categories: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "none"), ""]
     lines += [f"- {e['task']} / {e['protocol_id']} / {e['eval_split']} / {e['subset']} / {e['metric']}: {e['category']}"
               for e in missing]
     return "\n".join(lines) + "\n", missing
@@ -540,18 +542,18 @@ def check_counterfactual(model: ModelPlan, *, random_init: bool, modes: list) ->
 
 
 def extra_plan_text(model: ModelPlan, others: list, args, gpus: list, outputs_root: Path) -> str:
-    lines = ["", "Sonra (tüm modeller için embed'ler bitince):"]
+    lines = ["", "Then (when the embeddings of all models have finished):"]
     if args.counterfactual:
         target = outputs_root / "eval" / f"cf_{model.name}_<stamp>"
-        lines += [f"   ÇALIŞACAK  counterfactual {mode}: core.evaluate_pretrain --ckpt "
+        lines += [f"   WILL RUN  counterfactual {mode}: core.evaluate_pretrain --ckpt "
                   f"{outputs_root / 'models' / model.name / 'model.ckpt'} --split {args.cf_split} --seed {args.cf_seed} "
-                  f"--domains {args.cf_domains} -> {target}/{mode} (make eval-counterfactual ile aynı argümanlar; "
-                  f"GPU {','.join(gpus)}, GPU başına 1)" for mode in args.cf_modes]
-    lines.append("   probe'lar, sonra tek ledger add" + (" (+ counterfactual dizinleri)" if args.counterfactual else ""))
-    lines += [f"   ÇALIŞACAK  compare A={other.model_id} B={model.model_id} (bootstrap {args.bootstrap})"
+                  f"--domains {args.cf_domains} -> {target}/{mode} (same arguments as make eval-counterfactual; "
+                  f"GPU {','.join(gpus)}, 1 per GPU)" for mode in args.cf_modes]
+    lines.append("   probes, then one ledger add" + (" (+ counterfactual dizinleri)" if args.counterfactual else ""))
+    lines += [f"   WILL RUN  compare A={other.model_id} B={model.model_id} (bootstrap {args.bootstrap})"
               for other, _ in others]
-    lines.append("   ÇALIŞACAK  ledger report (make ds-ledger-report ile aynı: tasks/, timeline/, ozet_hoca.md, "
-                 "eksik_hucreler.*)")
+    lines.append("   WILL RUN  ledger report (same as make ds-ledger-report: tasks/, timeline/, summary.md, "
+                 "missing_cells.*)")
     return "\n".join(lines) + "\n"
 
 
@@ -639,7 +641,7 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
                                                              else "") + f" to run but GPU={args.gpus!r}: give GPU "
                             "indices like GPU=2,3 (ds-run does not pick GPUs itself)")
     except (PlanError, ledger.LedgerError) as exc:
-        print(f"HATA: {exc}", file=sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     texts = []
     for index, (m, p, _) in enumerate(runs):
@@ -651,7 +653,7 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
     text = "\n".join(texts)
     print(text, flush=True)
     if args.plan:
-        print("PLAN: hiçbir şey koşulmadı, hiçbir dosya yazılmadı.")
+        print("PLAN: nothing was run, no file was written.")
         return 1 if any(p["failed"] for _, p, _ in runs) else 0
 
     run_dir = Path(args.log_root) / f"ds_run_{model.model_id}_{_stamp()}_{os.getpid()}"
@@ -712,7 +714,7 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
         try:
             table, cells = summary(results_root, m, p, heads, failures[m.model_id])
         except Exception as exc:  # noqa: BLE001 - the summary failing must not hide the job failures listed below
-            table, cells = f"# ds-run: {m.model_id}\n\nÖzet tablo üretilemedi: {type(exc).__name__}: {exc}\n", []
+            table, cells = f"# ds-run: {m.model_id}\n\nSummary table could not be produced: {type(exc).__name__}: {exc}\n", []
             extra_failures.append((f"summary {m.model_id}", str(exc)))
         tables.append(table)
         missing += cells
@@ -729,7 +731,7 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
     listed = failures[model.model_id] + [(f"[{m.model_id}] {label}", reason) for m, _, _ in runs[1:]
                                          for label, reason in failures[m.model_id]] + extra_failures
     if listed:
-        table += f"\n## EKSİK: {len(listed)} iş başarısız ya da koşulamadı\n\n" + "".join(
+        table += f"\n## MISSING: {len(listed)} job(s) failed or could not run\n\n" + "".join(
             f"- {label}: {reason}\n" for label, reason in listed)
     (run_dir / "summary.md").write_text(table)
     with open(run_dir / "missing.csv", "w", newline="") as handle:
@@ -737,7 +739,7 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
             writer = csv.DictWriter(handle, fieldnames=list(missing[0]), lineterminator="\n")
             writer.writeheader()
             writer.writerows(missing)
-    print("\n" + table + f"\n(özet: {run_dir.resolve() / 'summary.md'}; defter raporları: {results_root / 'reports'})",
+    print("\n" + table + f"\n(summary: {run_dir.resolve() / 'summary.md'}; ledger reports: {results_root / 'reports'})",
           flush=True)
     return 1 if listed else 0
 

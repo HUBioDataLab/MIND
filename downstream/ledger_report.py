@@ -1,15 +1,15 @@
 """Reports generated from the results ledger (rewritten on every run; the ledger is the source).
 
-    python -m downstream.ledger_report report  [--models A B ...]   tasks/, timeline/, ozet_hoca.md, eksik_hucreler.*
-    python -m downstream.ledger_report summary [--models A B ...]   ozet_hoca.md only
-    python -m downstream.ledger_report missing [--models A B ...]   eksik_hucreler.md/.csv only
+    python -m downstream.ledger_report report  [--models A B ...]   tasks/, timeline/, summary.md, missing_cells.*
+    python -m downstream.ledger_report summary [--models A B ...]   summary.md only
+    python -m downstream.ledger_report missing [--models A B ...]   missing_cells.md/.csv only
 
 Reports go to ``$MIND_RESULTS_ROOT/reports/``. A column only ever holds one comparable setting: rows are
 grouped by (task, protocol family, protocol id, pooling, data revision, split tag, representation,
 protocol-settings hash, per-run data fingerprint over the evaluated processed files); a different value of
-any of these starts a new "Ayar" section. Superseded / invalid / smoke rows leave the task tables and stay in
-the timeline. No cell is left empty: a missing cell names its category (EKSİK:..., TANIMSIZ:..., KOD-YOK,
-YALNIZ-ESKİ-SÜRÜM). Literature numbers (``<root>/literature/literature.csv``, local, stage 5) are shown in a
+any of these starts a new "Setting" section. Superseded / invalid / smoke rows leave the task tables and stay in
+the timeline. No cell is left empty: a missing cell names its category (MISSING:..., UNDEFINED:..., NO-CODE,
+OLD-REVISION-ONLY). Literature numbers (``<root>/literature/literature.csv``) are shown in a
 separate column in their own unit and protocol; they are never mixed into model columns.
 """
 
@@ -29,19 +29,14 @@ import yaml
 from downstream import ledger
 
 STD_DDOF = 1  # sample std (n-1); downstream.report keeps ddof=0, so the same seeds can show two std values
-# Professor-page / missing-list models when neither --models nor <root>/comparisons.yaml names them (decision of
-# 9 Nov 2026): pre-G1 four-domain model, protein-only, the random-init control, the post-G1 model (snapshot name
-# fixed when its training ends; until then it shows as EKSİK:model-henüz-yok) and the 330-epoch reference.
-DEFAULT_SUMMARY_MODELS = ("hyp_md4_s42_ep98", "hyp_protein_only_s42_ep98", "hyp_md4_s42_ep98.random_init",
-                          "g1h_1m_100ep_s42_ep<N>", "mind4_1m_packed_ep330_final")
 LITERATURE_COLUMNS = ("task", "paper", "model", "metric", "eval_split", "subset", "value", "std", "unit", "protocol",
                       "n_seeds", "split_note", "pdf", "page", "table")
 LITERATURE_REQUIRED = ("task", "paper", "model", "metric", "eval_split", "subset", "value", "unit", "protocol", "pdf",
                        "page", "table")
 NON_SUMMARY_FAMILIES = ("pretraining", "diagnostic")
-PRETRAIN_SEED_WARNING = ("ön-eğitim tohumu gürültüsü ölçülmedi: her model tek bir ön-eğitim koşusundan (tek tohum) "
-                         "geliyor; aynı ayarla başka tohumla eğitilmiş bir model ne kadar farklı sonuç verirdi, "
-                         "bilinmiyor.")
+PRETRAIN_SEED_WARNING = ("pretraining-seed noise was not measured: every model comes from a single pretraining run "
+                         "(one seed); how different the result of a model trained with the same settings and another "
+                         "seed would be is unknown.")
 _SECTION_FIELDS = ("task", "protocol_family", "protocol_id", "pooling", "data_revision", "split_tag", "representation",
                    "protocol_settings_sha256")
 _FAMILY_ORDER = {"frozen_probe": 0, "finetune": 1, "evaluation": 2}
@@ -107,10 +102,10 @@ def load_state(root: Optional[Path] = None, *, catalog: Optional[dict] = None) -
 def header_lines(state: dict, title: str) -> list:
     h = state["header"]
     return [f"# {title}", "",
-            f"Üretildi: {h['generated_utc']} | defter: measurements.jsonl {h['n_rows']} satır, sha256 "
-            f"{h['measurements_sha256']} | katalog sha256 {h['catalog_sha256']} | kod {h['code_git']} | "
-            f"uygulanan not: {h['n_annotations']} | std: ddof={STD_DDOF} (örnek std), tohumlar arası; ds-report ddof=0 "
-            "kullanır", ""]
+            f"Generated: {h['generated_utc']} | ledger: measurements.jsonl {h['n_rows']} rows, sha256 "
+            f"{h['measurements_sha256']} | catalog sha256 {h['catalog_sha256']} | code {h['code_git']} | "
+            f"applied annotations: {h['n_annotations']} | std: ddof={STD_DDOF} (sample std) across seeds; ds-report "
+            "uses ddof=0", ""]
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -144,15 +139,15 @@ def cell_stats(rows: list) -> dict:
 
 def format_cell(stats: dict) -> str:
     if stats["mean"] is None:
-        return "TANIMSIZ:" + "; ".join(stats["reasons"])
+        return "UNDEFINED:" + "; ".join(stats["reasons"])
     samples = stats["n_samples"]
     n = "?" if not samples else str(samples[0]) if len(samples) == 1 else f"{samples[0]}-{samples[-1]}"
-    spread = f"± {stats['std']:.3f}" if stats["std"] is not None else f"(std tanımsız (n={stats['n_seeds']}))"
-    text = f"{stats['mean']:.3f} {spread} (n_tohum={stats['n_seeds']}, n_örnek={n})"
+    spread = f"± {stats['std']:.3f}" if stats["std"] is not None else f"(std undefined (n={stats['n_seeds']}))"
+    text = f"{stats['mean']:.3f} {spread} (n_seeds={stats['n_seeds']}, n_samples={n})"
     if stats["expected"] and stats["n_rows"] < stats["expected"]:
-        text += f" EKSİK:tohum {stats['n_rows']}/{stats['expected']}"
+        text += f" MISSING:seeds {stats['n_rows']}/{stats['expected']}"
     if stats["reasons"]:
-        text += f" TANIMSIZ {stats['n_rows'] - stats['n_seeds']} tohumda: {'; '.join(stats['reasons'])}"
+        text += f" UNDEFINED in {stats['n_rows'] - stats['n_seeds']} seeds: {'; '.join(stats['reasons'])}"
     if stats["missing_provenance"]:
         text += " †"
     if stats["caveats"]:
@@ -186,45 +181,46 @@ def _cell_order(spec: dict, rows: list) -> list:
 
 def _literature_cell(state: dict, task: str, eval_split: str, subset: str, metric: str) -> str:
     if state["literature"] is None:
-        return "literatür dosyası yok (aşama 5)"
+        return "no literature file"
     rows = [r for r in state["literature"] if (r["task"], r["eval_split"], r["subset"], r["metric"]) ==
             (task, eval_split, subset, metric)]
     if not rows:
-        return "YOK"
+        return "NONE"
     direction = state["catalog"]["metrics"][metric]["direction"]
     parts = []
     for unit in sorted({r["unit"] for r in rows}):
         candidates = [r for r in rows if r["unit"] == unit]
         best = (max if direction == "higher" else min)(candidates, key=lambda r: r["value_float"])
-        seeds = f", n_tohum={best['n_seeds']}" if best["n_seeds"].strip() else ""
+        seeds = f", n_seeds={best['n_seeds']}" if best["n_seeds"].strip() else ""
         parts.append(f"{best['value']} {unit} ({best['model']}, {best['paper']}, {best['protocol']}{seeds}; "
-                     f"{best['pdf']} s.{best['page']} {best['table']})")
+                     f"{best['pdf']} p.{best['page']} {best['table']})")
     return "; ".join(parts)
 
 
 def _section_title(index: int, section: dict) -> str:
-    return (f"### Ayar {index}: {section['protocol_family']} / {section['protocol_id']} / pooling={section['pooling']}"
-            f" / veri={section['data_revision']} / split_tag={section['split_tag']} / "
-            f"representation={section['representation']} / ayar-sha={str(section['protocol_settings_sha256'])[:12]}"
-            f" / veri-parmak-izi={section['data_fingerprint'][:12]}")
+    return (f"### Setting {index}: {section['protocol_family']} / {section['protocol_id']} / pooling={section['pooling']}"
+            f" / data={section['data_revision']} / split_tag={section['split_tag']} / "
+            f"representation={section['representation']} / settings-sha={str(section['protocol_settings_sha256'])[:12]}"
+            f" / data-fingerprint={section['data_fingerprint'][:12]}")
 
 
 def task_report(state: dict, task: str) -> tuple[str, list]:
     """Markdown and long-format rows of one task's tables (valid rows only)."""
     spec = ledger.task_spec(state["catalog"], task)
-    lines = header_lines(state, f"Görev tablosu: {task}")
-    lines += [f"Aile: {spec['family']} | tür: {spec['kind']} | zorunlu protokoller: {spec['required_protocols']}",
-              "Hücre: ort ± std (n_tohum, n_örnek). † eksik iz bilgisi (dipnot), ‡ not/uyarı, KOD-YOK: makale istiyor "
-              "ama kodumuz hesaplamıyor. Literatür sütunu ayrı protokoldür (çoğu tam ince ayar), kendi biriminde.", ""]
+    lines = header_lines(state, f"Task table: {task}")
+    lines += [f"Family: {spec['family']} | kind: {spec['kind']} | required protocols: {spec['required_protocols']}",
+              "Cell: mean ± std (n_seeds, n_samples). † missing provenance (footnote), ‡ note/caveat, NO-CODE: the "
+              "paper asks for it but our code does not compute it. The literature column is a separate protocol "
+              "(mostly full fine-tuning), in its own unit.", ""]
     out_rows = []
     task_sections = sections(state, task)
     if not task_sections:
-        lines += ["Bu görev için geçerli (valid) ölçüm yok. Eksikler için eksik_hucreler.md.", ""]
+        lines += ["No valid measurement for this task. For the missing cells see missing_cells.md.", ""]
     for index, section in enumerate(task_sections, start=1):
         models = section["models"]
         lines += [_section_title(index, section), "",
-                  "| eval_split | subset | metric | yön | birim | " + " | ".join(models)
-                  + " | literatür (en iyi; ayrı protokol) |", "|" + "---|" * (6 + len(models))]
+                  "| eval_split | subset | metric | direction | unit | " + " | ".join(models)
+                  + " | literature (best; separate protocol) |", "|" + "---|" * (6 + len(models))]
         by_cell = defaultdict(list)
         for row in section["rows"]:
             by_cell[(row["eval_split"], row["subset"], row["metric"]), row["model_key"]].append(row)
@@ -237,9 +233,9 @@ def task_report(state: dict, task: str) -> tuple[str, list]:
             for model in models:
                 cell_rows = by_cell.get((cell, model))
                 if cell in code_missing:
-                    text, stats = "KOD-YOK", None
+                    text, stats = "NO-CODE", None
                 elif not cell_rows:
-                    text, stats = "EKSİK:metrik-dosyada-yok", None
+                    text, stats = "MISSING:metric-not-in-file", None
                 else:
                     stats = cell_stats(cell_rows)
                     text = format_cell(stats)
@@ -247,11 +243,11 @@ def task_report(state: dict, task: str) -> tuple[str, list]:
                                 for old in section["older"].get((model, r["run_seed"]) + cell, [])]
                     if previous:
                         text += " *"
-                        footnotes.append(f"* {model} {'/'.join(cell)}: önceki değer "
-                                         + ", ".join(f"{v:.3f} ({t})" if v is not None else f"tanımsız ({t})"
+                        footnotes.append(f"* {model} {'/'.join(cell)}: previous value "
+                                         + ", ".join(f"{v:.3f} ({t})" if v is not None else f"undefined ({t})"
                                                      for v, t in previous))
                     if stats["missing_provenance"]:
-                        footnotes.append(f"† {model} {'/'.join(cell)}: eksik iz bilgisi {stats['missing_provenance']}")
+                        footnotes.append(f"† {model} {'/'.join(cell)}: missing provenance {stats['missing_provenance']}")
                     if stats["caveats"]:
                         footnotes.append(f"‡ {model} {'/'.join(cell)}: {'; '.join(stats['caveats'])}")
                 texts.append(text)
@@ -262,7 +258,7 @@ def task_report(state: dict, task: str) -> tuple[str, list]:
                                  "mean": stats["mean"] if stats else None, "std": stats["std"] if stats else None,
                                  "n_seeds": stats["n_seeds"] if stats else 0,
                                  "expected_seeds": stats["expected"] if stats else None, "cell": text})
-            label = "katalog dışı" if not info["is_catalog_metric"] else info["direction"]
+            label = "not in catalog" if not info["is_catalog_metric"] else info["direction"]
             lines.append(f"| {cell[0]} | {cell[1]} | {cell[2]} | {label} | {info['unit'] or '-'} | "
                          + " | ".join(texts) + f" | {_literature_cell(state, task, *cell)} |")
         lines.append("")
@@ -290,10 +286,10 @@ def timeline_report(state: dict, task: str) -> tuple[str, list]:
                          "mean": stats["mean"], "std": stats["std"], "n_seeds": stats["n_seeds"], "cell": format_cell(stats)})
     out_rows.sort(key=lambda r: (str(r["model_created_utc"]), r["first_ingested_utc"], r["model_key"], r["protocol_id"],
                                  r["eval_split"], r["subset"], r["metric"]))
-    lines = header_lines(state, f"Zaman çizgisi: {task}")
-    lines += ["Tüm durumlar dahil (superseded/invalid/smoke burada görünür, görev tablosunda görünmez). Yalnız birincil "
-              "metrik; tüm metrikler CSV'de.", "",
-              "| model | model tarihi | ön-eğitim epoch | ilk ekleme | durum | protokol | pooling | veri | hücre |",
+    lines = header_lines(state, f"Timeline: {task}")
+    lines += ["All statuses included (superseded/invalid/smoke rows appear here, not in the task table). Primary "
+              "metric only; all metrics are in the CSV.", "",
+              "| model | model date | pretraining epoch | first ingested | status | protocol | pooling | data | cell |",
               "|---|---|---|---|---|---|---|---|---|"]
     for row in out_rows:
         if row["is_primary"]:
@@ -305,7 +301,7 @@ def timeline_report(state: dict, task: str) -> tuple[str, list]:
 
 
 # ---------------------------------------------------------------------------------------------------------
-# Expected cells: professor page and missing list
+# Expected cells: summary page and missing list
 # ---------------------------------------------------------------------------------------------------------
 
 def summary_tasks(catalog: dict) -> list:
@@ -317,21 +313,21 @@ def _hint(task: str, model: str, protocol: str, category: str) -> str:
     lba = f" SPLIT_TAG={qualifiers[0]} REPRESENTATION={qualifiers[1]}" if len(qualifiers) == 2 else ""
     probe = (f"make ds-probe TASK={task} MODEL_ID={model} HEAD={ledger.PROBE_HEADS.get(head, head)}{lba}"
              if head in ledger.PROBE_HEADS else f"make ds-finetune TASK={task} MODEL={model} GPU=<id>")
-    if category == "KOD-YOK":
-        return "metrik kodu yok: downstream/common/metrics.py'ye eklenmeli (ayrı iş)"
-    if category == "EKSİK:model-henüz-yok":
-        return (f"model defterde hiç yok: make ds-snapshot CKPT=<ckpt> NAME={model}, make ds-embed TASK={task} "
-                f"MODEL={model} GPU=<id>, {probe}, sonra make ds-ledger-add")
-    if category == "EKSİK:koşulmadı":
-        return f"make ds-embed TASK={task} MODEL={model} GPU=<id>, sonra {probe}, sonra make ds-ledger-add"
-    if category == "EKSİK:yalnız-embedding":
-        return f"{probe}, sonra make ds-ledger-add"
-    if category == "EKSİK:metrik-dosyada-yok":
-        return "predictions.npz'den yeniden hesap (aşama 7) ya da probe'u yeni kodla yeniden koş"
-    if category == "YALNIZ-ESKİ-SÜRÜM":
-        return f"yeni veri sürümünde yeniden koş: {probe}"
-    if category.startswith("EKSİK:tohum"):
-        return f"eksik tohumları koş: {probe} SEEDS=\"...\""
+    if category == "NO-CODE":
+        return "no metric code: add it to downstream/common/metrics.py (separate task)"
+    if category == "MISSING:model-not-in-ledger":
+        return (f"model not in the ledger: make ds-snapshot CKPT=<ckpt> NAME={model}, make ds-embed TASK={task} "
+                f"MODEL={model} GPU=<id>, {probe}, then make ds-ledger-add")
+    if category == "MISSING:not-run":
+        return f"make ds-embed TASK={task} MODEL={model} GPU=<id>, then {probe}, then make ds-ledger-add"
+    if category == "MISSING:embedding-only":
+        return f"{probe}, then make ds-ledger-add"
+    if category == "MISSING:metric-not-in-file":
+        return "recompute from predictions.npz, or rerun the probe with the current code"
+    if category == "OLD-REVISION-ONLY":
+        return f"rerun on the current data revision: {probe}"
+    if category.startswith("MISSING:seeds"):
+        return f"run the missing seeds: {probe} SEEDS=\"...\""
     return "-"
 
 
@@ -339,7 +335,7 @@ def lookup(state: dict, task: str, model: str, protocol: str, cell: dict) -> dic
     """State of one expected cell: ``category`` None when complete, else the missing category."""
     key = (cell["eval_split"], cell["subset"], cell["metric"])
     if cell.get("code", "present") == "missing":
-        return {"category": "KOD-YOK", "text": "KOD-YOK", "filled": False}
+        return {"category": "NO-CODE", "text": "NO-CODE", "filled": False}
     candidates = [s for s in sections(state, task) if s["protocol_id"] == protocol and model in s["models"]]
     found = []
     for section in candidates:
@@ -350,23 +346,23 @@ def lookup(state: dict, task: str, model: str, protocol: str, cell: dict) -> dic
         best = max(found, key=lambda s: (s["n_seeds"], s["n_rows"]))
         category = None
         if best["mean"] is None:
-            category = "TANIMSIZ:" + "; ".join(best["reasons"])
+            category = "UNDEFINED:" + "; ".join(best["reasons"])
         elif best["expected"] and best["n_rows"] < best["expected"]:
-            category = f"EKSİK:tohum {best['n_rows']}/{best['expected']}"
-        text = format_cell(best) if len(found) == 1 else f"BİRDEN-FAZLA-AYAR({len(found)}): bkz. tasks/{task}.md"
+            category = f"MISSING:seeds {best['n_rows']}/{best['expected']}"
+        text = format_cell(best) if len(found) == 1 else f"MULTIPLE-SETTINGS({len(found)}): see tasks/{task}.md"
         return {"category": category, "text": text, "filled": best["mean"] is not None}
     matching_any = [r for r in state["rows"] if r["task"] == task and r["model_key"] == model
                     and r["protocol_id"] == protocol and (r["eval_split"], r["subset"], r["metric"]) == key]
     if matching_any:
-        category = "YALNIZ-ESKİ-SÜRÜM"
+        category = "OLD-REVISION-ONLY"
     elif candidates:
-        category = "EKSİK:metrik-dosyada-yok"
+        category = "MISSING:metric-not-in-file"
     elif (task, model) in state["embedding_sets"]:
-        category = "EKSİK:yalnız-embedding"
+        category = "MISSING:embedding-only"
     elif not _known_model(state, model):
-        category = "EKSİK:model-henüz-yok"
+        category = "MISSING:model-not-in-ledger"
     else:
-        category = "EKSİK:koşulmadı"
+        category = "MISSING:not-run"
     return {"category": category, "text": category, "filled": False}
 
 
@@ -395,12 +391,12 @@ def missing_cells(state: dict, models: list, tasks: Optional[list] = None) -> li
 def summary_page(state: dict, models: list) -> str:
     catalog = state["catalog"]
     tasks = summary_tasks(catalog)
-    lines = header_lines(state, "Özet (hoca sayfası)")
-    lines += ["Her görevin birincil metriği, donmuş kodlayıcı + küçük baş (probe) ile; hücre = tohumlar üzerinde "
-              "ort ± std. Literatür sütunu farklı protokoldür (çoğu tam ince ayar) ve kendi birimindedir; doğrudan "
-              "kıyas değildir. Ayrıntı: tasks/<görev>.md.", "", f"> UYARI: {PRETRAIN_SEED_WARNING}", "",
-              "| görev | birincil metrik | " + " | ".join(f"`{m}`" for m in models)
-              + " | literatür (en iyi; ayrı protokol) |",
+    lines = header_lines(state, "Summary")
+    lines += ["Primary metric of each task, with a frozen encoder + small head (probe); cell = mean ± std over "
+              "seeds. The literature column is a different protocol (mostly full fine-tuning) and in its own unit; it "
+              "is not a direct comparison. All metrics: tasks/<task>.md.", "", f"> WARNING: {PRETRAIN_SEED_WARNING}", "",
+              "| task | primary metric | " + " | ".join(f"`{m}`" for m in models)
+              + " | literature (best; separate protocol) |",
               "|" + "---|" * (3 + len(models))]
     for task in tasks:
         spec = catalog["tasks"][task]
@@ -420,23 +416,23 @@ def summary_page(state: dict, models: list) -> str:
                     if cell.get("code", "present") == "present":
                         expected += 1
                         filled += lookup(state, task, model, protocol, cell)["filled"]
-    lines += ["", "## Sayım", "",
-              f"- Katalog: {len(tasks)} görevde {required} zorunlu metrik hücresi (görev × split × alt küme × metrik; "
-              f"bir makale raporladıysa zorunlu). Kodumuz bunların {coded} tanesini hesaplıyor, {required - coded} KOD-YOK.",
-              f"- Seçili {len(models)} model için (zorunlu protokoller dahil): beklenen {expected} hücre, dolu {filled}, "
-              f"eksik {expected - filled}. Liste: eksik_hucreler.md.",
-              f"- Defterdeki toplam ölçüm satırı (tohum × metrik × split, tüm durumlar): {state['header']['n_rows']}.", ""]
+    lines += ["", "## Counts", "",
+              f"- Catalog: {required} required metric cells over {len(tasks)} tasks (task x split x subset x metric; "
+              f"required when a paper reports it). Our code computes {coded} of them, {required - coded} NO-CODE.",
+              f"- For the {len(models)} selected models (required protocols included): expected {expected} cells, "
+              f"filled {filled}, missing {expected - filled}. List: missing_cells.md.",
+              f"- Total measurement rows in the ledger (seed x metric x split, all statuses): {state['header']['n_rows']}.", ""]
     return "\n".join(lines) + "\n"
 
 
 def missing_markdown(state: dict, models: list, missing: list) -> str:
-    lines = header_lines(state, "Eksik hücreler")
+    lines = header_lines(state, "Missing cells")
     counts = defaultdict(int)
     for entry in missing:
-        counts[entry["category"].split(" ")[0] if entry["category"].startswith("EKSİK:tohum") else entry["category"]] += 1
-    lines += [f"Modeller: {', '.join(models)}. Beklenen = katalogdaki zorunlu hücreler × zorunlu protokoller.", "",
-              "Kategori sayıları: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())), "",
-              "| görev | model | protokol | eval_split | subset | metric | kategori | nasıl tamamlanır |", "|---|---|---|---|---|---|---|---|"]
+        counts[entry["category"].split(" ")[0] if entry["category"].startswith("MISSING:seeds") else entry["category"]] += 1
+    lines += [f"Models: {', '.join(models)}. Expected = the catalog's required cells x required protocols.", "",
+              "Category counts: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())), "",
+              "| task | model | protocol | eval_split | subset | metric | category | how to complete |", "|---|---|---|---|---|---|---|---|"]
     for entry in missing:
         lines.append(f"| {entry['task']} | {entry['model_key']} | {entry['protocol_id']} | {entry['eval_split']} | "
                      f"{entry['subset']} | {entry['metric']} | {entry['category']} | {entry['hint']} |")
@@ -447,13 +443,16 @@ def missing_markdown(state: dict, models: list, missing: list) -> str:
 # Writing
 # ---------------------------------------------------------------------------------------------------------
 
-def report_models(root: Path, models: Optional[list]) -> list:
-    """``--models``, else ``summary_models`` in <root>/comparisons.yaml, else ``DEFAULT_SUMMARY_MODELS``."""
+def report_models(root: Path, models: Optional[list], ledger_models: list) -> list:
+    """``--models``, else ``summary_models`` in <root>/comparisons.yaml, else every model of the ledger."""
     if models:
         return list(models)
     path = Path(root) / "comparisons.yaml"
     if not path.exists():
-        return list(DEFAULT_SUMMARY_MODELS)
+        keys = sorted({m["model_key"] for m in ledger_models})
+        if not keys:
+            raise ValueError(f"no models in the ledger at {root}; pass --models or write {path}")
+        return keys
     listed = (yaml.safe_load(path.read_text()) or {}).get("summary_models")
     if not listed:
         raise ValueError(f"{path} has no summary_models list")
@@ -496,13 +495,13 @@ def write_reports(root: Optional[Path] = None, *, models: Optional[list] = None,
             _write(reports / "timeline" / f"{task}.md", markdown, written)
             _write(reports / "timeline" / f"{task}.csv", _csv_text(rows), written)
     if "summary" in which or "missing" in which:
-        selected = report_models(root, models)
+        selected = report_models(root, models, state["models"])
         if "summary" in which:
-            _write(reports / "ozet_hoca.md", summary_page(state, selected), written)
+            _write(reports / "summary.md", summary_page(state, selected), written)
         if "missing" in which:
             missing = missing_cells(state, selected)
-            _write(reports / "eksik_hucreler.md", missing_markdown(state, selected, missing), written)
-            _write(reports / "eksik_hucreler.csv", _csv_text(missing), written)
+            _write(reports / "missing_cells.md", missing_markdown(state, selected, missing), written)
+            _write(reports / "missing_cells.csv", _csv_text(missing), written)
     return written
 
 
@@ -511,7 +510,7 @@ def main(argv=None) -> int:
     parser.add_argument("command", choices=("report", "summary", "missing"))
     parser.add_argument("--results-root", type=Path, default=None, help=f"default: ${ledger.ENV_VAR}")
     parser.add_argument("--models", nargs="*", default=None,
-                        help="default: summary_models in <root>/comparisons.yaml, else DEFAULT_SUMMARY_MODELS")
+                        help="default: summary_models in <root>/comparisons.yaml, else every model of the ledger")
     args = parser.parse_args(argv)
     which = {"report": ("tasks", "timeline", "summary", "missing"), "summary": ("summary",),
              "missing": ("missing",)}[args.command]

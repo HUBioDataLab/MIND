@@ -1,4 +1,4 @@
-"""Results ledger core: flattening, append-only storage, integrity and identity checks (stage 1).
+"""Results ledger core: flattening, append-only storage, integrity and identity checks.
 
 Synthetic output trees only (``ledger_helpers``); each test uses its own temporary results root.
 """
@@ -25,14 +25,14 @@ def _rows(root, **where):
 
 def _tree(tmp_path):
     outputs = tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
+    card(outputs, "model_a", SHA_A)
     for seed in (0, 1, 2):
-        write_probe(outputs, ec_metrics("md4", seed, 0.50 + 0.01 * seed))
-        write_probe(outputs, fold_metrics("md4", seed), splits=("train", "valid", "test_fold", "test_superfamily",
+        write_probe(outputs, ec_metrics("model_a", seed, 0.50 + 0.01 * seed))
+        write_probe(outputs, fold_metrics("model_a", seed), splits=("train", "valid", "test_fold", "test_superfamily",
                                                                    "test_family"))
-        write_probe(outputs, lba_metrics("md4", seed, 1.5), splits=("train", "val", "test"))
-        write_probe(outputs, molnet_cls_metrics("md4", seed, 0.8))
-        write_probe(outputs, molnet_reg_metrics("md4", seed, 1.0))
+        write_probe(outputs, lba_metrics("model_a", seed, 1.5), splits=("train", "val", "test"))
+        write_probe(outputs, molnet_cls_metrics("model_a", seed, 0.8))
+        write_probe(outputs, molnet_reg_metrics("model_a", seed, 1.0))
     return outputs
 
 
@@ -55,7 +55,7 @@ def test_ingest_flattens_every_kind_with_provenance(tmp_path):
     assert summary["files_seen"] == 15 and summary["files_skipped_same_sha"] == 0
     row, = _rows(root, task="ec", eval_split="test", subset="cutoff_30", metric="fmax", run_seed=1)
     assert row["value"] == pytest.approx(0.41)
-    assert row["model_key"] == "md4" and row["model_sha256"] == SHA_A and row["model_kind"] == "mind"
+    assert row["model_key"] == "model_a" and row["model_sha256"] == SHA_A and row["model_kind"] == "mind"
     assert row["protocol_family"] == "frozen_probe" and row["head"] == "mlp" and row["protocol_id"] == "mlp_probe"
     assert row["pooling"] == "mean_atoms" and row["data_revision"] == "rev_v2"
     assert row["eval_processed_sha256"].startswith("rev_v2-test")
@@ -82,15 +82,15 @@ def test_ingest_flattens_every_kind_with_provenance(tmp_path):
 
 def test_finetune_rows_record_their_protocol_and_missing_data_revision(tmp_path):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    write_finetune(outputs, ec_metrics("md4", 0, 0.6, protocol="finetune"))
-    write_finetune(outputs, ec_metrics("md4.random_init", 1, 0.4, protocol="finetune"), processed=False,
+    card(outputs, "model_a", SHA_A)
+    write_finetune(outputs, ec_metrics("model_a", 0, 0.6, protocol="finetune"))
+    write_finetune(outputs, ec_metrics("model_a.random_init", 1, 0.4, protocol="finetune"), processed=False,
                    random_init=True)
     ledger.ingest(root, outputs_root=outputs, command="test")
-    tuned, = _rows(root, model_key="md4", metric="fmax", eval_split="test", subset="all")
+    tuned, = _rows(root, model_key="model_a", metric="fmax", eval_split="test", subset="all")
     assert tuned["protocol_family"] == "finetune" and tuned["data_revision"] == "rev_v2"
     assert tuned["code_git_run"] == RUN_GIT and "data_revision" not in tuned["missing_provenance"]
-    control, = _rows(root, model_key="md4.random_init", metric="fmax", eval_split="test", subset="all")
+    control, = _rows(root, model_key="model_a.random_init", metric="fmax", eval_split="test", subset="all")
     assert control["model_kind"] == "mind_random_init" and control["init_seed"] == 1
     assert control["data_revision"] is None and "data_revision" in control["missing_provenance"]
 
@@ -134,41 +134,41 @@ def test_lines_appended_outside_the_ledger_are_refused(tmp_path):
 def test_same_model_name_with_another_checkpoint_is_refused(tmp_path):
     root = tmp_path / "results"
     first, second = tmp_path / "o1", tmp_path / "o2"
-    card(first, "md4", SHA_A)
-    write_probe(first, ec_metrics("md4", 0, 0.5))
-    card(second, "md4", SHA_B)
-    write_probe(second, ec_metrics("md4", 0, 0.5), sha=SHA_B)
+    card(first, "model_a", SHA_A)
+    write_probe(first, ec_metrics("model_a", 0, 0.5))
+    card(second, "model_a", SHA_B)
+    write_probe(second, ec_metrics("model_a", 0, 0.5), sha=SHA_B)
     ledger.ingest(root, outputs_root=first, command="test")
     before = len(ledger.read_records(root, "measurements"))
-    with pytest.raises(ledger.LedgerError, match="md4.*sha256"):
+    with pytest.raises(ledger.LedgerError, match="model_a.*sha256"):
         ledger.ingest(root, outputs_root=second, command="test")
     assert len(ledger.read_records(root, "measurements")) == before
 
 
 def test_card_and_embedding_checkpoints_must_agree(tmp_path):
     outputs = tmp_path / "outputs"
-    card(outputs, "md4", SHA_B)
-    write_probe(outputs, ec_metrics("md4", 0, 0.5), sha=SHA_A)
+    card(outputs, "model_a", SHA_B)
+    write_probe(outputs, ec_metrics("model_a", 0, 0.5), sha=SHA_A)
     with pytest.raises(ledger.LedgerError, match="card"):
         ledger.ingest(tmp_path / "results", outputs_root=outputs, command="test")
 
 
 def test_random_init_control_shares_the_template_sha_without_conflict(tmp_path):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    write_probe(outputs, ec_metrics("md4", 0, 0.5))
-    write_probe(outputs, ec_metrics("md4.random_init", 0, 0.3), random_init=True)
+    card(outputs, "model_a", SHA_A)
+    write_probe(outputs, ec_metrics("model_a", 0, 0.5))
+    write_probe(outputs, ec_metrics("model_a.random_init", 0, 0.3), random_init=True)
     ledger.ingest(root, outputs_root=outputs, command="test")
     kinds = {(r["model_key"], r["model_kind"]) for r in ledger.read_records(root, "measurements")}
-    assert kinds == {("md4", "mind"), ("md4.random_init", "mind_random_init")}
+    assert kinds == {("model_a", "mind"), ("model_a.random_init", "mind_random_init")}
 
 
 # -- T5 / T6: malformed inputs fail loudly ----------------------------------------------------------------
 
 def test_missing_value_without_a_reason_is_an_error(tmp_path):
     outputs = tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    metrics = ec_metrics("md4", 0, 0.5)
+    card(outputs, "model_a", SHA_A)
+    metrics = ec_metrics("model_a", 0, 0.5)
     metrics["test"]["all"]["pair_aupr"] = None
     path = write_probe(outputs, metrics) / "metrics.json"
     with pytest.raises(ValueError, match=f"pair_aupr.*{path}"):
@@ -177,8 +177,8 @@ def test_missing_value_without_a_reason_is_an_error(tmp_path):
 
 def test_undefined_correlation_keeps_its_reason(tmp_path):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    metrics = lba_metrics("md4", 0, 1.5)
+    card(outputs, "model_a", SHA_A)
+    metrics = lba_metrics("model_a", 0, 1.5)
     metrics["test"]["all"] = lba_block(1.5, pearson=None, reason="constant_prediction")
     write_probe(outputs, metrics, splits=("train", "val", "test"))
     ledger.ingest(root, outputs_root=outputs, command="test")
@@ -189,13 +189,13 @@ def test_undefined_correlation_keeps_its_reason(tmp_path):
 
 def test_unknown_kind_and_unknown_field_are_errors(tmp_path):
     outputs = tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    metrics = ec_metrics("md4", 0, 0.5)
+    card(outputs, "model_a", SHA_A)
+    metrics = ec_metrics("model_a", 0, 0.5)
     metrics["kind"] = "ranking"
     write_probe(outputs, metrics)
     with pytest.raises(ValueError, match="kind 'ranking'"):
         ledger.ingest(tmp_path / "r1", outputs_root=outputs, command="test")
-    metrics = ec_metrics("md4", 0, 0.5)
+    metrics = ec_metrics("model_a", 0, 0.5)
     metrics["test"]["all"]["histogram"] = {"a": 1}
     write_probe(outputs, metrics)
     with pytest.raises(ValueError, match="histogram"):
@@ -203,10 +203,10 @@ def test_unknown_kind_and_unknown_field_are_errors(tmp_path):
 
 
 def test_legacy_file_without_kind_takes_the_catalog_kind_visibly(tmp_path):
-    """EC probes of 25 Oct 2026 wrote no ``kind``; the catalog kind is used and the gap is listed."""
+    """Older EC probes wrote no ``kind``; the catalog kind is used and the gap is listed."""
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    metrics = ec_metrics("md4", 0, 0.5)
+    card(outputs, "model_a", SHA_A)
+    metrics = ec_metrics("model_a", 0, 0.5)
     del metrics["kind"]
     write_probe(outputs, metrics)
     ledger.ingest(root, outputs_root=outputs, command="test")
@@ -216,8 +216,8 @@ def test_legacy_file_without_kind_takes_the_catalog_kind_visibly(tmp_path):
 
 def test_metrics_outside_the_catalog_are_kept_and_marked(tmp_path):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    write_probe(outputs, ec_metrics("md4", 0, 0.5))
+    card(outputs, "model_a", SHA_A)
+    write_probe(outputs, ec_metrics("model_a", 0, 0.5))
     ledger.ingest(root, outputs_root=outputs, command="test")
     extra, = _rows(root, eval_split="test", subset="all", metric="subset_accuracy@0.5")
     assert extra["is_catalog_metric"] is False and extra["value"] == 0.1
@@ -248,8 +248,8 @@ def test_parallel_appends_keep_the_ledger_consistent(tmp_path):
 
 def test_missing_probe_commit_is_listed_not_copied(tmp_path):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    write_probe(outputs, ec_metrics("md4", 0, 0.5), run_git=None)
+    card(outputs, "model_a", SHA_A)
+    write_probe(outputs, ec_metrics("model_a", 0, 0.5), run_git=None)
     ledger.ingest(root, outputs_root=outputs, command="test")
     row = _rows(root, metric="fmax", eval_split="test", subset="all")[0]
     assert row["code_git_run"] is None and "run_git" in row["missing_provenance"]
@@ -261,15 +261,15 @@ def test_missing_probe_commit_is_listed_not_copied(tmp_path):
 
 def test_model_card_selection_rule_comes_from_the_card(tmp_path):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    card(outputs, "md4_last", SHA_B, best=False, epoch=28)
-    write_probe(outputs, ec_metrics("md4", 0, 0.5))
-    write_probe(outputs, ec_metrics("md4_last", 0, 0.5), sha=SHA_B)
+    card(outputs, "model_a", SHA_A)
+    card(outputs, "model_a_last", SHA_B, best=False, epoch=28)
+    write_probe(outputs, ec_metrics("model_a", 0, 0.5))
+    write_probe(outputs, ec_metrics("model_a_last", 0, 0.5), sha=SHA_B)
     ledger.ingest(root, outputs_root=outputs, command="test")
     models = {m["model_key"]: m for m in ledger.read_records(root, "models")}
-    assert models["md4"]["selection_rule"].startswith("best-checkpoint by val_total_loss")
-    assert models["md4_last"]["selection_rule"].startswith("not the ModelCheckpoint best")
-    assert models["md4"]["sha256"] == SHA_A and models["md4"]["epoch"] == 98
+    assert models["model_a"]["selection_rule"].startswith("best-checkpoint by val_total_loss")
+    assert models["model_a_last"]["selection_rule"].startswith("not the ModelCheckpoint best")
+    assert models["model_a"]["sha256"] == SHA_A and models["model_a"]["epoch"] == 98
 
 
 def test_hf_baseline_is_identified_by_revision(tmp_path):
@@ -283,12 +283,12 @@ def test_hf_baseline_is_identified_by_revision(tmp_path):
 
 def test_embedding_only_sets_are_recorded_for_the_missing_report(tmp_path):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    write_embeddings_only(outputs, "go_cc", "md4")
+    card(outputs, "model_a", SHA_A)
+    write_embeddings_only(outputs, "go_cc", "model_a")
     summary = ledger.ingest(root, outputs_root=outputs, command="test")
     assert summary["rows_added"] == 0
     ingest, = ledger.read_records(root, "ingests")
-    assert {"task": "go_cc", "model_key": "md4", "splits": ["test", "train", "valid"]} in ingest["embedding_sets"]
+    assert {"task": "go_cc", "model_key": "model_a", "splits": ["test", "train", "valid"]} in ingest["embedding_sets"]
 
 
 # -- pretraining evaluations ---------------------------------------------------------------------------------
@@ -314,8 +314,8 @@ def _eval_dir(path, *, counterfactual=None, hiding=None):
 
 def test_pretraining_and_counterfactual_evals_are_separate_tasks(tmp_path):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
-    plain = _eval_dir(tmp_path / "eval" / "md4_test")
+    card(outputs, "model_a", SHA_A)
+    plain = _eval_dir(tmp_path / "eval" / "model_a_test")
     noise = _eval_dir(tmp_path / "eval" / "cf" / "masked_pos_noise", counterfactual="masked_pos_noise")
     ledger.ingest(root, outputs_root=outputs, eval_dirs=[plain, noise], command="test")
     top1, = _rows(root, task="pretrain_eval", subset="protein", metric="top1_acc_real")
@@ -327,7 +327,7 @@ def test_pretraining_and_counterfactual_evals_are_separate_tasks(tmp_path):
 
 def test_eval_settings_carry_the_effective_geometry_hiding(tmp_path):
     root, outputs = tmp_path / "results", tmp_path / "outputs"
-    card(outputs, "md4", SHA_A)
+    card(outputs, "model_a", SHA_A)
     on = {"enabled": True, "bond_threshold_angstrom": 2.1}
     off = {"enabled": False, "bond_threshold_angstrom": None}
     dirs = {

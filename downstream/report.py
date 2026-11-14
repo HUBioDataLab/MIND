@@ -27,7 +27,7 @@ LITERATURE = {
         ("ESM-2 650M", 0.868),
         ("SaProt", 0.882),
     ],
-    # GO test Fmax at 95 % identity; numbers copied from the task-selection notes (SaProt paper table), not re-verified
+    # GO test Fmax at 95 % identity; numbers transcribed by hand from the SaProt paper table; check them against the paper before citing
     "go_mf": [("ESM-2 650M", 0.670), ("SaProt", 0.682)],
     "go_bp": [("ESM-2 650M", 0.473), ("SaProt", 0.486)],
     "go_cc": [("ESM-2 650M", 0.470), ("SaProt", 0.479)],
@@ -38,8 +38,8 @@ LITERATURE = {
         ("ProNet", 1.463),
     ],
 }
-# Single-label accuracy tasks: {task: [(model, {test split: accuracy %})]}; GearNet paper Table 2 (copied from the
-# literature table of the task-selection notes), fine-tuned end-to-end, not comparable to frozen probes.
+# Single-label accuracy tasks: {task: [(model, {test split: accuracy %})]}; GearNet paper Table 2 (transcribed by
+# hand; check against the paper before citing), fine-tuned end-to-end, not comparable to frozen probes.
 MULTICLASS_LITERATURE = {
     "fold": [
         ("GearNet-Edge-IEConv", {"test_fold": 48.3, "test_superfamily": 70.3, "test_family": 99.5}),

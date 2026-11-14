@@ -1,4 +1,4 @@
-"""Model comparison with a paired bootstrap over predictions.npz (stage 3)."""
+"""Model comparison with a paired bootstrap over predictions.npz."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def test_identical_predictions_are_indistinguishable(tmp_path):
     result = ledger_compare.compare(_state(tmp_path, build), "A", "B", n_boot=200)
     pair = _pair(result, "ec", "fmax")
     assert pair["diff_b_better"] == 0 and pair["ci_low"] == 0 and pair["ci_high"] == 0
-    assert pair["decision"] == "ayırt edilemez" and pair["common_seeds"] == [0, 1, 2]
+    assert pair["decision"] == "indistinguishable" and pair["common_seeds"] == [0, 1, 2]
 
 
 # -- C2: a known difference has the right sign; lower-is-better metrics flip --------------------------------
@@ -69,11 +69,11 @@ def test_known_difference_has_the_right_sign(tmp_path):
     result = ledger_compare.compare(_state(tmp_path, build), "A", "B", n_boot=300)
     rmse = _pair(result, "lba", "rmse")
     assert rmse["mean_b"] < rmse["mean_a"] and rmse["diff_b_better"] > 0 and rmse["ci_low"] > 0
-    assert rmse["decision"] == "B daha iyi"
+    assert rmse["decision"] == "B better"
     fmax = _pair(result, "ec", "fmax")
-    assert fmax["mean_b"] > fmax["mean_a"] and fmax["diff_b_better"] > 0 and fmax["decision"] == "B daha iyi"
+    assert fmax["mean_b"] > fmax["mean_a"] and fmax["diff_b_better"] > 0 and fmax["decision"] == "B better"
     reverse = ledger_compare.compare(_state(tmp_path / "r", build), "B", "A", n_boot=300)
-    assert _pair(reverse, "lba", "rmse")["decision"] == "B daha kötü"
+    assert _pair(reverse, "lba", "rmse")["decision"] == "B worse"
 
 
 # -- C3: rows are aligned by chain id; different test sets are refused -------------------------------------
@@ -132,7 +132,7 @@ def test_different_data_revisions_are_not_compared(tmp_path):
     result = ledger_compare.compare(_state(tmp_path, build), "A", "B", n_boot=50)
     assert not [p for p in result["pairs"] if p["task"] == "ec"]
     entry = next(c for c in result["only_a"] if c["metric"] == "fmax" and c["subset"] == "all")
-    assert "farklı ayar" in entry["reason"]
+    assert "different setting" in entry["reason"]
 
 
 def test_subsets_without_masks_get_no_interval(tmp_path):
@@ -145,7 +145,7 @@ def test_subsets_without_masks_get_no_interval(tmp_path):
                                    "cutoff_30": evaluate(predictions["test_labels"][:10], predictions["test_scores"][:10])}
                 write_probe(outputs, metrics, sha=sha, predictions=predictions)
     pair = _pair(ledger_compare.compare(_state(tmp_path, build), "A", "B", n_boot=50), "ec", "fmax", "cutoff_30")
-    assert pair["ci_low"] is None and pair["decision"].startswith("karar yok")
+    assert pair["ci_low"] is None and pair["decision"].startswith("no decision")
 
 
 # -- C5: the report states all three noise sources and the multiple-comparison warning -----------------------
@@ -159,10 +159,10 @@ def test_report_states_noise_sources_and_multiple_comparisons(tmp_path):
     state = _state(tmp_path, build)
     result = ledger_compare.compare(state, "A", "B", n_boot=100)
     markdown = ledger_compare.compare_markdown(state, result)
-    assert "ön-eğitim tohumu gürültüsü ölçülmedi" in markdown
-    assert "1. Probe tohumu" in markdown and "2. Test örneklemi" in markdown and "3. Ön-eğitim koşusu" in markdown
+    assert "pretraining-seed noise was not measured" in markdown
+    assert "1. Probe seed" in markdown and "2. Test sample" in markdown and "3. Pretraining run" in markdown
     with_ci = sum(p["ci_low"] is not None for p in result["pairs"])
-    assert f"{with_ci} karşılaştırma" in markdown and f"{0.05 * with_ci:.1f}" in markdown
+    assert f"{with_ci} comparisons" in markdown and f"{0.05 * with_ci:.1f}" in markdown
     assert state["header"]["measurements_sha256"] in markdown
     written = ledger_compare.write_compare(state["root"], "A", "B", n_boot=100, state=state)
     assert [p.name for p in written] == ["A__vs__B.md", "A__vs__B.csv"]
@@ -175,7 +175,7 @@ def test_single_seed_cells_get_no_decision(tmp_path):
         _ec_run(outputs, "B", 0, ec_predictions(np.random.default_rng(0), quality=0.9), SHA_B)
     pair = _pair(ledger_compare.compare(_state(tmp_path, build), "A", "B", n_boot=50), "ec", "fmax")
     assert pair["std_a"] is None and pair["ci_low"] is not None
-    assert pair["decision"] == "karar yok: tek tohum, probe-tohumu std'si tanımsız"
+    assert pair["decision"] == "no decision: single seed, probe-seed std undefined"
 
 
 # -- Seed sets: mean, std and difference come from the seeds both models share, like the interval -----------
@@ -210,7 +210,7 @@ def test_models_without_a_common_seed_get_no_decision(tmp_path):
             _lba_run(outputs, "B", seed, 0.2, SHA_B)
     pair = _pair(ledger_compare.compare(_state(tmp_path, build), "A", "B", n_boot=50), "lba", "rmse")
     assert pair["common_seeds"] == [] and pair["mean_a"] is None and pair["diff_b_better"] is None
-    assert pair["decision"] == "karar yok: ortak koşu tohumu yok"
+    assert pair["decision"] == "no decision: no common run seed"
 
 
 # -- S2: derived_from without a catalog average is an ordinary row (its value is still reproduced) ----------

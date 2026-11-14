@@ -1,4 +1,4 @@
-"""Make targets of the results ledger (stage 6): dry-run commands and required-variable guards only.
+"""Make targets of the results ledger: dry-run commands and required-variable guards only.
 
 ``make -n`` prints recipes without running them; the guard tests run only the first ``@test`` line, which
 fails before any Python starts. Nothing is written.
