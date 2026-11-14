@@ -68,7 +68,7 @@ def test_task_config_without_a_processed_revision_is_refused(tmp_path):
 
 
 def test_checked_in_yaml_marks_the_reprocessed_revision_and_names_the_exceptions():
-    """v2 = chains with 2/3-character ids are read (46 were lost as parse_error); the old directory stays untouched."""
+    """v2 = chains with 2/3-character ids are read; the previous revision directory stays untouched."""
     config = dataset.load_task_config()
     assert config["processed_revision"] == "v2"
     assert dataset.processed_dir(config).name == "torchdrug_zip_dropbb_masksc_skip1024_v2"
@@ -190,7 +190,7 @@ def test_probe_config_records_its_own_run_commit(tmp_path):
                          / "config.json").read_text())
     assert config["run"]["git"] == registry.git_commit()
     assert config["run"]["argv"] and config["run"]["started_utc"].endswith("+00:00")
-    assert config["embeddings"]["test"]["git"] == "embed-commit"  # the embedding record is kept as before
+    assert config["embeddings"]["test"]["git"] == "embed-commit"  # the existing embedding record is kept
 
 
 def test_run_record_names_commit_time_and_command():

@@ -112,7 +112,7 @@ def main(argv=None) -> int:
     task = load_task(args.task)
     kind = task.KIND
     if kind in ("multiclass", "multilabel_masked", "multitarget_regression"):
-        parser.error(f"fine-tuning is not implemented for the {kind} task {args.task!r} (probe only for now)")
+        parser.error(f"fine-tuning is not implemented for the {kind} task {args.task!r} (probe only)")
     if args.task != "lba" and args.split_tag:
         parser.error("--split-tag applies to the lba task only")
     config = task.load_task_config(task.TASK_YAML, data_root=args.data_root)

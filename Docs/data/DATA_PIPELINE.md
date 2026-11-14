@@ -147,7 +147,7 @@ must be treated as legacy when interpreting old runs.
 
 Two epoch policies exist, selected by `multi_domain.atom_sampling`:
 
-- Natural full pass (`pretraining_config_multidomain.yaml`, the old three-domain
+- Natural full pass (`pretraining_config_multidomain.yaml`, the three-domain
   baseline; `atom_sampling.enabled:
   false`): the sampler plan targets every selected train graph once per epoch, with
   deterministic proportional interleaving while domains remain available. It does not

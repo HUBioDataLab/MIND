@@ -331,7 +331,7 @@ def test_esa_edges_shuffle_rewires_masked_atoms_inside_their_graph():
     assert untouched <= _pairs(new)
     # the masked atoms were rewired, not merely kept
     assert _pairs(_incident(new, target)) != _pairs(_incident(attention, target))
-    # degree of a masked atom is preserved (at least as many partners as before)
+    # degree of a masked atom is preserved (at least as many partners as in the original graph)
     for node in torch.where(target)[0].tolist():
         assert int((new[0] == node).sum()) >= int((attention[0] == node).sum())
     assert torch.equal(out.edge_index, inputs["edge_index"]) and torch.equal(out.pos, inputs["pos"])

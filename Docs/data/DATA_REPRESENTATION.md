@@ -143,7 +143,7 @@ MIND uses a compact id space of 121 entries (`atom_types: 121`):
 
 `data_loading/cache_to_pyg.py::atom_to_model_id` checks virtual metadata and
 `Vn` position codes before element lookup, so a real vanadium atom is not
-confused with adapter-generated virtual padding. Legacy caches with the old
+confused with adapter-generated virtual padding. Legacy caches with the earlier
 virtual id are normalized by `LazyUniversalDataset`; this repair is made in memory and
 production `.pt` files are not rewritten. The single MLM head
 predicts these ids; metric callbacks map them to domain-readable labels.

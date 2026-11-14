@@ -469,8 +469,8 @@ def test_old_kinds_keep_their_loss_prediction_and_score_behaviour():
         probe.validation_score("nonsense", targets, predictions)
 
 
-def test_old_kinds_reproduce_the_scores_the_probe_gave_before_the_molnet_change():
-    """Pinned values from the unchanged phase-1 probe (same data, seed 3, linear head): the old kinds must not drift."""
+def test_existing_kinds_keep_their_pinned_scores():
+    """Pinned values for the multiclass/multilabel probes (same data, seed 3, linear head) must not drift."""
     rng = np.random.default_rng(0)
     x = torch.from_numpy(rng.normal(size=(80, 10)).astype(np.float32))
     xv = torch.from_numpy(rng.normal(size=(30, 10)).astype(np.float32))
