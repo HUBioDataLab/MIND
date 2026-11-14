@@ -68,6 +68,10 @@ and is valid for that processed revision only.
   builders, refuses any incomplete or unknown residue with a `ValueError`.)
   Incomplete residues are masked like a pretraining MLM block (all 14 slots,
   mask token 0, sidechain slots latent) or the chain is dropped.
+- `block_idx` of a chain graph is the residue's position in the parsed chain, so a
+  residue dropped for a missing backbone atom leaves a gap and Tier-1 sequence edges
+  join only true sequence neighbours. Processed files built before this rule (no
+  `block_index` in the schema `source`) are refused at load time.
 - Graphs are built with the training functions (`_standardize_residue_to_14_atoms`,
   `_universal_to_pyg`, `preposition_visible_virtuals`, edge-free encode/decode,
   `attach_runtime_template_metadata`, protein random edges under a fixed per-chain seed).

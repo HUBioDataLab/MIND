@@ -207,7 +207,7 @@ def process_entry(job: Tuple[str, List[Tuple[str, Optional[str]]], dict]) -> Lis
             results.append(ChainResult(chain, "strict_violation", f"strict_violation: {exc}", dict(record.report), [], [], ""))
             continue
         report = outcome.report
-        residues, masked = outcome.residues, outcome.masked
+        residues, masked, positions = outcome.residues, outcome.masked, outcome.sequence_index
         if outcome.dropped_reason:
             results.append(ChainResult(chain, "dropped", f"policy_drop: {outcome.dropped_reason}", report, [], [], ""))
             continue
@@ -224,7 +224,8 @@ def process_entry(job: Tuple[str, List[Tuple[str, Optional[str]]], dict]) -> Lis
         try:
             samples = [
                 compact_sample(build_node_sample(
-                    residues[a:b], masked[a:b], chain if len(spans) == 1 else f"{chain}#w{i}"
+                    residues[a:b], masked[a:b], chain if len(spans) == 1 else f"{chain}#w{i}",
+                    sequence_index=positions[a:b],
                 ))
                 for i, (a, b) in enumerate(spans)
             ]

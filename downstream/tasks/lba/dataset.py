@@ -418,7 +418,7 @@ def process_item(item: dict, settings: dict) -> ComplexResult:
 
     sources = [pocket[residue.resseq] for residue in kept_residues]
     try:
-        node = build_node_sample(kept_residues, masked, complex_id)
+        node = build_node_sample(kept_residues, masked, complex_id, sequence_index=None)  # remapped below
         node = cg.remap_protein_blocks(node, cg.protein_block_ids(
             [source.chain_ordinal for source in sources], [source.sequence_index for source in sources]
         ))

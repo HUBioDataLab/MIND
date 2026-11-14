@@ -63,7 +63,60 @@ def _training_build(path):
 def _downstream_node(path):
     chain = read_chains(path, mse_to_met=True)["A"]
     result = apply_policy(chain, MASK)
-    return gb.build_node_sample(result.residues, result.masked, path.stem), result
+    node = gb.build_node_sample(result.residues, result.masked, path.stem, sequence_index=result.sequence_index)
+    return node, result
+
+
+EC_SETTINGS = {"missing_atoms": {"policy": "drop_residue_missing_backbone", "incomplete_sidechain": "mask"},
+               "mse_to_met": True, "max_residues": 1024, "length_policy": "skip", "min_residues": 2}
+
+
+def _tier1_pairs(sample):
+    ca_block = {int(i): int(sample.block_idx[i]) for i, code in enumerate(sample.pos_code) if code == "CA"}
+    return {(ca_block[int(a)], ca_block[int(b)]) for a, b in sample.edge_index.t().tolist()}
+
+
+def test_dropped_backbone_residues_keep_the_sequence_gap(tmp_path, model_config):
+    from downstream.tasks.ec.dataset import process_entry
+
+    path = _write(tmp_path, "1XYZ-A", chain_of(["ALA"] * 7, drops={1: ("O",), 2: ("O",), 3: ("O",), 5: ("N",)}))
+    result, = process_entry((str(path), [("1XYZ-A", "A")], EC_SETTINGS))
+    assert result.status == "ok" and result.report["residues_missing_backbone"] == 4
+    compact, = result.samples
+    # kept residues 0, 4, 6 of the parsed chain, stored relative to the first kept one
+    assert torch.equal(compact.block_idx.long(), torch.tensor([0, 4, 6]).repeat_interleave(14))
+    sample = gb.decode_edge_free_sample(compact, gb.edge_free_schema(3, {}),
+                                        gb.edge_free_runtime_contract_from_config(model_config))
+    # gap 4 between residues 0 and 4 exceeds k=3; gap 2 between 4 and 6 does not
+    assert _tier1_pairs(sample) == {(4, 6), (6, 4)}
+
+
+def test_sequence_index_of_a_window_is_relative_to_its_first_residue(tmp_path):
+    path = _write(tmp_path, "w", chain_of(["ALA"] * 6, drops={3: ("CA",)}))
+    chain = read_chains(path, mse_to_met=True)["A"]
+    result = apply_policy(chain, MASK)
+    assert result.sequence_index == [0, 1, 2, 4, 5]
+    node = gb.build_node_sample(result.residues[2:], result.masked[2:], "w#w1",
+                                sequence_index=result.sequence_index[2:])
+    assert torch.equal(node.block_idx, torch.tensor([0, 2, 3]).repeat_interleave(14))
+
+
+def test_sequence_index_contract_fails_loudly(tmp_path):
+    node, result = _downstream_node(_write(tmp_path, "s", chain_of(["ALA", "GLY", "SER"])))
+    residues, masked = result.residues, result.masked
+    for bad in ([0, 1], [0, 2, 2], [2, 1, 3], [-1, 0, 1]):
+        with pytest.raises(ValueError, match="sequence_index"):
+            gb.build_node_sample(residues, masked, "s", sequence_index=bad)
+    contiguous = gb.build_node_sample(residues, masked, "s", sequence_index=None)
+    assert torch.equal(contiguous.block_idx, node.block_idx)
+
+
+def test_processed_data_without_the_block_index_contract_is_refused(tmp_path, model_config):
+    node, _ = _downstream_node(_write(tmp_path, "old", chain_of(["ALA", "GLY"])))
+    schema = gb.edge_free_schema(3, {})
+    stale = dict(schema, source={k: v for k, v in schema["source"].items() if k != "block_index"})
+    with pytest.raises(ValueError, match="block_index"):
+        gb.runtime_sample(gb.compact_sample(node), stale, model_config, seed=0)
 
 
 def test_complete_residues_match_the_training_builder_exactly(tmp_path):
@@ -106,7 +159,7 @@ def test_adapter_silent_shift_is_caught_by_the_downstream_path(tmp_path):
 
     chain = read_chains(path, mse_to_met=True)["A"]
     with pytest.raises(ValueError, match="incomplete sidechain .* is not masked"):
-        gb.build_node_sample(chain.residues, [False], "lys")
+        gb.build_node_sample(chain.residues, [False], "lys", sequence_index=None)
     node, result = _downstream_node(path)
     assert result.masked == [True]
     assert bool(node.downstream_masked_block.all())
@@ -115,7 +168,7 @@ def test_adapter_silent_shift_is_caught_by_the_downstream_path(tmp_path):
 def test_missing_backbone_never_reaches_the_builder(tmp_path):
     chain = read_chains(_write(tmp_path, "bb", chain_of(["ALA", "SER"], drops={1: ("O",)})), mse_to_met=True)["A"]
     with pytest.raises(ValueError, match="missing backbone"):
-        gb.build_node_sample(chain.residues, [False, False], "bb")
+        gb.build_node_sample(chain.residues, [False, False], "bb", sequence_index=None)
 
 
 def test_runtime_sample_is_deterministic_and_leaves_global_rng_alone(tmp_path, model_config):

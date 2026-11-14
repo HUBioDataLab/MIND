@@ -220,7 +220,7 @@ def test_protein_part_matches_the_ec_graph_builder_for_the_same_residues():
     records = [ResidueRecord(r.resname, r.source_resname, i, "", dict(r.atoms))
                for i, r in enumerate(pocket)]
     outcome = apply_policy(ChainRecord("test", "pocket", records, {}), parse_policy(POLICY))
-    reference = gb.build_node_sample(outcome.residues, outcome.masked, "test")
+    reference = gb.build_node_sample(outcome.residues, outcome.masked, "test", sequence_index=None)
 
     result = _built(item)
     config = _tiny_config()

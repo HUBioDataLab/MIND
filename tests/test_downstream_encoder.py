@@ -48,7 +48,7 @@ def _samples(tmp_path, config, chains):
         path = tmp_path / f"{name}.pdb"
         path.write_text(pdb_text({"A": chain_of(resnames, drops=drops)}))
         result = apply_policy(read_chains(path, mse_to_met=True)["A"], MASK)
-        node = gb.build_node_sample(result.residues, result.masked, name)
+        node = gb.build_node_sample(result.residues, result.masked, name, sequence_index=result.sequence_index)
         out.append(gb.runtime_sample(gb.compact_sample(node), gb.edge_free_schema(3, {}), config, seed=0))
     return out
 

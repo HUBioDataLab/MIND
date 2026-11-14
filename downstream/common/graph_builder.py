@@ -13,6 +13,11 @@ random-edge transform of ``core.train_pretrain``, run under a per-chain fixed se
 
 Residues must already have passed ``missing_atoms.apply_policy``; this module
 refuses incomplete residues that are not flagged as masked.
+
+``block_idx`` is the residue's position in the parsed chain, relative to the first
+residue of the sample, so residues dropped by the policy leave a gap and Tier-1
+sequence edges never join residues that are not sequence neighbours. Processed
+data records this as ``schema["source"]["block_index"]``; data without it is refused.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
-from typing import Sequence
+from typing import Optional, Sequence
 
 import torch
 from torch_geometric.data import Data
@@ -52,6 +57,7 @@ POS_CODE_VOCABULARY = sorted(
     | {f"V{index}" for index in range(1, 11)}
 )
 POS_CODE_INDEX = {code: index for index, code in enumerate(POS_CODE_VOCABULARY)}
+BLOCK_INDEX = "chain_position"  # schema["source"]["block_index"] of data built by this module
 
 _ADAPTER = None
 _CONVERTER = None
@@ -117,10 +123,29 @@ def residues_to_molecule(residues: Sequence[ResidueRecord], masked: Sequence[boo
     return UniversalMolecule(id=mol_id, dataset_type="protein", blocks=blocks, properties={})
 
 
-def build_node_sample(residues: Sequence[ResidueRecord], masked: Sequence[bool], mol_id: str) -> Data:
-    """Node-only sample identical to an edge-free chunk entry, plus ``downstream_masked_block``."""
+def _block_ids(sequence_index: Optional[Sequence[int]], num_residues: int, mol_id: str) -> torch.Tensor:
+    if sequence_index is None:
+        return torch.arange(num_residues)
+    ids = torch.as_tensor(list(sequence_index), dtype=torch.long)
+    if ids.numel() != num_residues:
+        raise ValueError(f"{mol_id}: sequence_index has {ids.numel()} entries for {num_residues} residues")
+    if int(ids.min()) < 0 or bool((ids[1:] <= ids[:-1]).any()):
+        raise ValueError(f"{mol_id}: sequence_index must be non-negative and strictly increasing")
+    return ids - ids[0]
+
+
+def build_node_sample(
+    residues: Sequence[ResidueRecord], masked: Sequence[bool], mol_id: str, *,
+    sequence_index: Optional[Sequence[int]],
+) -> Data:
+    """Node-only sample identical to an edge-free chunk entry, plus ``downstream_masked_block``.
+
+    ``sequence_index`` gives each residue's position in its parsed chain (``PolicyResult.sequence_index``);
+    ``None`` states that the residues are consecutive in the chain.
+    """
     if not residues:
         raise ValueError(f"{mol_id}: no residues to convert")
+    block_ids = _block_ids(sequence_index, len(residues), mol_id)
     molecule = residues_to_molecule(residues, masked, mol_id)
     data = _converter()._universal_to_pyg(molecule, raise_on_error=True)
     if data is None:
@@ -138,6 +163,7 @@ def build_node_sample(residues: Sequence[ResidueRecord], masked: Sequence[bool],
         dataset_type=original_dataset_type, num_nodes=int(sample.z.numel()),
     )
     validate_fixed_slot_layout(node, len(residues))
+    node.block_idx = block_ids.to(node.block_idx.dtype).repeat_interleave(SLOTS_PER_RESIDUE)
     node.downstream_masked_block = torch.tensor(list(masked), dtype=torch.bool).repeat_interleave(SLOTS_PER_RESIDUE)
     return node
 
@@ -159,7 +185,8 @@ def validate_fixed_slot_layout(sample: Data, num_residues: int) -> None:
 
 
 def edge_free_schema(sequence_neighbors_k: int, source: dict) -> dict:
-    return build_edge_free_schema("protein", POS_CODE_VOCABULARY, sequence_neighbors_k, source)
+    return build_edge_free_schema("protein", POS_CODE_VOCABULARY, sequence_neighbors_k,
+                                  {**source, "block_index": BLOCK_INDEX})
 
 
 def compact_sample(node: Data) -> Data:
@@ -189,6 +216,13 @@ def random_edge_transform(model_config) -> OptimizedProteinDynamicRandomEdges:
 
 def runtime_sample(compact: Data, schema: dict, model_config, *, seed: int) -> Data:
     """Decode a stored chain exactly like the training loader and add seeded random edges."""
+    block_index = (schema.get("source") or {}).get("block_index")
+    if block_index != BLOCK_INDEX:
+        raise ValueError(
+            f"{getattr(compact, 'mol_id', '?')}: processed data has block_index={block_index!r}, expected "
+            f"{BLOCK_INDEX!r}; it was built before dropped residues kept their sequence gap. "
+            "Reprocess it under a new processed revision"
+        )
     contract = edge_free_runtime_contract_from_config(model_config)
     sample = decode_edge_free_sample(compact, schema, contract)
     sample = normalize_legacy_atom_ids(sample)

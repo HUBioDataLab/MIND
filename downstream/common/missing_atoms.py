@@ -122,6 +122,7 @@ class PolicyResult:
     masked: List[bool]
     report: Dict[str, object]
     dropped_reason: Optional[str]
+    sequence_index: List[int]  # position of each kept residue in the parsed chain
 
 
 def _residue_label(residue: ResidueRecord) -> str:
@@ -132,10 +133,11 @@ def apply_policy(chain: ChainRecord, policy: MissingAtomPolicy) -> PolicyResult:
     """Return the residues to convert, their mask flags, and the chain QC record."""
     kept: List[ResidueRecord] = []
     masked: List[bool] = []
+    sequence_index: List[int] = []
     missing_backbone: List[str] = []
     incomplete: List[str] = []
     unexpected_atoms = 0
-    for residue in chain.residues:
+    for position, residue in enumerate(chain.residues):
         status = residue_completeness(residue)
         if status.unexpected:
             unexpected_atoms += len(status.unexpected)
@@ -148,6 +150,7 @@ def apply_policy(chain: ChainRecord, policy: MissingAtomPolicy) -> PolicyResult:
             continue
         kept.append(residue)
         masked.append(bool(status.missing_sidechain))
+        sequence_index.append(position)
         if status.missing_sidechain:
             incomplete.append(f"{_residue_label(residue)}:-{','.join(status.missing_sidechain)}")
 
@@ -178,4 +181,5 @@ def apply_policy(chain: ChainRecord, policy: MissingAtomPolicy) -> PolicyResult:
         )
     report["kept_residues"] = 0 if dropped else len(kept)
     report["masked_residues"] = 0 if dropped else int(sum(masked))
-    return PolicyResult([] if dropped else kept, [] if dropped else masked, report, dropped)
+    return PolicyResult([] if dropped else kept, [] if dropped else masked, report, dropped,
+                        [] if dropped else sequence_index)
