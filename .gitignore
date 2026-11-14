@@ -69,33 +69,6 @@ data/processed/
 data/qm9/
 docs
 /data/COCONUT
-REFACTORING_PLAN_DATA_LOADING.md
-helper_codes.txt
-
-# LaTeX
-template/
-
-#Related Papers
-papers/
-
-# Coding-agent configuration (local only)
-AGENTS.md
-CLAUDE.md
-CODEX.md
-.agents/
-.claude/
-.codex/
-Docs/development/AGENT_WORKFLOW.md
-
-# Local notes, task lists and reports
-CURRENT_TODOS.md
-MIGRATION.md
-*_RAPORU*.md
-
-# Other codes
-Docs/experimental
-repomix-output.xml
-metrics.txt
 
 # Downloaded datasets and archives
 datasets/
