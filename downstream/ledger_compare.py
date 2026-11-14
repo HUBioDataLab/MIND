@@ -220,6 +220,11 @@ def _cells(state: dict, model: str, tasks: Optional[list]) -> dict:
     return cells
 
 
+def _common_seed_stats(rows: list, seeds: set) -> dict:
+    common = [r for r in rows if r["run_seed"] in seeds]
+    return ledger_report.cell_stats(common) if common else {"mean": None, "std": None, "n_seeds": 0}
+
+
 def _decision(diff, low, high, std_a, std_b, reason) -> str:
     if diff is None:
         return "karar yok: değer tanımsız"
@@ -247,7 +252,9 @@ def compare(state: dict, a: str, b: str, *, tasks: Optional[list] = None, n_boot
         rows_a, rows_b = cells_a[key], cells_b[key]
         task, metric = key[0], key[-1]
         info = ledger.metric_info(state["catalog"], task, metric)
-        stats_a, stats_b = ledger_report.cell_stats(rows_a), ledger_report.cell_stats(rows_b)
+        # mean, std and difference over the seeds both models have: the seeds of the paired interval
+        common = {r["run_seed"] for r in rows_a} & {r["run_seed"] for r in rows_b}
+        stats_a, stats_b = _common_seed_stats(rows_a, common), _common_seed_stats(rows_b, common)
         if rows_a[0]["unit"] != rows_b[0]["unit"]:
             raise ValueError(f"{key}: units differ ({rows_a[0]['unit']} vs {rows_b[0]['unit']})")
         if info["direction"] is None:
@@ -263,8 +270,8 @@ def compare(state: dict, a: str, b: str, *, tasks: Optional[list] = None, n_boot
                       "std_a": stats_a["std"], "std_b": stats_b["std"], "n_seeds_a": stats_a["n_seeds"],
                       "n_seeds_b": stats_b["n_seeds"], "diff_b_better": diff, **boot, "n_boot": n_boot,
                       "rng_seed": rng_seed,
-                      "decision": _decision(diff, boot["ci_low"], boot["ci_high"], stats_a["std"], stats_b["std"],
-                                            boot["ci_reason"])})
+                      "decision": (_decision(diff, boot["ci_low"], boot["ci_high"], stats_a["std"], stats_b["std"],
+                                             boot["ci_reason"]) if common else f"karar yok: {boot['ci_reason']}")})
 
     def only(mine, other, name):
         loose = {(k[0], k[2], k[9], k[10], k[11]) for k in other}

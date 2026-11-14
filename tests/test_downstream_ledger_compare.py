@@ -178,6 +178,41 @@ def test_single_seed_cells_get_no_decision(tmp_path):
     assert pair["decision"] == "karar yok: tek tohum, probe-tohumu std'si tanımsız"
 
 
+# -- Seed sets: mean, std and difference come from the seeds both models share, like the interval -----------
+
+def _ledger_values(state, model, task, metric):
+    return {r["run_seed"]: r["value"] for r in state["rows"]
+            if (r["model_key"], r["task"], r["metric"], r["eval_split"], r["subset"]) == (model, task, metric, "test", "all")}
+
+
+def test_statistics_use_only_the_common_seeds(tmp_path):
+    def build(outputs):
+        for seed, noise in ((0, 0.2), (1, 1.0), (2, 1.2)):
+            _lba_run(outputs, "A", seed, noise, SHA_A)
+        for seed, noise in ((1, 0.4), (2, 0.5), (3, 3.0)):
+            _lba_run(outputs, "B", seed, noise, SHA_B)
+    state = _state(tmp_path, build)
+    pair = _pair(ledger_compare.compare(state, "A", "B", n_boot=100), "lba", "rmse")
+    a, b = _ledger_values(state, "A", "lba", "rmse"), _ledger_values(state, "B", "lba", "rmse")
+    assert pair["common_seeds"] == [1, 2] and pair["n_seeds_a"] == pair["n_seeds_b"] == 2
+    assert pair["mean_a"] == pytest.approx(np.mean([a[1], a[2]]))
+    assert pair["mean_b"] == pytest.approx(np.mean([b[1], b[2]]))
+    assert pair["std_a"] == pytest.approx(np.std([a[1], a[2]], ddof=ledger_report.STD_DDOF))
+    assert pair["diff_b_better"] == pytest.approx(pair["mean_a"] - pair["mean_b"])  # rmse: lower is better
+    assert pair["diff_b_better"] > 0 and pair["ci_low"] > 0  # the difference and its interval agree
+
+
+def test_models_without_a_common_seed_get_no_decision(tmp_path):
+    def build(outputs):
+        for seed in (0, 1):
+            _lba_run(outputs, "A", seed, 1.0, SHA_A)
+        for seed in (2, 3):
+            _lba_run(outputs, "B", seed, 0.2, SHA_B)
+    pair = _pair(ledger_compare.compare(_state(tmp_path, build), "A", "B", n_boot=50), "lba", "rmse")
+    assert pair["common_seeds"] == [] and pair["mean_a"] is None and pair["diff_b_better"] is None
+    assert pair["decision"] == "karar yok: ortak koşu tohumu yok"
+
+
 # -- S2: derived_from without a catalog average is an ordinary row (its value is still reproduced) ----------
 
 def test_derived_row_without_catalog_average_is_compared_like_a_plain_row(tmp_path):
