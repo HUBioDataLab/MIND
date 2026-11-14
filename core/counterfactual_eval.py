@@ -14,9 +14,11 @@ UniMol graph; every other atom, every protein/RNA graph and the clean
                          Edges stay those of the clean geometry, distances are recomputed.
 ``masked_pos_random``    encoder position of a masked atom := a random point drawn from
                          N(centroid, diag(std^2)) of the graph's visible atoms.
-``masked_dist_shuffle``  distances (and therefore RBF and distance-derived invariant
-                         features) of the edges at a masked atom are permuted among that
-                         atom's edges; positions and topology are unchanged.
+``masked_dist_shuffle``  each masked atom's clean distances to its neighbours are permuted
+                         among those neighbours (its distance multiset is kept), which
+                         changes RBF and distance-derived features; an edge between two
+                         masked atoms carries its source's draw in each direction.
+                         Positions and topology are unchanged.
 ``esa_edges_remove``     the ESA graph-local attention edges at masked atoms are deleted
                          (the encoder still sees their geometry).
 ``esa_edges_shuffle``    the ESA attention partners of a masked atom are replaced by random
@@ -50,6 +52,11 @@ COUNTERFACTUAL_MODES = (
     "esa_edges_shuffle",
     "masked_edges_remove",
 )
+# Revision of a mode whose definition changed. It is written to the provenance so that
+# results of different definitions never share a protocol hash. Unlisted modes record none.
+# masked_dist_shuffle 2: every masked atom keeps its distance multiset, also next to another
+# masked atom (revision 1 kept it only for the lower-indexed atom of a masked-masked pair).
+MODE_REVISIONS = {"masked_dist_shuffle": 2}
 SUPPORTED_DOMAINS = ("unimol",)
 DEFAULT_NOISE_SIGMA = 1.0
 
@@ -213,7 +220,14 @@ def _corrupt_positions(settings, pos, batch_mapping, mlm_target, seeds):
 
 
 def _shuffle_distances(settings, pos, edge_index, batch_mapping, mlm_target, seeds):
-    """Permute, for each masked atom, the distances of its edges (symmetric per pair)."""
+    """Permute, for each masked atom, the clean distances to its neighbours among those neighbours.
+
+    Each masked atom draws its own permutation over its incident pairs, so it keeps the
+    multiset of its distances. A directed edge takes the value drawn by its source when the
+    source is masked, otherwise the value drawn by its masked target (a visible atom sees
+    the same value as the masked atom). An edge between two masked atoms therefore carries,
+    in each direction, the value drawn by its source.
+    """
     num_nodes = pos.size(0)
     distances = (pos[edge_index[0]] - pos[edge_index[1]]).norm(dim=1)
     if edge_index.size(1) == 0:
@@ -221,27 +235,36 @@ def _shuffle_distances(settings, pos, edge_index, batch_mapping, mlm_target, see
     pair_of_edge, num_pairs, (lo, hi) = _undirected_pairs(edge_index, num_nodes)
     pair_distance = torch.zeros(num_pairs, device=pos.device, dtype=distances.dtype)
     pair_distance[pair_of_edge] = distances  # both directions carry the same clean distance
-    lo_masked, hi_masked = mlm_target[lo], mlm_target[hi]
-    incident = torch.where(lo_masked | hi_masked)[0]
-    if incident.numel() == 0:
+    lo_slots = torch.where(mlm_target[lo])[0]
+    hi_slots = torch.where(mlm_target[hi] & (hi != lo))[0]
+    if lo_slots.numel() + hi_slots.numel() == 0:
         return distances
-    # owner: the lower masked endpoint; its pairs form the group that is permuted
-    owner = torch.where(lo_masked[incident], lo[incident], hi[incident])
-    pair_graph = batch_mapping[lo[incident]]
-    random_key = torch.zeros(incident.numel(), dtype=torch.double)
-    for graph in torch.unique(pair_graph).tolist():
-        rows = torch.where(pair_graph == graph)[0].cpu()
+    # one slot per (masked atom, incident pair): a pair between two masked atoms has two
+    slot_pair = torch.cat((lo_slots, hi_slots))
+    owner = torch.cat((lo[lo_slots], hi[hi_slots]))
+    canonical = torch.argsort(owner * num_pairs + slot_pair)  # by (owner, pair), batch-independent per graph
+    slot_pair, owner = slot_pair[canonical], owner[canonical]
+    slot_graph = batch_mapping[owner]
+    random_key = torch.zeros(owner.numel(), dtype=torch.double)
+    for graph in torch.unique(slot_graph).tolist():
+        rows = torch.where(slot_graph == graph)[0].cpu()
         generator = _generator(seeds[graph], settings.mode)
         random_key[rows] = torch.rand(rows.numel(), generator=generator, dtype=torch.double)
     random_key = random_key.to(pos.device)
-    in_place = torch.sort(owner, stable=True).indices
     by_random = torch.argsort(random_key)
     by_random = by_random[torch.sort(owner[by_random], stable=True).indices]
-    # both orders list the owners' groups identically, so positions align group-wise
-    shuffled = pair_distance.clone()
-    shuffled[incident[in_place]] = pair_distance[incident[by_random]]
-    settings.stats["pairs_shuffled"] += int(incident.numel())
-    return shuffled[pair_of_edge]
+    # slots are grouped by owner and by_random lists the same groups in the same order
+    slot_value = pair_distance[slot_pair[by_random]]
+    from_lo = owner == lo[slot_pair]
+    lo_value, hi_value = pair_distance.clone(), pair_distance.clone()
+    lo_value[slot_pair[from_lo]] = slot_value[from_lo]
+    hi_value[slot_pair[~from_lo]] = slot_value[~from_lo]
+    src, dst = edge_index[0], edge_index[1]
+    lo_of_edge = lo[pair_of_edge]
+    src_value = torch.where(src == lo_of_edge, lo_value[pair_of_edge], hi_value[pair_of_edge])
+    dst_value = torch.where(dst == lo_of_edge, lo_value[pair_of_edge], hi_value[pair_of_edge])
+    settings.stats["distances_shuffled"] += int(owner.numel())
+    return torch.where(mlm_target[src], src_value, torch.where(mlm_target[dst], dst_value, distances))
 
 
 def _remove_incident(edge_index, mlm_target):

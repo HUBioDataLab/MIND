@@ -244,6 +244,48 @@ def test_dist_shuffle_permutes_distances_of_masked_atoms_symmetrically():
     assert changed >= 1
 
 
+def _assert_dist_shuffle_contract(inputs, out):
+    edge_index = inputs["edge_index"]
+    clean = (inputs["pos"][edge_index[0]] - inputs["pos"][edge_index[1]]).norm(dim=1)
+    masked = inputs["mlm_mask"] & _unimol_node_mask(inputs)
+    for node in torch.where(masked)[0].tolist():
+        own = edge_index[0] == node
+        assert torch.equal(torch.sort(out.edge_distances[own]).values, torch.sort(clean[own]).values), node
+    lookup = {(int(a), int(b)): float(d) for (a, b), d in zip(edge_index.t().tolist(), out.edge_distances)}
+    for a, b in lookup:
+        if not bool(masked[a]) and bool(masked[b]):
+            assert lookup[(a, b)] == lookup[(b, a)]  # a visible atom sees the masked atom's drawn value
+    untouched = ~(masked[edge_index[0]] | masked[edge_index[1]])
+    assert torch.equal(out.edge_distances[untouched], clean[untouched])
+
+
+def test_dist_shuffle_keeps_the_distance_multiset_of_two_adjacent_masked_atoms():
+    pos = torch.tensor([[0., 0., 0.], [1., 0., 0.], [0., 2., 0.], [3., 0., 0.]])
+    edges = torch.tensor([[0, 1, 0, 2, 0, 3, 1, 2, 1, 3], [1, 0, 2, 0, 3, 0, 2, 1, 3, 1]])
+    inputs = {"pos": pos, "edge_index": edges, "attention_edge_index": edges.clone(),
+              "batch_mapping": torch.zeros(4, dtype=torch.long),
+              "mlm_mask": torch.tensor([True, True, False, False]), "graph_domains": ["unimol"]}
+    changed = torch.zeros(2, dtype=torch.bool)
+    clean = (pos[edges[0]] - pos[edges[1]]).norm(dim=1)
+    for seed in range(1, 33):
+        inputs["eval_mask_seeds"] = [seed]
+        out = cfe().apply_counterfactual(cfe().build_counterfactual_settings("masked_dist_shuffle", None), **inputs)
+        _assert_dist_shuffle_contract(inputs, out)
+        for node in (0, 1):
+            own = edges[0] == node
+            changed[node] |= bool((out.edge_distances[own] != clean[own]).any())
+    assert changed.all()
+
+
+def test_dist_shuffle_contract_holds_under_dense_masking():
+    inputs = _inputs(masked=((0, 1, 2, 3, 5, 7), (2, 3, 4, 8, 9), (0,)))
+    out = cfe().apply_counterfactual(cfe().build_counterfactual_settings("masked_dist_shuffle", None), **inputs)
+    masked = inputs["mlm_mask"] & _unimol_node_mask(inputs)
+    edge_index = inputs["edge_index"]
+    assert (masked[edge_index[0]] & masked[edge_index[1]]).any()  # masked atoms share edges
+    _assert_dist_shuffle_contract(inputs, out)
+
+
 def test_dist_shuffle_has_no_effect_on_protein_graphs():
     inputs = _inputs()
     out = cfe().apply_counterfactual(cfe().build_counterfactual_settings("masked_dist_shuffle", None), **inputs)
@@ -612,6 +654,10 @@ def test_mode_changes_only_unimol_and_records_its_fields(spread_setup, mode, sig
     saved = json.loads((tmp / mode / "metrics.json").read_text())
     assert saved["counterfactual"]["mode"] == mode
     assert saved["provenance"]["counterfactual"]["mode"] == mode
+    # a redefined mode records its revision, so old and new results get different protocol hashes
+    expected_revision = 2 if mode == "masked_dist_shuffle" else None
+    assert saved["provenance"]["counterfactual"].get("mode_revision") == expected_revision
+    assert block.get("mode_revision") == expected_revision
     assert saved["provenance"]["arguments"]["counterfactual"] == mode
     # the checkpoint's own model config is unchanged by the evaluation modes
     assert saved["provenance"]["model_config"] == clean["provenance"]["model_config"]

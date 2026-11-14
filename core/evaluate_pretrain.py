@@ -77,6 +77,7 @@ from torch_geometric.loader import DataLoader as GeometricDataLoader
 from core.counterfactual_eval import (
     COUNTERFACTUAL_MODES,
     DEFAULT_NOISE_SIGMA,
+    MODE_REVISIONS,
     build_counterfactual_settings,
     validate_mode,
 )
@@ -528,6 +529,8 @@ def counterfactual_summary(args, settings, domains, metrics_domain_mlm: dict, lo
         "note": "inputs of masked UniMol atoms are corrupted for the encoder/ESA only; targets, mask and "
                 "distance-loss targets are clean, so the distance losses below see corrupted inputs",
     }
+    if args.counterfactual in MODE_REVISIONS:
+        block["mode_revision"] = MODE_REVISIONS[args.counterfactual]
     unimol = (metrics_domain_mlm or {}).get("unimol")
     if unimol is not None:
         summary = unimol["summary"]
@@ -764,7 +767,8 @@ def _evaluate(args, ckpt: Path, out: Path, accelerator, devices, ckpt_sha256: st
             "data_source": source,
             "config_yaml_path": str(Path(args.config_yaml_path).resolve()) if args.config_yaml_path else None,
             "yaml_keys_not_applied": ignored,
-            "counterfactual": {k: counterfactual_block[k] for k in ("mode", "sigma", "domains")},
+            "counterfactual": {k: counterfactual_block[k] for k in ("mode", "sigma", "domains", "mode_revision")
+                               if k in counterfactual_block},
             "masking_protocol": {k: eval_dict.get(k) for k in MASKING_KEYS},
             "masking_differs_from_checkpoint": masking_changes,
             "max_atoms_per_batch": max_atoms,
