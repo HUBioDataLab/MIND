@@ -2,8 +2,8 @@
 
 Both tasks come from Hermosilla et al. (IEConv) ``.hdf5`` structure archives with one class id per protein and
 metric = accuracy. Chain processing is the EC/GO code path (``downstream.tasks.ec.dataset.process_entry``): missing
-atoms are resolved by ``downstream.common.missing_atoms`` before the training adapter sees a residue (G5), the only
-difference being the reader (``structure_io.read_hdf5_chain``).
+atoms are resolved by ``downstream.common.missing_atoms`` before the training adapter sees a residue (the adapter
+would pad a missing sidechain atom with V and shift later atoms), the only difference being the reader (``structure_io.read_hdf5_chain``).
 
 A task module (``fold/dataset.py``, ``reaction/dataset.py``) supplies its own label reader; everything else
 (config checks, split validation, processing with QC, processed-split view, archive helpers) lives here.
@@ -73,7 +73,7 @@ def load_config(path: Path, *, expected_task: str, data_root: Optional[Path] = N
         raise ValueError(f"{path}: at least one test split is required")
     if sorted(config["expected_chain_counts"]) != sorted(splits):
         raise ValueError(f"{path}: expected_chain_counts must name every split")
-    parse_policy(config["missing_atoms"])  # UNDECIDED or malformed policies stop here
+    parse_policy(config["missing_atoms"])  # an absent, unknown or malformed policy stops here
     if data_root is not None:
         config["data_root"] = str(data_root)
         config["source_root"] = str(Path(data_root).parent)

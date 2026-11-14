@@ -1,4 +1,4 @@
-"""Contract tests of the UniMol masked-atom geometry hiding (G1, "candidate C").
+"""Contract tests of the UniMol masked-atom geometry hiding.
 
 UniMol masks single atoms but leaves the masked atom's position, its distances and its
 distance-derived features visible, so the element can be read from the geometry (99.9 %
@@ -789,8 +789,8 @@ def test_startup_logs_g1_enabled_with_threshold(monkeypatch, capsys, ckpt_path):
     out = _startup_output(
         monkeypatch, capsys, {"enabled": True, "bond_threshold_angstrom": 2.2}, ckpt_path
     )
-    lines = [line for line in out.splitlines() if "G1 masked-geometry hiding" in line]
-    assert lines == ["G1 masked-geometry hiding: ENABLED (bond_threshold_angstrom=2.2)"]
+    lines = [line for line in out.splitlines() if "UniMol masked-geometry hiding" in line]
+    assert lines == ["UniMol masked-geometry hiding: ENABLED (bond_threshold_angstrom=2.2)"]
 
 
 @pytest.mark.parametrize("ckpt_path", [None, "/nonexistent/last.ckpt"])
@@ -798,8 +798,8 @@ def test_startup_logs_g1_disabled(monkeypatch, capsys, ckpt_path):
     out = _startup_output(
         monkeypatch, capsys, {"enabled": False, "bond_threshold_angstrom": 2.1}, ckpt_path
     )
-    lines = [line for line in out.splitlines() if "G1 masked-geometry hiding" in line]
-    assert lines == ["G1 masked-geometry hiding: DISABLED"]
+    lines = [line for line in out.splitlines() if "UniMol masked-geometry hiding" in line]
+    assert lines == ["UniMol masked-geometry hiding: DISABLED"]
 
 
 # ---------------------------------------------------------------------------

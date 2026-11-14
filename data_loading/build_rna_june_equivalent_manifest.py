@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Build an immutable June-policy-equivalent manifest from current RNA PTs.
+"""Build an immutable manifest of the baseline RNA subset from current RNA PTs.
 
-The historical policy counts real non-hydrogen atoms. Current RNA graphs are
+The baseline filter policy counts real non-hydrogen atoms. Current RNA graphs are
 padded with virtual nodes, so neither ``num_nodes`` nor nucleotide length is an
 equivalent filter. This audit reads current tensors without rewriting them and
 records stable source locations for every selected molecule.
@@ -102,7 +102,7 @@ def scan_current_chunks(
     last_chunk: int,
     max_real_non_h_atoms: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Audit current PT chunks and partition graphs under the June predicate."""
+    """Audit current PT chunks and partition graphs under the baseline filter predicate."""
     if first_chunk < 0 or last_chunk < first_chunk:
         raise ValueError("chunk range must satisfy 0 <= first_chunk <= last_chunk")
     if max_real_non_h_atoms <= 0:
@@ -208,7 +208,7 @@ def build_manifest(
     expected_stale_cifs: int = 567,
     expected_raw_only_ids: tuple[str, ...] = DEFAULT_RAW_ONLY_IDS,
 ) -> dict[str, Any]:
-    """Build the current-population manifest under the exact June filter policy."""
+    """Build the current-population manifest under the exact baseline filter policy."""
     for path in (historical_raw_manifest, legacy_filtered_dir, current_manifest):
         if not path.exists():
             raise FileNotFoundError(path)

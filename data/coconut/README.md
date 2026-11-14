@@ -1,12 +1,11 @@
 # COCONUT SDF preparation scripts
 
-Scripts written by Ege (HuBioDataLab) to prepare the COCONUT 3D SDF before it is turned into
-training chunks. They were never in this repository; they are copied **unmodified** from the
-project's raw-data archive (`<ARCHIVE_DIR>/metabolite/coconut/source_ege_hubiodatalab/`)
-so that a clone can reproduce the preparation. They stream the SDF with RDKit and take file
-names on the command line (defaults are relative to `data/COCONUT/`).
+Scripts from the HUBioDataLab COCONUT workflow that prepare the COCONUT 3D SDF before it is
+turned into training chunks. They are included **unmodified** so that a clone can reproduce the
+preparation. They stream the SDF with RDKit and take file names on the command line (defaults
+are relative to `data/COCONUT/`).
 
-Pipeline used for the production set (order matters):
+Pipeline for the production set (order matters):
 
 | Step | Script | Default input → output |
 |---|---|---|
@@ -19,16 +18,15 @@ Helpers: `count_atoms_sdf.py` (element statistics), `mean_atoms_per_molecule.py`
 `find_problematic_chunks.py` (finds SDF entries whose conversion fails per chunk),
 `motif_smarts_search.py` and `smiles_scraper.py` (exploration, not part of the pipeline).
 
-The raw SDF has 5,656,564 molecule records and 329,335,057 atoms (Ege's `counts.log`).
+The raw SDF has 5,656,564 molecule records and 329,335,057 atoms (measured with `count_atoms_sdf.py`).
 `coconut_sdf_3d-09-2025.zip` is the release downloaded by `data/download_coconut.py`; the
 adapter expects the extracted file as `<data_path>/COCONUT/coconut.sdf` (rename it by hand).
 
-## Open question: which SDF produced the 497 production chunks?
+## Provenance limitation
 
-The training chunks (`<DATA_ROOT>/metabolites/processed_chunk_*`) hold 2,755,135 graphs
-(about 5,549 per chunk, which fits roughly 500 chunks of a ~2.8 M-molecule SDF). Record
-counts of the archived files (10 October): `coconut_min10atoms_allowed_elements_selected_600000.sdf`
-has 600,000 entries and `coconut_min10atoms.sdf` has 5,599,574, so neither is the source;
-the `coconut_min10atoms_allowed_elements.sdf` of step 2 is not in the archive. The exact
-input file, any subsetting and the chunk count are not recorded anywhere in the repository;
-confirm with Ege before regenerating.
+The production chunk set (`<DATA_ROOT>/metabolites/processed_chunk_*`) holds 2,755,135 graphs
+(about 5,549 per chunk, roughly 500 chunks of a ~2.8 M-molecule SDF). Neither
+`coconut_min10atoms.sdf` (5,599,574 records) nor the 600,000-molecule subset of step 3 has
+that size, and the exact input SDF, any subsetting and the chunk count are not recorded by
+these scripts. When you prepare a new chunk set, record the input file, its record count and
+the subset seed next to the chunks.

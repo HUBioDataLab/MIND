@@ -3,20 +3,20 @@ import json
 import shutil
 from tqdm import tqdm
 
-# --- AYARLAR ---
-SOURCE_JSON = "rna3db-jsons/filter.json"  # İndirdiğin filter.json yolu
-SOURCE_DIR = "raw_structures"             # Mevcut .cif dosyalarının olduğu yer
-TARGET_DIR = "filtered_structures"        # Yeni dosyaların gideceği yer
-OUTPUT_JSON = "filtered_raw_structures.json" # Yeni oluşturulacak özet dosya
-MIN_LENGTH = 20                           # Minimum nükleotid sayısı
-MAX_LENGTH = 5000                         # Maksimum nükleotid sayısı (YENİ)
+# --- SETTINGS ---
+SOURCE_JSON = "rna3db-jsons/filter.json"  # path of the downloaded filter.json
+SOURCE_DIR = "raw_structures"             # directory holding the existing .cif files
+TARGET_DIR = "filtered_structures"        # directory for the filtered copies
+OUTPUT_JSON = "filtered_raw_structures.json" # summary file to be created
+MIN_LENGTH = 20                           # minimum number of nucleotides
+MAX_LENGTH = 5000                         # maximum number of nucleotides
 
-# 1. Kaynak JSON'ı Yükle
+# 1. Load the source JSON
 print(f"Loading metadata from {SOURCE_JSON}...")
 with open(SOURCE_JSON, 'r') as f:
     full_data = json.load(f)
 
-# 2. Hedef klasörü oluştur
+# 2. Create the target directory
 if not os.path.exists(TARGET_DIR):
     os.makedirs(TARGET_DIR)
     print(f"Created directory: {TARGET_DIR}")
@@ -24,20 +24,20 @@ if not os.path.exists(TARGET_DIR):
 filtered_data = {}
 files_to_copy = []
 
-# 3. Filtreleme Mantığı
+# 3. Filtering logic
 print(f"Filtering structures ({MIN_LENGTH} <= Length <= {MAX_LENGTH})...")
 
-# Mevcut dosyaları kontrol et (sadece indirmiş olduklarını listeye al)
+# Check the existing files (keep only the ones that were downloaded)
 available_files = set(os.listdir(SOURCE_DIR))
 
 for db_id, info in full_data.items():
     filename = f"{db_id}.cif"
     
-    # Kriter 1: Dosya diskte var mı?
+    # Criterion 1: does the file exist on disk?
     if filename not in available_files:
         continue
         
-    # Kriter 2: Uzunluk kontrolü (Min ve Max aralığı)
+    # Criterion 2: length check (min and max range)
     length = info.get('length', 0)
     
     if MIN_LENGTH <= length <= MAX_LENGTH:
@@ -46,14 +46,14 @@ for db_id, info in full_data.items():
 
 print(f"Found {len(files_to_copy)} valid structures.")
 
-# 4. Dosyaları Kopyala
+# 4. Copy the files
 print(f"Copying files to {TARGET_DIR}...")
 for filename in tqdm(files_to_copy):
     src = os.path.join(SOURCE_DIR, filename)
     dst = os.path.join(TARGET_DIR, filename)
     shutil.copy2(src, dst)
 
-# 5. Yeni JSON dosyasını kaydet
+# 5. Save the new JSON file
 print(f"Saving filtered metadata to {OUTPUT_JSON}...")
 with open(OUTPUT_JSON, 'w') as f:
     json.dump(filtered_data, f, indent=2)

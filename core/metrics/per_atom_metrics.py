@@ -219,7 +219,7 @@ class PerAtomMetricsCalculator:
             support = int(y_true_binary.sum())
             
             if support == 0:
-                # Support 0 ise WandB'de gürültü yapmaması için loglamayı atlayacağız
+                # Skip atoms with zero support so they do not add noise to W&B.
                 continue 
             
             acc = accuracy_score(y_true_binary, y_pred_binary)

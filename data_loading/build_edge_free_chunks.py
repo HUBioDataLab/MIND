@@ -23,7 +23,7 @@ recorded per chunk; a chunk aborts the run when its failure fraction exceeds
 Example (detached, survives logout):
     setsid nohup python -m data_loading.build_edge_free_chunks --domain protein \\
         --manifest .../manifest_hq_1m_1024.csv --raw-dir .../raw_structures_1m_1024 \\
-        --dest-prefix <MIND_DATA_ROOT>/proteins/processed_14atom_1m_edgefree \\
+        --dest-prefix <MIND_DATA_ROOT>/proteins/processed_14atom_1m_edgefree \
         --chunk-size 4000 --workers 32 > build.log 2>&1 &
 """
 

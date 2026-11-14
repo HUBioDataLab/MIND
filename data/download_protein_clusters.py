@@ -1,5 +1,4 @@
 # data/download_protein_clusters.py
-# source /opt/anaconda3/bin/activate
 
 import argparse
 import requests
@@ -7,29 +6,29 @@ from pathlib import Path
 from tqdm import tqdm
 import os
 
-# İndirilecek dosyanın URL'si ve varsayılan adı
+# URL and default file name of the file to download
 METADATA_URL = "https://afdb-cluster.steineggerlab.workers.dev/2-repId_isDark_nMem_repLen_avgLen_repPlddt_avgPlddt_LCAtaxId.tsv.gz"
 DEFAULT_FILENAME = "representatives_metadata.tsv.gz"
 
 def download_file(url: str, out_path: Path):
     """
-    Verilen URL'den bir dosyayı stream ederek ve ilerleme çubuğu göstererek indirir.
-    Dosya zaten varsa ve boyutu doğruysa indirmeyi atlar.
+    Stream a file from the given URL to ``out_path`` with a progress bar.
+    Skip the download if the file already exists with the expected size.
     """
-    print(f"İndirme hedefi: {out_path}")
+    print(f"Download target: {out_path}")
     
     try:
         response = requests.get(url, stream=True, timeout=30)
-        response.raise_for_status()  # HTTP 4xx/5xx hataları için exception fırlatır
+        response.raise_for_status()  # raises an exception on HTTP 4xx/5xx
         
         total_size = int(response.headers.get('content-length', 0))
 
-        # Dosya zaten varsa ve boyutu eşleşiyorsa indirmeyi atla
+        # Skip the download if the file exists and its size matches
         if out_path.exists() and out_path.stat().st_size == total_size:
-            print(f"Dosya '{out_path.name}' zaten mevcut ve boyutu doğru. İndirme atlandı.")
+            print(f"File '{out_path.name}' already exists with the expected size. Download skipped.")
             return
 
-        print(f"İndiriliyor: {url}")
+        print(f"Downloading: {url}")
         with open(out_path, 'wb') as f, tqdm(
             desc=out_path.name,
             total=total_size,
@@ -41,41 +40,41 @@ def download_file(url: str, out_path: Path):
                 size = f.write(chunk)
                 pbar.update(size)
         
-        print(f"İndirme tamamlandı: {out_path}")
+        print(f"Download complete: {out_path}")
 
     except requests.exceptions.RequestException as e:
-        print(f"HATA: Dosya indirilemedi. İnternet bağlantınızı veya URL'yi kontrol edin.\n{e}")
-        # İndirme başarısız olursa yarım kalan dosyayı sil
+        print(f"ERROR: could not download the file. Check your network connection or the URL.\n{e}")
+        # Remove the partial file if the download failed
         if out_path.exists():
             out_path.unlink()
     except Exception as e:
-        print(f"Beklenmedik bir hata oluştu: {e}")
+        print(f"Unexpected error: {e}")
         if out_path.exists():
             out_path.unlink()
 
 
 def main():
-    """Ana fonksiyon."""
+    """Command-line entry point."""
     parser = argparse.ArgumentParser(
-        description="Foldseek'ten önceden hesaplanmış küme temsilcisi metadata'sını indirir."
+        description="Download the precomputed cluster-representative metadata from Foldseek."
     )
-    # Proje ana dizininden çalıştırıldığını varsayarak varsayılan yolu belirliyoruz.
+    # Default output directory: <parent of the repository>/data/proteins/afdb_clusters
     default_path = Path(__file__).resolve().parents[2] / "data" / "proteins" / "afdb_clusters"
     parser.add_argument(
         "--outdir",
         type=Path,
         default=default_path,
-        help=f"İndirilen dosyanın kaydedileceği klasör. Varsayılan: {default_path}"
+        help=f"Directory for the downloaded file. Default: {default_path}"
     )
     args = parser.parse_args()
 
-    # Çıktı klasörünü oluştur
+    # Create the output directory
     args.outdir.mkdir(parents=True, exist_ok=True)
     
-    # Tam dosya yolunu oluştur
+    # Full output file path
     output_file_path = args.outdir / DEFAULT_FILENAME
     
-    # İndirme işlemini başlat
+    # Start the download
     download_file(METADATA_URL, output_file_path)
 
 

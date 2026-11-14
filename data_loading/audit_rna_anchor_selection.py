@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Select the RNA local-frame anchor triple after P-only molecule filtering.
 
-This is a read-only Stage 1 audit. It streams the exact UniversalMolecule PKL
+This is a read-only audit. It streams the exact UniversalMolecule PKL
 sources, rejects whole molecules containing P-only blocks in memory, and never
 rewrites source PKL/CIF/PT files.
 """
@@ -443,7 +443,7 @@ def audit_anchor_selection(
     }
 
     return {
-        "stage": "stage1.6_rna_anchor_selection",
+        "stage": "rna_anchor_selection",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_kind": "training_source_pkl_streams_read_only",
         "epsilon_angstrom": epsilon,
@@ -720,7 +720,7 @@ def audit_chirality_policy_simulation(
     }
 
     return {
-        "stage": "stage1.7_rna_chirality_policy_simulation",
+        "stage": "rna_chirality_policy_simulation",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_kind": "training_source_pkl_streams_read_only",
         "epsilon_angstrom": epsilon,

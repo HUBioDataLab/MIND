@@ -1,4 +1,5 @@
-"""Bounded CPU reproductions for the 2026-09-12 documentation audit.
+"""Bounded CPU reproduction of two encoder properties: the per-graph coordination
+source in mixed batches and the RBF aggregate of masked backbone nodes.
 
 Run from the repository root with the MIND Python environment. No dataset,
 checkpoint, training loop, network request, or file output is used.

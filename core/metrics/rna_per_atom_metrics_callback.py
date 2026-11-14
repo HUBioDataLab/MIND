@@ -181,10 +181,9 @@ class PerAtomMetricsCallback(Callback):
             outputs=outputs,
         )
 
-        # 2. KRİTİK DÜZELTME: pos_code listesini düzleştir
+        # 2. Flatten the pos_code list: with batch_size > 1 PyG collates it as a
+        # list of per-graph lists ([['P', 'C1'], ['P', 'C2']]); one flat list is needed.
         raw_pos_codes = batch.pos_code
-        # Eğer batch_size > 1 ise PyG bunu [['P', 'C1'], ['P', 'C2']] gibi getirir.
-        # Bunu tek bir düz liste haline getiriyoruz:
         if isinstance(raw_pos_codes, list) and len(raw_pos_codes) > 0 and isinstance(raw_pos_codes[0], (list, tuple)):
             flattened_pos_codes = list(chain.from_iterable(raw_pos_codes))
         else:
@@ -478,7 +477,7 @@ class PerAtomMetricsCallback(Callback):
             pl_module=pl_module,
         )
 
-        # Son validation snapshot'ını sakla — on_train_end'de final tablo için kullanılacak.
+        # Keep the last validation snapshot; on_train_end prints the final table from it.
         self._last_val_metrics_snapshot = {
             'per_atom': dict(self.val_metrics.per_atom_metrics),
             'per_group': dict(self.val_metrics.per_group_metrics),
@@ -505,7 +504,7 @@ class PerAtomMetricsCallback(Callback):
         self._val_nt_block_stats = self._fresh_nt_block_stats()
 
     def on_train_end(self, trainer, pl_module):
-        """Final metric tablosu — eğitim bittikten sonra log'un en sonunda göster."""
+        """Print the final metric table at the very end of the log after training."""
         if not self.enabled:
             return
         snap = getattr(self, '_last_val_metrics_snapshot', None)
@@ -515,7 +514,7 @@ class PerAtomMetricsCallback(Callback):
         print("\n" + "="*100)
         print(f"🏁 FINAL RNA METRICS (last validation, epoch {snap['epoch']})")
         print("="*100)
-        # Snapshot'ı calculator'a geri yükle ve basit print_summary API'sini kullan
+        # Restore the snapshot into the calculator and reuse its print_summary API.
         self.val_metrics.per_atom_metrics = snap['per_atom']
         self.val_metrics.per_group_metrics = snap['per_group']
         self.val_metrics.overall_metrics = snap['overall']

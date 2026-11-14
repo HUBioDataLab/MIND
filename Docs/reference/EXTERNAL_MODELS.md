@@ -8,7 +8,7 @@ only summaries of the referenced artifact and are not MIND measurements.
 ## GET
 
 GET (*Generalist Equivariant Transformer Towards 3D Molecular Interaction Learning*, THUNLP,
-MIT license) was vendored in full until October 2026. MIND only used its PS_300 fragment
+MIT license) was once vendored in full. MIND only uses its PS_300 fragment
 tokenizer, which now lives in `data_loading/ps_tokenizer/` for the COCONUT, LBA and QM9
 adapters; the rest of the tree was removed (recoverable from Git history). MIND imports
 its own ESA implementation from `esa/`; it is not accurate to call MIND’s current

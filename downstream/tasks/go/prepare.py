@@ -63,7 +63,7 @@ def download(config: dict) -> dict:
         raise RuntimeError(f"archive did not produce {root}; raw dir holds {_list_dir(paths['raw'])}")
     for key in ("annotation_file", "test_cutoff_file"):
         if not (root / source[key]).is_file():
-            raise RuntimeError(f"{root / source[key]} not found ({key} is UNVERIFIED in task.yaml); "
+            raise RuntimeError(f"{root / source[key]} not found (check {key} in task.yaml); "
                                f"extracted dir holds {_list_dir(root)}")
     index, split_ids = {}, {}
     for split in config["splits"]:

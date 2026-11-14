@@ -233,9 +233,7 @@ def print_rna_atom_info():
     
     print("\n" + "="*80 + "\n")
 
-# ... (mevcut kodun devamına ekle)
-
-# Modelin tahmin ettiği atom numaralarını genel element isimlerine çevirir
+# Maps the atomic numbers predicted by the model to generic element names.
 ATOMIC_NUM_TO_ELEMENT = {
     15: 'P',
     8: 'O',
@@ -253,12 +251,12 @@ ATOMIC_NUM_TO_ELEMENT = {
 
 def map_atomic_num_to_rna_idx(atomic_num: int) -> int:
     """
-    Modelin bastığı atom numarasını (örn: 15), 
-    ALL_RNA_ATOMS listesindeki en mantıklı indekse (örn: 0) çevirir.
+    Map a predicted atomic number (e.g. 15) to the most plausible index
+    (e.g. 0) in ``ALL_RNA_ATOMS``.
     """
     element = ATOMIC_NUM_TO_ELEMENT.get(atomic_num, RNA_UNKNOWN_ATOM)
     
-    # Element ismine göre ALL_RNA_ATOMS içindeki İLK eşleşen indeksi döndür
+    # Return the first index in ALL_RNA_ATOMS whose name starts with the element symbol.
     for i, atom_name in enumerate(ALL_RNA_ATOMS):
         if atom_name.startswith(element):
             return i

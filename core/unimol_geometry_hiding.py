@@ -1,9 +1,9 @@
-"""Geometry hiding for masked UniMol atoms (G1, "candidate C").
+"""Geometry hiding for masked UniMol atoms.
 
 Why: UniMol masks single atoms (token 0) but leaves their position, all their distances and the
 distance-derived features visible, so the element is read from the geometry. A frozen checkpoint
-reaches 99.9 % masked-element accuracy and drops to 34 % when the position is moved by 1 A
-(core/counterfactual_eval.py, outputs/eval/g1_cf_ep330/).
+can reach near-perfect masked-element accuracy that drops sharply when the position is moved by
+1 A (measure it with core/counterfactual_eval.py).
 
 What the encoder and ESA see of a masked UniMol atom after this view:
 

@@ -8,7 +8,7 @@ true term) holds by construction and is re-checked on load.
 
 Chain processing is the EC code path (``downstream.tasks.ec.dataset.process_entry``): missing atoms are
 resolved by ``downstream.common.missing_atoms`` before the training adapter ever sees a residue, because
-the adapter pads a missing sidechain atom with V and shifts later atoms into wrong slots (G5).
+the adapter pads a missing sidechain atom with V and shifts later atoms into wrong slots.
 """
 
 from __future__ import annotations

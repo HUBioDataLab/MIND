@@ -125,7 +125,7 @@ def normalize_geometry_neutral_virtual_slot_config(
 UNIMOL_GEOMETRY_HIDING_DEFAULTS = {
     "enabled": False,
     # Distance (Angstrom) up to which two UniMol atoms count as bonded. Required when
-    # enabled; the value never depends on an element (G1 candidate C).
+    # enabled; the value never depends on an element.
     "bond_threshold_angstrom": None,
 }
 # Lower cut of every distance-proxy bond (core/molecular_encoder.py ignores d <= 0.5 A) and the
@@ -152,7 +152,7 @@ def validate_unimol_bond_threshold(value, name: str = "bond_threshold_angstrom")
 def normalize_unimol_masked_geometry_hiding_config(
     value: Optional[Dict[str, object]],
 ) -> Dict[str, object]:
-    """Validate ``unimol_masked_geometry_hiding`` (G1 candidate C); absent means disabled."""
+    """Validate ``unimol_masked_geometry_hiding``; absent means disabled."""
     if value is None:
         return dict(UNIMOL_GEOMETRY_HIDING_DEFAULTS)
     if not isinstance(value, dict):
@@ -346,7 +346,7 @@ class PretrainingConfig:
     geometry_neutral_virtual_slots: Optional[Dict[str, object]] = None
 
     # UniMol masked atoms keep only their binary bond topology in the encoder/ESA view; their
-    # position, distances and distance-derived features are hidden (G1 candidate C). Off by
+    # position, distances and distance-derived features are hidden. Off by
     # default; see core/unimol_geometry_hiding.py.
     unimol_masked_geometry_hiding: Optional[Dict[str, object]] = None
 

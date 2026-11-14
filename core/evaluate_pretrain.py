@@ -37,11 +37,11 @@ Determinism (what is guaranteed):
 ``mask_manifest.csv`` lists every graph's mask digest; ``metrics.json`` holds
 the per-domain digest, so two evaluations can be checked for identical masks.
 
-Counterfactual modes (G1 step 0, core/counterfactual_eval.py): ``--counterfactual MODE``
+Counterfactual modes (core/counterfactual_eval.py): ``--counterfactual MODE``
 corrupts, at evaluation time only, what the encoder/ESA see of the masked UniMol atoms
 (position, distances, ESA edges) while the targets, the mask and the distance-loss frame
 stay clean. protein/RNA/COCONUT graphs are untouched. The default ``none`` leaves the
-evaluation exactly as before; ``metrics.json`` gets a ``counterfactual`` block either way.
+evaluation unchanged; ``metrics.json`` gets a ``counterfactual`` block either way.
 
 UniMol masked-geometry hiding (``unimol_masked_geometry_hiding``) is a model setting, so it
 comes from the checkpoint by default (a checkpoint without the key: disabled). ``--unimol-geometry-hiding

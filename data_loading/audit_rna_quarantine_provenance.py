@@ -281,7 +281,7 @@ def audit(source_pkls: list[Path], raw_root: Path | None, max_examples: int) -> 
         quarantined_blocks - excluded_any_p_only_molecule_quarantined_blocks
     )
     return {
-        "stage": "stage1.3_rna_quarantine_provenance_audit",
+        "stage": "rna_quarantine_provenance_audit",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_pkls": [str(path.resolve()) for path in source_pkls],
         "raw_root": str(raw_root.resolve()) if raw_root else None,

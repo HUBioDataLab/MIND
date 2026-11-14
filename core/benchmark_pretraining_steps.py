@@ -146,7 +146,7 @@ class StepTimingCallback(Callback):
         }
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-        print("STAGE0_TIMING_JSON=" + json.dumps(report, sort_keys=True), flush=True)
+        print("STEP_TIMING_JSON=" + json.dumps(report, sort_keys=True), flush=True)
 
 
 def main() -> None:
@@ -185,7 +185,7 @@ def main() -> None:
             dataset_dir=config.dataset_download_dir,
             output_dir=str(args.output_dir),
             wandb_project=config.wandb_project_name,
-            wandb_run_name=config.wandb_run_name + "-stage0-100step",
+            wandb_run_name=config.wandb_run_name + "-timing-100step",
         )
     finally:
         train_pretrain.pl.Trainer = original_trainer

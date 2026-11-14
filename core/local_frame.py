@@ -1,8 +1,7 @@
 """Deterministic local coordinate frames for molecular block templates.
 
 This module is deliberately independent of adapters, PyG caches, and the
-training model. Stage 1 validates the geometry contract here before any
-runtime template integration is attempted.
+training model, so the geometry contract can be validated in isolation.
 """
 
 from dataclasses import dataclass
@@ -134,7 +133,7 @@ def rna_c2_c3_c4_frame(
 ) -> LocalFrame:
     """Build the canonical right-handed RNA frame from C2', C3', and C4'.
 
-    Contract selected by the Stage 1 source-data audit:
+    Contract:
     - origin is C3';
     - local +x points from C3' to C4';
     - local +y is the component of C3'->C2' perpendicular to +x;

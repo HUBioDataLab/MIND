@@ -187,8 +187,8 @@ def build_masked_coordinate_corruption(
 ) -> MaskedCoordinateCorruption:
     """Return clean/input coordinate views without modifying ``batch``.
 
-    Selected-target failures are carried through from Stage 3.3 and remain
-    fatal at integration time. Invalid visible legacy blocks are left
+    Selected-target failures are carried through from the frame computation and remain
+    fatal. Invalid visible legacy blocks are left
     unchanged and reported separately as context quarantines.
     """
     pos = getattr(batch, "pos", None)

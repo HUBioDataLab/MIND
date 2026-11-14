@@ -187,7 +187,7 @@ pytest -v tests/test_adapters.py tests/test_build_edge_free_chunks.py tests/test
 
 Then inspect one generated graph with `torch.load` and confirm `pos` has shape
 `[N, 3]`, all node-aligned fields have length `N`, and a protein residue still
-has 14 slots. Do not use the removed `data_loading/validate_adapters.py` path.
+has 14 slots.
 
 ## Related code
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Stage 4 audit of runtime virtual templates on real PT chunks."""
+"""Read-only audit of runtime virtual templates on real PT chunks."""
 
 from __future__ import annotations
 
@@ -367,10 +367,10 @@ def main() -> None:
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     if gate_failures:
         raise AssertionError(
-            "Stage 4 gate STOP: " + "; ".join(gate_failures)
+            "Runtime-template audit gate STOP: " + "; ".join(gate_failures)
             + f"; report={args.output}"
         )
-    print(f"STAGE4_AUDIT=GO output={args.output}", flush=True)
+    print(f"RUNTIME_TEMPLATE_AUDIT=GO output={args.output}", flush=True)
 
 
 if __name__ == "__main__":

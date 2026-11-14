@@ -873,12 +873,12 @@ def create_experiment_logger(
 
 
 def describe_unimol_geometry_hiding(config: PretrainingConfig) -> str:
-    """One startup line for G1 (unimol_masked_geometry_hiding); the model treats a missing key as disabled."""
+    """One startup line for ``unimol_masked_geometry_hiding``; the model treats a missing key as disabled."""
     hiding = getattr(config, "unimol_masked_geometry_hiding", None) or {}
     if not hiding.get("enabled", False):
-        return "G1 masked-geometry hiding: DISABLED"
+        return "UniMol masked-geometry hiding: DISABLED"
     return (
-        "G1 masked-geometry hiding: ENABLED "
+        "UniMol masked-geometry hiding: ENABLED "
         f"(bond_threshold_angstrom={hiding['bond_threshold_angstrom']})"
     )
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Stage 2 geometry-only leakage probes for fixed virtual-atom templates.
+"""Geometry-only leakage probes for fixed virtual-atom templates.
 
 The script streams the same protein/RNA UniversalMolecule sources used by the
-Stage 1 geometry audit.  Molecules are assigned deterministically to train or
+virtual-atom template geometry audit.  Molecules are assigned deterministically to train or
 validation before block sampling, so residues from one structure can never
 cross the split boundary.  Production CIF/PKL/PT files are read-only.
 
@@ -654,7 +654,7 @@ def main() -> None:
         status = "GO"
 
     report = {
-        "stage": "stage2_geometry_only_leakage_probe",
+        "stage": "geometry_only_leakage_probe",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "status": status,
         "seed": SPLIT_SEED,

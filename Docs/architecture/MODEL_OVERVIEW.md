@@ -9,7 +9,7 @@ This is an implementation description, not a claim of downstream or generative
 performance. The `core/` YAML files and what each one selects are listed in the
 [training guide](../training/TRAINING_GUIDE.md#configuration-files); the Makefile
 shortcut `CONFIG=m` is `core/pretraining_config_multidomain_1m_coconut.yaml`, the
-four-domain configuration; the old three-domain 40k baseline is
+four-domain configuration; the three-domain 40k baseline is
 `core/pretraining_config_multidomain.yaml` (`CONFIG=pretraining_config_multidomain`).
 
 ## End-to-end computation
@@ -126,10 +126,9 @@ invariant summary path and RBF path should not be assumed identical.
 explicit bonds (`bond_edge_index`, flagged by `has_explicit_bonds`) count those
 bonds, and only graphs without an explicit source use the distance proxy
 (edges of 0.5-1.85 Å). Protein and RNA graphs therefore keep the distance proxy
-in mixed batches even when other graphs carry explicit bonds (repaired on
-10 October; CPU contract tests pass and CUDA COCONUT runs have completed, but the
-matched reference-versus-repaired comparison has no log on this machine, so it was not
-run or could not be verified).
+in mixed batches even when other graphs carry explicit bonds. CPU contract tests
+cover this; a matched learning comparison against the earlier graph-global source has
+not been run, so its effect on learning is unmeasured.
 
 The metabolite/COCONUT domain is disabled in the three-domain comparison
 configuration and enabled in the three four-domain configurations and in `coconut_only`.

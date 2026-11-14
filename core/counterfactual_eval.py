@@ -1,4 +1,4 @@
-"""Counterfactual corruption of masked UniMol atoms for offline evaluation (G1 step 0).
+"""Counterfactual corruption of masked UniMol atoms for offline evaluation.
 
 The UniMol MLM target (element of a masked atom) is solvable from the atom's own
 position, its distances and its ESA neighbourhood, none of which the mask hides.

@@ -1,4 +1,4 @@
-"""Contract tests of the offline counterfactual evaluation modes (G1 step 0).
+"""Contract tests of the offline counterfactual evaluation modes.
 
 The modes corrupt what the encoder/ESA see of the masked UniMol atoms, only in
 evaluation, to measure where the masked-atom accuracy falls once geometry or

@@ -6,11 +6,32 @@ for MIND encoders.
 | Task | Kind | Data | Primary metric |
 |---|---|---|---|
 | `ec` | multi-label, 538 EC terms | DeepFRI/GearNet split, 15,550 / 1,729 / 1,919 chains, test cutoffs 30/40/50/70/95 % | Fmax (higher) |
-| `go_mf` / `go_bp` / `go_cc` | multi-label, 489 / 1,943 / 320 GO terms (counts UNVERIFIED until download) | DeepFRI nrPDB-GO split as packaged by TorchDrug (Zenodo 6622158 GeneOntology.zip), test cutoffs 30/40/50/70/95 % | Fmax (higher) |
+| `go_mf` / `go_bp` / `go_cc` | multi-label, 489 / 1,943 / 320 GO terms | DeepFRI nrPDB-GO split as packaged by TorchDrug (Zenodo 6622158 GeneOntology.zip), test cutoffs 30/40/50/70/95 % | Fmax (higher) |
 | `fold` | multi-class, 1,195 SCOPe 1.75 folds | GearNet Fold3D (Zenodo 7593591, fold3d.zip, CC BY 4.0), 12,312 / 736 / 718 / 1,272 / 1,254 (train / valid / test_fold / test_family / test_superfamily) | accuracy, one per test split |
 | `reaction` | multi-class, 384 EC numbers | IEConv ProtFunct (github.com/phermosilla/IEConv_proteins, Google Drive archive), 29,215 / 2,562 / 5,651 | accuracy |
 | `lba` | regression, pK | ATOM3D LBA (PDBbind 2019 refined, 4,463 complexes), 30 % split 3507/466/490, 60 % split 3563/448/452 | RMSE (lower) |
 | `mn_bbbp` ... `mn_qm8` (14 MoleculeNet tasks, QM9 excluded) | `multilabel_masked` (BBBP, BACE, ClinTox, Tox21, ToxCast, SIDER, HIV, PCBA, MUV) or `multitarget_regression` (ESOL, FreeSolv, Lipo, QM7, QM8) | Uni-Mol LMDB release, scaffold split as shipped; first conformer, hydrogens dropped, no cropping | ROC-AUC + PRC-AUC (classification); RMSE + MAE (regression; primary: RMSE for ESOL/FreeSolv/Lipo, MAE for QM7/QM8) |
+
+## Quick use
+
+Two locations are set outside the code: `MIND_DATA_ROOT` (where task data is downloaded and processed, laid out as
+`<MIND_DATA_ROOT>/downstream/<task>/...`) and `MIND_RESULTS_ROOT` (the results ledger and all generated reports). Pass
+them as environment variables or as Make variables, or keep them in an untracked `local.mk` (see the Makefile header).
+Baseline weights (ESM-2, SaProt) are fetched with `make ds-fetch-models BASELINES="<name> ..."` into `MIND_MODELS_ROOT`.
+
+```bash
+make ds-download TASK=<task>                 # fetch and verify the source data (CPU, network)
+make ds-process TASK=<task>                  # build the processed files (CPU)
+make ds-run MODEL=<snapshot | path/to.ckpt> NAME=<snapshot> GPU=0 PLAN=1   # print the plan, write nothing
+make ds-run MODEL=<snapshot | path/to.ckpt> NAME=<snapshot> GPU=0 TASKS=mn_bbbp,mn_bace
+make ds-status                               # state of this month's ds_* logs
+```
+
+`ds-run` embeds, probes, adds the results to the ledger and regenerates the reports. Results are stored under
+`$MIND_RESULTS_ROOT/reports`: `summary.md` (primary metric per task and head, counts of missing cells),
+`missing_cells.md` and `missing_cells.csv` (every missing cell with its category and the command that fills it),
+`tasks/<task>.md|csv` (every metric the catalog requires, such as ROC-AUC and PRC-AUC or RMSE and MAE) and
+`timeline/<task>.md|csv`. Details are in "One command per model" below.
 
 ## Pipeline
 
@@ -36,8 +57,9 @@ Training-like steps (embed, probe, fine-tune) are user-run through Make targets.
 
 ### MoleculeNet (`mn_*`)
 
-`make ds-process TASK=mn_esol` (and `ds-validate`, a read-only dry run) reads the already extracted Uni-Mol LMDB files; there is
-no download step. Output: `<source_root>/<task>/processed/<revision>/{train,valid,test}.pt` plus `qc_<split>.json/.tsv`
+`make ds-download TASK=mn_esol` fetches the Uni-Mol MoleculeNet archive (size and checksums pinned in
+`downstream/tasks/molnet/task.yaml`, verified after the download) and extracts it; all 14 tasks share one archive.
+`make ds-process TASK=mn_esol` (and `ds-validate`, a read-only dry run) reads the extracted Uni-Mol LMDB files. Output: `<source_root>/<task>/processed/<revision>/{train,valid,test}.pt` plus `qc_<split>.json/.tsv`
 and a `provenance.json`. Rules (`downstream/tasks/molnet/task.yaml`): first of the 11 conformers; hydrogens dropped;
 no atom-count cropping; molecules are never dropped for chemistry reasons but flagged and counted (flat conformers,
 rare elements mapped to id 119, one heavy atom, no heavy atom, more than 256 heavy atoms). A molecule left with no
@@ -46,7 +68,7 @@ NaN with a mask. The ligand graph is the one of the LBA "separate" ligand path (
 neighbours). The probe trains a masked BCE head (classification) or a masked MSE head on train-standardized targets
 (regression), selects the epoch by the primary metric and also reports the QC-flagged subsets of the test set.
 `downstream.finetune` refuses these kinds. Embedding with a MIND checkpoint requires CUDA and a checkpoint trained with
-`geometry_neutral_virtual_slots` (protein flag set); this path has not been run on GPU.
+`geometry_neutral_virtual_slots` (protein flag set).
 
 SaProt (`saprot_650m_pdb`, `saprot_650m_af2`, `saprot_35m_af2`) sees the residues
 MIND kept, one `<AA><3Di>` token each; the 3Di state comes from Foldseek on the
@@ -59,7 +81,7 @@ and is valid for that processed revision only.
 ## Contracts
 
 - `downstream/tasks/ec/task.yaml` must name a missing-atom policy explicitly
-  (`missing_atoms`); the checked-in value `UNDECIDED` stops processing.
+  (`missing_atoms`); processing stops if it is absent or unknown.
   See `downstream/common/missing_atoms.py` for `strict`,
   `drop_residue_missing_backbone` + `mask` / `drop_chain_if_fraction_above`.
 - Experimental structures never reach `ProteinAdapter` unchecked: its 14-slot
@@ -88,7 +110,7 @@ and is valid for that processed revision only.
 
 Data (outside Git): `<data_root>/downstream/<task>/<modality>/{raw,processed,splits,provenance.json}`.
 `processed_revision` in `task.yaml` (EC and GO: `v2`) is appended to the processed directory name; v2 reads PDB
-chain ids of two or three characters (EC v1 lost 46 chains, GO v1 lost 1,171 as `parse_error`). Every `process`
+chain ids of two or three characters, which the unsuffixed revision dropped as `parse_error`. Every `process`
 run appends its own record (command, config/input/output sha256, QC summaries) to `provenance.json`.
 EC test chains missing from `test_cutoffs.csv` raise, except the documented `test_cutoff_unlisted_chains`.
 
@@ -177,8 +199,8 @@ One task family, three tasks, one processed file per split holding all three lab
   (`unannotated_policy: exclude`, counts in `GoProcessedSplit.report`). The CAFA Fmax in
   `downstream/common/metrics.py` raises on a protein without a true term; TorchDrug instead keeps them as
   all-zero rows, so GearNet-style numbers can differ slightly. `keep_zero_rows` is refused by the loader.
-- Missing atoms: same policy and code path as EC (`process_entry`); the adapter's V-padding/slot shift (G5)
-  is never reached with an incomplete residue.
+- Missing atoms: same policy and code path as EC (`process_entry`); the adapter's V-padding/slot shift for a
+  missing sidechain atom (see Contracts) is never reached with an incomplete residue.
 - Commands: `make ds-download TASK=go_mf`, `make ds-validate TASK=go_mf` (read-only),
   `make ds-process TASK=go_mf WORKERS=16`; embed/probe/finetune take `--task go_mf|go_bp|go_cc`.
 
@@ -196,11 +218,10 @@ Id matching does not detect homologs. `make ds-leakage ...` (see the Makefile he
 
 `downstream/tasks/{fold,reaction}/` (`task.yaml`, `dataset.py`, `prepare.py`) on top of `downstream/tasks/multiclass.py`.
 
-- Structures are the archives' own `.hdf5` files (`structure_io.read_hdf5_chain`, needs `h5py`, installed in
-  `mind_esa3d` as 3.16.0 and required to process Fold and Reaction). Atom elements come from atom names; `atom_types` is not used. Chains go through the EC/GO code path
+- Structures are the archives' own `.hdf5` files (`structure_io.read_hdf5_chain`, needs `h5py`, which is required to process Fold and Reaction). Atom elements come from atom names; `atom_types` is not used. Chains go through the EC/GO code path
   (`process_entry` + missing-atom policy), so a CA-only domain is dropped and counted, never kept. `ProcessedSplit.report`
   and `qc_<split>.json` carry listed / kept / dropped counts.
-- Source and unverified items are written at the top of each `task.yaml`. Reaction's Google Drive archive has no published
+- Source notes and pinned checksums are at the top of each `task.yaml`. Reaction's Google Drive archive has no published
   size or md5: `download` stops until `archive_sha256` / `archive_bytes` are pinned after reviewing `provenance.json`.
 - Probe: cross-entropy head, validation accuracy, one accuracy per test split in `metrics.json`; `downstream.report`
   adds the GearNet-paper literature rows. Fine-tuning refuses multiclass tasks (not implemented).
@@ -212,11 +233,11 @@ Id matching does not detect homologs. `make ds-leakage ...` (see the Makefile he
 
 `downstream/ledger.py`, `ledger_report.py`, `ledger_compare.py`; the required-metric catalog is
 `downstream/ledger_catalog.yaml` (every metric a reference paper reports for a task; uncomputed ones are marked
-`code: missing` and appear as KOD-YOK).
+`code: missing` and appear as NO-CODE).
 
 What goes where: Git holds only the code (the three modules, the catalog, the Make targets and the tests). The ledger
-data and every generated report stay local under `$MIND_RESULTS_ROOT` (no default in Python; the Makefile passes
-`/home/yusuf/mind_results`), as does `literature/literature.csv`; committing the code never commits a result.
+data and every generated report stay outside Git under `$MIND_RESULTS_ROOT` (Python has no default; the Makefile passes
+its `MIND_RESULTS_ROOT`), as does `literature/literature.csv`; committing the code never commits a result.
 
 Std: ledger reports and comparisons use the sample std over run seeds (ddof=1, undefined for one seed), while
 `downstream.report` (`ds-report`) keeps ddof=0, so the same seeds can show two different std values.
@@ -228,23 +249,23 @@ Std: ledger reports and comparisons use the sample std over run seeds (ddof=1, u
 - Append-only: `MANIFEST.json` holds each file's line count and sha256; an edit outside the module stops every
   write and `verify`. Writes hold an exclusive `flock`. Re-ingesting a file (same metrics and config sha256) adds nothing.
   One model name with two checkpoint hashes is an error.
-- Reports (`reports/`, regenerated): `tasks/<task>.md|csv` (one "Ayar" section per comparable setting: protocol,
+- Reports (`reports/`, regenerated): `tasks/<task>.md|csv` (one "Setting" section per comparable setting: protocol,
   pooling, data revision and fingerprint, settings hash; superseded rows excluded), `timeline/<task>.md|csv` (all
-  statuses), `ozet_hoca.md` (primary metric per task, counts of required / computed / missing cells),
-  `eksik_hucreler.md|csv` (each missing cell with its category and the command that fills it). Literature comes from
+  statuses), `summary.md` (primary metric per task, counts of required / computed / missing cells),
+  `missing_cells.md|csv` (each missing cell with its category and the command that fills it). Literature comes from
   `<root>/literature/literature.csv` (local) and is shown in its own column, unit and protocol.
 - `ledger_compare`: cell-by-cell A vs B with probe-seed std, a paired bootstrap interval over `predictions.npz` (chains
   aligned by id; each seed's predictions must reproduce the ledger value) and the unmeasured pretraining-seed noise
   stated in a warning box, plus the expected number of chance "differences".
 - Commands: `make ds-ledger-add OUTPUTS_ROOT=<dir> [EVAL_DIRS=...]`, `ds-ledger-annotate`, `ds-ledger-report`,
   `ds-summary`, `ds-missing`, `ds-compare A=<model> B=<model>`, `ds-ledger-verify`. `ds-report` is unchanged.
-  Report models: `MODELS=...`, else `summary_models` in `<root>/comparisons.yaml`, else `DEFAULT_SUMMARY_MODELS` in
-  `ledger_report.py`; a listed model the ledger has never seen appears as `EKSİK:model-henüz-yok`, never skipped.
+  Report models: `MODELS=...`, else `summary_models` in `<root>/comparisons.yaml`, else every model of the ledger;
+  a listed model the ledger has never seen appears as `MISSING:model-not-in-ledger`, never skipped.
 - `make ds-ledger-recompute MODEL=<m> CONTROL=<m2> DATA_REVISION=<rev> [TASK=ec] [DRY_RUN=1]`: adds the macro AUPR a
   frozen probe did not record (EC/GO), computed from each seed's `predictions.npz` with the probe's own function. It
   writes nothing unless the metrics files are unchanged since ingestion, fmax and pair AUPR are reproduced exactly,
   the CONTROL model's recorded macro AUPR is reproduced by the same formula, and no macro AUPR row exists yet. New
-  rows name their source in `recomputed_from` and stay in the "Ayar" section of the file they come from.
+  rows name their source in `recomputed_from` and stay in the "Setting" section of the file they come from.
 
 ## One command per model (`make ds-run`)
 
@@ -266,7 +287,7 @@ times of other models, when there are any) and writes nothing. Logs and `summary
 - `COMPARE_TO=a,b.random_init`: every listed model goes through the same tasks, heads and seeds (what is complete
   is skipped; `.random_init` is the RANDOM_INIT=1 control of that snapshot), gets its own table, and at the end
   `ds-compare A=<each> B=MODEL` runs (BOOTSTRAP resamples). The last step of every ds-run is the ledger report
-  (`make ds-ledger-report`: `tasks/`, `timeline/`, `ozet_hoca.md`, `eksik_hucreler.*` under `$MIND_RESULTS_ROOT/reports`).
+  (`make ds-ledger-report`: `tasks/`, `timeline/`, `summary.md`, `missing_cells.*` under `$MIND_RESULTS_ROOT/reports`).
 - `COUNTERFACTUAL=1` (MODEL must be a `.ckpt` path): the `make eval-counterfactual` sweep (same arguments; CF_MODES,
   SEED, DOMAINS=unimol, EVAL_CONFIG) on the snapshot copy, one mode per GPU job after the embeddings, written to
   `<outputs root>/eval/cf_<NAME>_<stamp>/<mode>` and added to the ledger. A failing mode is listed, the others go on.
@@ -276,9 +297,9 @@ times of other models, when there are any) and writes nothing. Logs and `summary
 
 **Every long ds-* job keeps running when the terminal or SSH connection closes.** `ds-run` and `ds-probe` start in
 their own session (`setsid nohup`, no terminal) and return at once with the log path; the log's last line is
-`EXIT_CODE=<n>` of the Python command (non-zero when it failed, as `pipefail` gave before). `make ds-status [N=15]`
+`EXIT_CODE=<n>` of the Python command (non-zero when it failed). `make ds-status [N=15]`
 lists this month's `ds_*.log` files with that line (no line: still running or killed; check the process with
-`make status`). `FOREGROUND=1` runs them in the terminal as before (`| tee`); `PLAN=1` always runs in the terminal.
-`ds-embed`, `ds-finetune`, `eval-pretrain` and `eval-counterfactual` were already `nohup ... &`. Short CPU steps
+`make status`). `FOREGROUND=1` runs them in the terminal (`| tee`); `PLAN=1` always runs in the terminal.
+`ds-embed`, `ds-finetune`, `eval-pretrain` and `eval-counterfactual` also run as `nohup ... &`. Short CPU steps
 (`ds-snapshot`, `ds-report`, `ds-ledger-*`, `ds-compare`, `ds-summary`, `ds-missing`) and the data steps
-(`ds-download`/`ds-process`/`ds-validate`/`ds-leakage`, run on explicit decision) stay in the foreground.
+(`ds-download`/`ds-process`/`ds-validate`/`ds-leakage`) stay in the foreground.

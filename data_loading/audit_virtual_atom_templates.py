@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only real-source audit for fixed protein/RNA local templates.
 
-The audit streams UniversalMolecule pickle files, applies the Stage 1 target
+The audit streams UniversalMolecule pickle files, applies the target
 eligibility policy in memory, and checks the synthetic point clouds against
 the retained backbone atoms.  It never writes CIF, PKL, PT, adapter, or
 training data; only the requested JSON report is created.
@@ -326,7 +326,7 @@ def main() -> None:
         ) > 0,
     }
     report = {
-        "stage": "stage1_type_independent_local_template_points",
+        "stage": "type_independent_local_template_points",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "status": "GO" if not any(failures.values()) else "STOP",
         "thresholds_angstrom": {

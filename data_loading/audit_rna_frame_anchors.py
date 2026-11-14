@@ -301,7 +301,7 @@ def audit_rna_anchors(
     total_blocks = counts["blocks"]
     accepted_blocks = counts["accepted_exact_backbone_blocks"]
     return {
-        "stage": "stage1.2_rna_anchor_candidate_audit",
+        "stage": "rna_anchor_candidate_audit",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "root": str(root.resolve()),
         "epsilon_angstrom": epsilon,
@@ -393,7 +393,7 @@ def audit_rna_anchor_pkls(
     total_blocks = counts["blocks"]
     accepted_blocks = counts["accepted_exact_backbone_blocks"]
     return {
-        "stage": "stage1.2_rna_anchor_candidate_audit",
+        "stage": "rna_anchor_candidate_audit",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_kind": "training_source_pkl_streams",
         "source_pkls": [str(path.resolve()) for path in source_pkls],
