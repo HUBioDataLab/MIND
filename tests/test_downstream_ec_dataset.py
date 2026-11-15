@@ -68,10 +68,11 @@ def test_task_config_without_a_processed_revision_is_refused(tmp_path):
 
 
 def test_checked_in_yaml_marks_the_reprocessed_revision_and_names_the_exceptions():
-    """v2 = chains with 2/3-character ids are read; the previous revision directory stays untouched."""
+    """v3 = block_idx keeps the sequence gap of dropped residues (v2: 2/3-character chain ids are read);
+    the directories of earlier revisions stay untouched."""
     config = dataset.load_task_config()
-    assert config["processed_revision"] == "v2"
-    assert dataset.processed_dir(config).name == "torchdrug_zip_dropbb_masksc_skip1024_v2"
+    assert config["processed_revision"] == "v3"
+    assert dataset.processed_dir(config).name == "torchdrug_zip_dropbb_masksc_skip1024_v3"
     assert config["test_cutoff_unlisted_chains"] == ["7OA5-A"]
 
 
@@ -79,7 +80,7 @@ def test_build_processed_with_qc_report_and_failure_threshold(tmp_path):
     config = _write_task(tmp_path)
     assert dataset.build_processed(config, splits=["train", "valid", "test"], workers=1) == 1
     out = dataset.processed_dir(config)
-    assert out.name == "deepfri_rcsb_dropbb_masksc_skip20_v2"
+    assert out.name == "deepfri_rcsb_dropbb_masksc_skip20_v3"
     # train: 1BBB file missing -> 1/3 failed (<= 0.4); test: 25-residue chain skipped -> 1/2 (> 0.4)
     assert (out / "train.pt").is_file() and (out / "valid.pt").is_file() and not (out / "test.pt").exists()
     qc_test = json.loads((out / "qc_test.json").read_text())

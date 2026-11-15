@@ -13,8 +13,9 @@
 
 family: go
 modality: protein
-# Suffix of the processed directory name. v2 reads two-character PDB chain ids (3J9M-AK).
-processed_revision: v2
+# Suffix of the processed directory name. v2 reads two-character PDB chain ids (3J9M-AK); v3 keeps the
+# sequence gap of residues dropped for a missing backbone atom in block_idx (schema source.block_index).
+processed_revision: v3
 source_name: deepfri
 source_root: ${MIND_DATA_ROOT}/downstream/deepfri
 data_root: ${MIND_DATA_ROOT}/downstream/deepfri/go     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)

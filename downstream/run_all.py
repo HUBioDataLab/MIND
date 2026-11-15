@@ -250,10 +250,14 @@ def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, se
         if info["modality"] == "complex" and not {"unimol", "metabolite"} & set(model.domains):
             plan["notes"].append(f"{unit.key}: ligand atoms, but {model.name} saw no small-molecule domain")
         plan["units"].append(unit)
-        missing, broken = [], []
+        missing, broken, stale = [], [], []
         for split in info["splits"]:
             npz = registry.embeddings_path(unit.task, model.model_id, unit.prefix + split, root=outputs_root)
             if npz.with_suffix(".json").is_file() and npz.is_file():
+                # The embedding path carries no data revision: one built from another processed directory is not done.
+                built_from = Path(json.loads(npz.with_suffix(".json").read_text()).get("processed") or "").parent.name
+                if built_from != info["processed"][split].parent.name:
+                    stale.append(f"{npz.name} built from processed directory {built_from!r}")
                 continue
             if npz.is_file() or npz.with_suffix(".json").is_file():
                 broken.append(str(npz))
@@ -263,6 +267,9 @@ def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, se
             reason = (f"half-written embedding {broken} (.npz without .json or the reverse: an embed still running "
                       "or one that crashed); inspect it by hand")
             plan["failed"].append((f"embed {unit.key}", reason))
+        elif stale:
+            plan["failed"].append((f"embed {unit.key}", f"{stale}, but the task reads "
+                                   f"{info['processed'][info['splits'][0]].parent.name!r}; use a new OUTPUTS_ROOT"))
         elif no_data:
             plan["failed"].append((f"embed {unit.key}", f"no processed data: {no_data}"))
         elif missing:

@@ -274,7 +274,7 @@ def _fake_cache(config, split_name, *, sha=None):
 
 def test_3di_cache_dir_belongs_to_the_processed_revision(tmp_path):
     config = _write_task(tmp_path / "data", max_residues=30)
-    assert fs.cache_dir(config).name == "foldseek_3di_v2"  # the unsuffixed Oct-25 cache describes the v1 files
+    assert fs.cache_dir(config).name == "foldseek_3di_v3"  # the unsuffixed Oct-25 cache describes the v1 files
     config["processed_revision"] = ""
     assert fs.cache_dir(config).name == "foldseek_3di"
 

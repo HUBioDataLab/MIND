@@ -159,6 +159,18 @@ def test_config_loader_rejects_bad_decisions(tmp_path):
         fold.load_task_config(_without(tmp_path, base, "missing_atoms"))
 
 
+def test_processed_revision_is_required_and_names_the_processed_directory(tmp_path):
+    """v2 = block_idx keeps the sequence gap of dropped residues; the unsuffixed directory is the earlier build."""
+    for module in (fold, reaction):
+        config = module.load_task_config()
+        assert config["processed_revision"] == "v2"
+        assert module.processed_dir(config).name == f"{config['source']}_dropbb_masksc_skip1024_v2"
+        config["processed_revision"] = ""
+        assert module.processed_dir(config).name == f"{config['source']}_dropbb_masksc_skip1024"
+    with pytest.raises(ValueError, match="missing required keys.*processed_revision"):
+        fold.load_task_config(_without(tmp_path, yaml.safe_load(fold.TASK_YAML.read_text()), "processed_revision"))
+
+
 def _without(tmp_path, base, key):
     path = tmp_path / "stripped.yaml"
     path.write_text(yaml.safe_dump({k: v for k, v in base.items() if k != key}))
@@ -385,7 +397,7 @@ def test_fold_processing_applies_policy_and_keeps_integer_labels(tmp_path):
     assert multiclass.build_processed(config, labels, classes, splits=list(config["splits"]), workers=1,
                                       builder="test") == 0
     out = fold.processed_dir(config)
-    assert out.name == "fold3d_zenodo_zip_dropbb_masksc_skip1024"
+    assert out.name == "fold3d_zenodo_zip_dropbb_masksc_skip1024_v2"
     qc = json.loads((out / "qc_train.json").read_text())
     assert qc["status"] == {"ok": 3} and qc["listed_chains"] == 3 and qc["kept_chains"] == 3
     assert qc["masked_residues"] == 1 and qc["residues_missing_backbone"] == 1  # same counts as the GO fixture

@@ -195,7 +195,7 @@ def test_processing_applies_missing_atom_policy_and_branch_views_exclude_unannot
     config = _write_family(tmp_path)
     assert common.build_processed(config, splits=["train", "valid", "test"], workers=1) == 0
     out = common.processed_dir(config)
-    assert out.name == "torchprotein_go_zip_dropbb_masksc_skip1024_v2"
+    assert out.name == "torchprotein_go_zip_dropbb_masksc_skip1024_v3"
     qc = json.loads((out / "qc_train.json").read_text())
     assert qc["status"] == {"ok": 3} and qc["annotated_per_branch"] == {"mf": 2, "bp": 2, "cc": 2}
     assert qc["masked_residues"] == 1 and qc["residues_missing_backbone"] == 1

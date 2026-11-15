@@ -71,6 +71,7 @@ event["end"] = time.time()
 with open(os.environ["FAKE_EVENTS"], "a") as handle:
     handle.write(json.dumps(event) + "\n")
 '''
+REVISION = "rev_v2"  # processed directory name of the fixture data and of H.embedding_record
 LOG_NAME = re.compile(r"^(embed|probe_linear|probe_mlp|ledger_add|ledger_report)_([A-Za-z0-9_.]+)_(model_a)_(\d{8}_\d{6}_\d{3})_(\d+)\.log$")
 
 
@@ -101,13 +102,13 @@ def world(tmp_path, monkeypatch):
         splits = ["train", "val", "test"] if unit.task == "lba" else ["train", "valid", "test"]
         pooling = "concat_pocket_ligand" if unit.task == "lba" else "mean_atoms"
         return {"modality": modality, "splits": splits, "pooling": pooling,
-                "processed": {s: data / unit.key / f"{s}.pt" for s in splits}}
+                "processed": {s: data / unit.key / REVISION / f"{s}.pt" for s in splits}}
 
     def processed(*keys):
         for key in keys:
             for split in (["train", "val", "test"] if key.startswith("lba") else ["train", "valid", "test"]):
-                (data / key).mkdir(parents=True, exist_ok=True)
-                (data / key / f"{split}.pt").write_bytes(b"")
+                (data / key / REVISION).mkdir(parents=True, exist_ok=True)
+                (data / key / REVISION / f"{split}.pt").write_bytes(b"")
 
     class World:
         pass
@@ -134,12 +135,13 @@ def _events(world):
     return [json.loads(line) for line in world.events.read_text().splitlines()] if world.events.exists() else []
 
 
-def _write_embedding(world, task, model_id, split, *, json_too=True, seconds=None):
+def _write_embedding(world, task, model_id, split, *, json_too=True, seconds=None, revision=REVISION):
     out = registry.embeddings_path(task, model_id, split, root=world.outputs)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(b"npz")
     if json_too:
-        out.with_suffix(".json").write_text(json.dumps({"seconds": seconds} if seconds is not None else {}))
+        record = {"processed": f"/data/{task}/processed/{revision}/{split}.pt"}
+        out.with_suffix(".json").write_text(json.dumps(record if seconds is None else {**record, "seconds": seconds}))
 
 
 # -- plan --------------------------------------------------------------------------------------------------
@@ -178,7 +180,20 @@ def test_partial_embedding_runs_only_missing_splits_and_half_written_one_is_an_e
 def test_missing_processed_data_is_reported_per_task(world, capsys):
     world.processed("ec")
     assert world.main("--model", "model_a", "--tasks", "ec,mn_bace", "--gpus", "2", "--plan") == 1
-    assert re.search(r"ERROR  embed mn_bace: no processed data: .*mn_bace/train\.pt", capsys.readouterr().out)
+    assert re.search(r"ERROR  embed mn_bace: no processed data: .*mn_bace/rev_v2/train\.pt", capsys.readouterr().out)
+
+
+def test_embedding_of_another_processed_revision_is_an_error_never_already_complete(world, capsys):
+    """Embedding paths carry no data revision: an embedding of an older processed directory must not count as done."""
+    world.processed("ec", "mn_bace")
+    for split in ("train", "valid", "test"):
+        _write_embedding(world, "ec", "model_a", split, revision="rev_v1")
+        _write_embedding(world, "mn_bace", "model_a", split)
+    assert world.main("--model", "model_a", "--tasks", "ec,mn_bace", "--gpus", "2", "--plan") == 1
+    out = capsys.readouterr().out
+    assert re.search(r"ERROR  embed ec: .*built from processed directory 'rev_v1'.*reads 'rev_v2'", out)
+    assert "WILL SKIP  embed ec" not in out and "WILL RUN  embed ec" not in out
+    assert "WILL SKIP  embed mn_bace: already complete" in out
 
 
 def test_real_task_configs_describe_every_unit_of_all():

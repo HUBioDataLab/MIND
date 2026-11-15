@@ -109,8 +109,12 @@ and is valid for that processed revision only.
 ## Layout
 
 Data (outside Git): `<data_root>/downstream/<task>/<modality>/{raw,processed,splits,provenance.json}`.
-`processed_revision` in `task.yaml` (EC and GO: `v2`) is appended to the processed directory name; v2 reads PDB
-chain ids of two or three characters, which the unsuffixed revision dropped as `parse_error`. Every `process`
+`processed_revision` in `task.yaml` (EC and GO: `v3`; Fold and Reaction: `v2`) is appended to the processed
+directory name. EC/GO v2 reads PDB chain ids of two or three characters, which the unsuffixed revision dropped as
+`parse_error`; EC/GO v3 and Fold/Reaction v2 keep the sequence gap of dropped residues in `block_idx` (schema
+`source.block_index`), and the earlier directories are refused at load time. Embedding paths carry no data revision,
+so `ds-run` reports an embedding built from another processed directory as an error instead of skipping it: embed a
+new revision under a new `OUTPUTS_ROOT`. Every `process`
 run appends its own record (command, config/input/output sha256, QC summaries) to `provenance.json`.
 EC test chains missing from `test_cutoffs.csv` raise, except the documented `test_cutoff_unlisted_chains`.
 

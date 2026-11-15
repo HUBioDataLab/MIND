@@ -17,6 +17,9 @@
 family: fold
 task: fold
 modality: protein
+# Suffix of the processed directory name. v2 keeps the sequence gap of residues dropped for a missing backbone
+# atom in block_idx (schema source.block_index); the unsuffixed directory is the earlier build, refused at load time.
+processed_revision: v2
 source_name: gearnet
 source_root: ${MIND_DATA_ROOT}/downstream/gearnet
 data_root: ${MIND_DATA_ROOT}/downstream/gearnet/fold     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)

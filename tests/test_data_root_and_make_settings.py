@@ -23,6 +23,7 @@ no_local_mk = pytest.mark.skipif((REPO / "local.mk").exists(), reason="a local.m
 
 def _make(*args, makefiles=(), extra_env=None):
     env = {k: v for k, v in os.environ.items() if k not in LOCAL_SETTINGS}
+    env["XDG_CONFIG_HOME"] = "/nonexistent"  # keep a per-user local.mk out of the Makefile defaults under test
     env.update(extra_env or {})
     files = [arg for path in makefiles for arg in ("-f", str(path))]
     result = subprocess.run(["make", "--no-print-directory", *files, *args], cwd=REPO, env=env,

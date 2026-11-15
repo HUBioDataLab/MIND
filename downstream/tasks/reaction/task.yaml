@@ -19,6 +19,9 @@
 family: reaction
 task: reaction
 modality: protein
+# Suffix of the processed directory name. v2 keeps the sequence gap of residues dropped for a missing backbone
+# atom in block_idx (schema source.block_index); the unsuffixed directory is the earlier build, refused at load time.
+processed_revision: v2
 source_name: ieconv
 source_root: ${MIND_DATA_ROOT}/downstream/ieconv
 data_root: ${MIND_DATA_ROOT}/downstream/ieconv/reaction     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)

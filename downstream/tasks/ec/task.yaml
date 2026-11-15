@@ -6,8 +6,9 @@
 task: ec
 modality: protein
 # Suffix of the processed directory name. v2 reads 2- and 3-character PDB chain ids (4V7G-AA, 4UE3-SSS);
-# ds-embed/ds-probe read the directory of this revision.
-processed_revision: v2
+# v3 keeps the sequence gap of residues dropped for a missing backbone atom in block_idx (schema
+# source.block_index). ds-embed/ds-probe read the directory of this revision.
+processed_revision: v3
 data_root: ${MIND_DATA_ROOT}/downstream/ec/protein   # raw/, processed/, splits/, provenance.json
 
 # deepfri_rcsb: DeepFRI metadata (pinned commit, sha256 checked) + RCSB mmCIF per PDB entry.

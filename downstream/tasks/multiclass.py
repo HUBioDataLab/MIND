@@ -38,7 +38,7 @@ from downstream.tasks.ec.dataset import QC_COLUMNS, ChainResult, process_entry, 
 KIND = "multiclass"
 LENGTH_POLICIES = ("skip", "crop_windows")
 REQUIRED_KEYS = (
-    "task", "modality", "source_name", "source_root", "data_root", "source", "sources", "label_count", "id_namespace",
+    "task", "modality", "processed_revision", "source_name", "source_root", "data_root", "source", "sources", "label_count", "id_namespace",
     "splits", "train_split", "valid_split", "test_splits", "expected_chain_counts", "metric", "structure",
     "missing_atoms", "max_residues", "length_policy", "min_residues", "qc", "graph", "embedding", "probe",
     "finetune",
@@ -90,8 +90,10 @@ def task_paths(config: dict) -> Dict[str, Path]:
 
 def processed_dir(config: dict) -> Path:
     policy = parse_policy(config["missing_atoms"])
+    revision = str(config["processed_revision"])
     return task_paths(config)["processed"] / (
         f"{config['source']}_{policy.tag}_{config['length_policy']}{config['max_residues']}"
+        + (f"_{revision}" if revision else "")
     )
 
 
