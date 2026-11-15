@@ -42,15 +42,11 @@ def download_file(url: str, out_path: Path):
         
         print(f"Download complete: {out_path}")
 
-    except requests.exceptions.RequestException as e:
-        print(f"ERROR: could not download the file. Check your network connection or the URL.\n{e}")
-        # Remove the partial file if the download failed
+    except BaseException:
+        # Remove the partial file and let the error stop the run with a non-zero exit code.
         if out_path.exists():
             out_path.unlink()
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        if out_path.exists():
-            out_path.unlink()
+        raise
 
 
 def main():
