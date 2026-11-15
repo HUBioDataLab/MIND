@@ -14,6 +14,15 @@ Label-centric (macro) AUPR: one average precision per term over the proteins, th
 mean over terms (the DeepFRI definition), reported as ``macro_aupr``. A term with no true
 protein in the evaluated set has no precision-recall curve; it is left out of the mean and
 counted in ``macro_aupr_num_terms_skipped``, never counted as zero.
+
+Coverage (DeepFRI): the fraction of test proteins for which the method makes a prediction. Our probe scores
+every protein, so coverage is read at the Fmax threshold: the fraction of proteins with at least one term scored
+``>= threshold`` (the proteins that enter the precision average).
+
+IC-binned macro AUPR (DeepFRI Fig. 3f): the label-centric AUPR over the terms with information content
+``IC(term) > t``, ``IC = -log2(n_term / n_proteins)`` (DeepFRI eq. 1). DeepFRI counts proteins in UniProt-GOA;
+that table is not available here, so the probe takes the frequencies from the train split (``train_term_ic``).
+Any other IC vector can be passed to ``ic_binned_macro_aupr``.
 """
 
 from __future__ import annotations
@@ -44,7 +53,8 @@ def _check(labels: np.ndarray, scores: np.ndarray) -> tuple[np.ndarray, np.ndarr
 
 def protein_fmax(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
     labels, scores = _check(labels, scores)
-    best = {"fmax": 0.0, "threshold": float("nan"), "precision": float("nan"), "recall": float("nan")}
+    best = {"fmax": 0.0, "threshold": float("nan"), "precision": float("nan"), "recall": float("nan"),
+            "coverage": float("nan")}
     true_counts = labels.sum(axis=1)
     for threshold in THRESHOLDS:
         predicted = scores >= threshold
@@ -59,7 +69,8 @@ def protein_fmax(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
             continue
         f1 = 2 * precision * recall / (precision + recall)
         if f1 > best["fmax"]:
-            best = {"fmax": f1, "threshold": float(threshold), "precision": precision, "recall": recall}
+            best = {"fmax": f1, "threshold": float(threshold), "precision": precision, "recall": recall,
+                    "coverage": float(covered.mean())}
     return best
 
 
@@ -87,6 +98,45 @@ def label_aupr(labels: np.ndarray, scores: np.ndarray) -> Dict[str, object]:
     }
 
 
+def train_term_ic(train_labels: np.ndarray) -> np.ndarray:
+    """Information content per term, ``-log2(n_term / n_proteins)`` over the train proteins; ``inf`` for an unseen term."""
+    train_labels = np.asarray(train_labels)
+    if train_labels.ndim != 2 or train_labels.shape[0] < 1:
+        raise ValueError(f"train labels must be a 2-D array with at least one protein, got {train_labels.shape}")
+    if not np.isin(train_labels, (0, 1)).all():
+        raise ValueError("train labels must be 0/1")
+    counts = train_labels.sum(axis=0).astype(np.float64)
+    with np.errstate(divide="ignore"):
+        return -np.log2(counts / train_labels.shape[0])
+
+
+def ic_binned_macro_aupr(labels: np.ndarray, scores: np.ndarray, term_ic: np.ndarray,
+                         thresholds=(5.0, 10.0)) -> Dict[str, Dict[str, object]]:
+    """Label-centric AUPR over the terms with ``IC > t`` for each threshold ``t`` (key ``ic_gt<t>``).
+
+    A term without a true protein is skipped and counted; a bin with no evaluable term has ``macro_aupr`` None.
+    """
+    labels, scores = _check(labels, scores)
+    term_ic = np.asarray(term_ic, dtype=np.float64)
+    if term_ic.shape != (labels.shape[1],):
+        raise ValueError(f"term_ic needs one value per term ({labels.shape[1]}), got shape {term_ic.shape}")
+    if np.isnan(term_ic).any():
+        raise ValueError("term_ic contains NaN")
+    has_positive = labels.any(axis=0)
+    per_term = {term: float(average_precision_score(labels[:, term], scores[:, term]))
+                for term in np.where(has_positive)[0]}
+    result = {}
+    for threshold in thresholds:
+        in_bin = term_ic > threshold
+        values = [per_term[term] for term in np.where(in_bin & has_positive)[0]]
+        result[f"ic_gt{threshold:g}"] = {
+            "macro_aupr": float(np.mean(values)) if values else None,
+            "num_terms_evaluated": len(values),
+            "num_terms_skipped_no_positive": int((in_bin & ~has_positive).sum()),
+        }
+    return result
+
+
 def top1_accuracy(labels: np.ndarray, scores: np.ndarray) -> float:
     """Fraction of proteins whose highest-scoring term is a true term."""
     labels, scores = _check(labels, scores)
@@ -99,10 +149,17 @@ def subset_accuracy(labels: np.ndarray, scores: np.ndarray, threshold: float = 0
     return float(((scores >= threshold) == labels).all(axis=1).mean())
 
 
-def evaluate(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
+def evaluate(labels: np.ndarray, scores: np.ndarray, term_ic: np.ndarray = None,
+             ic_thresholds=(5.0, 10.0)) -> Dict[str, float]:
+    """All multi-label metrics; ``term_ic`` (one IC per term) adds the IC-binned macro AUPR.
+
+    The first IC threshold is the headline ``ic_binned_macro_aupr``; further ones are
+    ``ic_binned_macro_aupr_ic_gt<t>``. Each bin also records its term count (``<name>_num_terms``); a bin
+    without an evaluable term has the count 0 and no value.
+    """
     fmax = protein_fmax(labels, scores)
     macro = label_aupr(labels, scores)
-    return {
+    result = {
         "fmax": fmax["fmax"],
         "fmax_threshold": fmax["threshold"],
         "fmax_precision": fmax["precision"],
@@ -114,7 +171,16 @@ def evaluate(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
         "macro_aupr": macro["macro_aupr"],
         "macro_aupr_num_terms": macro["num_terms_evaluated"],
         "macro_aupr_num_terms_skipped": macro["num_terms_skipped_no_positive"],
+        "coverage": fmax["coverage"],
     }
+    if term_ic is not None:
+        bins = ic_binned_macro_aupr(labels, scores, term_ic, ic_thresholds)
+        for position, (key, entry) in enumerate(bins.items()):
+            name = "ic_binned_macro_aupr" if position == 0 else f"ic_binned_macro_aupr_{key}"
+            result[f"{name}_num_terms"] = entry["num_terms_evaluated"]
+            if entry["macro_aupr"] is not None:
+                result[name] = entry["macro_aupr"]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +305,22 @@ def balanced_accuracy(targets: np.ndarray, scores: np.ndarray) -> float:
     return float(np.mean(recalls))
 
 
+def weighted_f1(targets: np.ndarray, scores: np.ndarray) -> float:
+    """Per-class F1 averaged with the class support as weight (PEER's balanced metric, sklearn ``average="weighted"``).
+
+    A class that is only predicted (no true sample) has weight 0; a class with no true positive has F1 0.
+    """
+    targets, scores = _check_multiclass(targets, scores)
+    predicted = scores.argmax(axis=1)
+    num_classes = scores.shape[1]
+    support = np.bincount(targets, minlength=num_classes).astype(np.float64)
+    true_positive = np.bincount(targets[predicted == targets], minlength=num_classes).astype(np.float64)
+    predicted_count = np.bincount(predicted, minlength=num_classes).astype(np.float64)
+    denominator = support + predicted_count
+    f1 = np.divide(2 * true_positive, denominator, out=np.zeros(num_classes), where=denominator > 0)
+    return float((support * f1).sum() / support.sum())
+
+
 def evaluate_multiclass(targets: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
     targets, scores = _check_multiclass(targets, scores)
     top5 = np.argsort(-scores, axis=1)[:, :min(5, scores.shape[1])]
@@ -248,6 +330,7 @@ def evaluate_multiclass(targets: np.ndarray, scores: np.ndarray) -> Dict[str, fl
         "num_proteins": int(len(targets)),
         "num_classes_present": int(len(np.unique(targets))),
         "balanced_accuracy": balanced_accuracy(targets, scores),
+        "weighted_f1": weighted_f1(targets, scores),
     }
 
 

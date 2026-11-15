@@ -38,7 +38,7 @@ from torch import nn
 from downstream.common.heads import HEADS, build_head
 from downstream.common.metrics import (
     accuracy, evaluate, evaluate_multiclass, evaluate_multitask_classification, evaluate_regression,
-    multitarget_regression_errors, multitask_roc_auc, protein_fmax, rmse,
+    multitarget_regression_errors, multitask_roc_auc, protein_fmax, rmse, train_term_ic,
 )
 from downstream.common.registry import embeddings_path, new_results_dir, run_record
 from downstream.tasks import KINDS, TASKS, load_task
@@ -111,11 +111,22 @@ def _format_optional(value) -> str:
     return "undefined" if value is None else f"{value:.4f}"
 
 
-def evaluate_with_cutoffs(labels: np.ndarray, scores: np.ndarray, subsets: Dict[int, np.ndarray]) -> dict:
-    result = {"all": evaluate(labels, scores)}
+def evaluate_with_cutoffs(labels: np.ndarray, scores: np.ndarray, subsets: Dict[int, np.ndarray],
+                          **ic_options) -> dict:
+    result = {"all": evaluate(labels, scores, **ic_options)}
     for cutoff, mask in sorted(subsets.items()):
-        result[f"cutoff_{cutoff}"] = evaluate(labels[mask], scores[mask]) if mask.any() else None
+        result[f"cutoff_{cutoff}"] = evaluate(labels[mask], scores[mask], **ic_options) if mask.any() else None
     return result
+
+
+def ic_options(config: dict, train_labels: np.ndarray) -> dict:
+    """``evaluate`` keywords for the IC-binned macro AUPR: only tasks whose task.yaml has ``ic_binned_aupr`` (GO)."""
+    settings = config.get("ic_binned_aupr")
+    if settings is None:
+        return {}
+    if settings.get("ic_reference") != "train_frequency":
+        raise ValueError(f"ic_binned_aupr.ic_reference must be 'train_frequency', got {settings.get('ic_reference')!r}")
+    return {"term_ic": train_term_ic(train_labels), "ic_thresholds": tuple(float(t) for t in settings["ic_thresholds"])}
 
 
 @torch.no_grad()
@@ -285,8 +296,9 @@ def main(argv=None) -> int:
         test_scores = predict(head, tensors[test_split][0], kind=kind, scale=scale)
         val_scores = predict(head, tensors[val_split][0], kind=kind, scale=scale)
         if kind == "multilabel":
-            metrics_val = evaluate(data[val_split][1], val_scores)
-            metrics_test = evaluate_with_cutoffs(data[test_split][1], test_scores, subsets)
+            ic = ic_options(config, data[train_split][1])
+            metrics_val = evaluate(data[val_split][1], val_scores, **ic)
+            metrics_test = evaluate_with_cutoffs(data[test_split][1], test_scores, subsets, **ic)
             headline = f"val fmax {metrics_val['fmax']:.4f} test fmax {metrics_test['all']['fmax']:.4f}"
         elif kind == "multiclass":
             metrics_val = evaluate_multiclass(data[val_split][1], val_scores)

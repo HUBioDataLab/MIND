@@ -302,7 +302,7 @@ def _block_rows(block, kind: str, where: str) -> tuple[list, Optional[int], dict
             if not isinstance(value, list):
                 raise ValueError(f"{where}: field {key!r} should be a list")
             continue
-        if key in _CONTEXT_KEYS:
+        if key in _CONTEXT_KEYS or (key.startswith("ic_binned_macro_aupr") and key.endswith("_num_terms")):
             context[key] = value
             continue
         if value is not None and not _is_number(value):

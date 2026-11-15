@@ -237,7 +237,15 @@ Id matching does not detect homologs. `make ds-leakage ...` (see the Makefile he
 
 `downstream/ledger.py`, `ledger_report.py`, `ledger_compare.py`; the required-metric catalog is
 `downstream/ledger_catalog.yaml` (every metric a reference paper reports for a task; uncomputed ones are marked
-`code: missing` and appear as NO-CODE).
+`code: missing` and appear as NO-CODE; currently none).
+
+Metrics added for the catalog's former NO-CODE cells (all in `downstream/common/metrics.py`, written to `metrics.json` by
+the probe): EC/GO `coverage` (fraction of test proteins with at least one term scored at or above the Fmax threshold;
+DeepFRI's own threshold for its legend number is not stated); GO `ic_binned_macro_aupr` (label-centric AUPR over terms
+with IC > 5, plus `..._ic_gt10` for IC > 10, with the term counts; IC = -log2(train frequency) because DeepFRI's UniProt-GOA
+table is not available, thresholds in `go/task.yaml`); Fold/Reaction `weighted_f1` (per-class F1 weighted by class support,
+PEER Table 5). Runs written before these metrics lack them (`MISSING:metric-not-in-file`); `coverage` and `weighted_f1` can be
+recomputed from `predictions.npz`, `ic_binned_macro_aupr` additionally needs the train labels (the probe's `embeddings/train.npz`).
 
 What goes where: Git holds only the code (the three modules, the catalog, the Make targets and the tests). The ledger
 data and every generated report stay outside Git under `$MIND_RESULTS_ROOT` (Python has no default; the Makefile passes

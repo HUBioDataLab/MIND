@@ -70,7 +70,7 @@ def test_missing_cells_carry_a_category_and_no_cell_is_empty(tmp_path):
     assert cells and all(cells), "an empty table cell was rendered"
     assert "MISSING:seeds 2/3" in markdown
     assert "MISSING:metric-not-in-file" in markdown  # macro AUPR absent from the files
-    assert "NO-CODE" in markdown  # coverage is required by the catalog but not computed
+    assert any(r["cell"] == "MISSING:metric-not-in-file" and r["metric"] == "coverage" for r in rows)  # coded, not in the file
     assert any(r["cell"] == "MISSING:metric-not-in-file" and r["metric"] == "macro_aupr" for r in rows)
 
 
@@ -95,7 +95,7 @@ def test_missing_list_categories(tmp_path):
     state = ledger_report.load_state(root)
     missing = ledger_report.missing_cells(state, ["model_a", "po", "ghost"])
     by = {(m["task"], m["model_key"], m["metric"], m["subset"]): m["category"] for m in missing}
-    assert by[("ec", "model_a", "coverage", "all")] == "NO-CODE"
+    assert by[("ec", "model_a", "coverage", "all")] == "MISSING:metric-not-in-file"  # code exists, files predate it
     assert ("ec", "model_a", "fmax", "all") not in by
     assert by[("ec", "po", "fmax", "all")] == "OLD-REVISION-ONLY"
     assert by[("go_mf", "model_a", "fmax", "all")] == "MISSING:embedding-only"

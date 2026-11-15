@@ -21,7 +21,7 @@ metrics:
   spearman_rho: {direction: higher, unit: correlation}
   roc_auc: {direction: higher, unit: fraction}
   prc_auc: {direction: higher, unit: fraction}
-  # metrics a paper reports but our code does not compute (NO-CODE); kept here so units/directions are known
+  # DeepFRI / PEER metrics, computed by downstream/common/metrics.py (a required metric without code gets `code: missing`)
   coverage: {direction: higher, unit: fraction}
   ic_binned_macro_aupr: {direction: higher, unit: fraction}
   weighted_f1: {direction: higher, unit: fraction}
@@ -47,7 +47,7 @@ tasks:
       - {eval_split: test, subset: cutoff_95, metric: fmax, source: "GearNet T6"}
       - {eval_split: test, subset: all, metric: pair_aupr, source: "GearNet T7"}
       - {eval_split: test, subset: all, metric: macro_aupr, source: "DeepFRI"}
-      - {eval_split: test, subset: all, metric: coverage, source: "DeepFRI", code: missing}
+      - {eval_split: test, subset: all, metric: coverage, source: "DeepFRI"}
   go_mf: &go
     family: protein_function
     kind: multilabel
@@ -63,7 +63,7 @@ tasks:
       - {eval_split: test, subset: cutoff_95, metric: fmax, source: "GearNet T6"}
       - {eval_split: test, subset: all, metric: pair_aupr, source: "GearNet T7"}
       - {eval_split: test, subset: all, metric: macro_aupr, source: "DeepFRI"}
-      - {eval_split: test, subset: all, metric: ic_binned_macro_aupr, source: "DeepFRI Fig. 3e,f", code: missing}
+      - {eval_split: test, subset: all, metric: ic_binned_macro_aupr, source: "DeepFRI Fig. 3f"}
   go_bp: *go
   go_cc: *go
   fold:
@@ -83,7 +83,7 @@ tasks:
       - {eval_split: test_superfamily, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
       - {eval_split: test_family, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
       - {eval_split: test_avg, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
-      - {eval_split: test_fold, subset: all, metric: weighted_f1, source: "PEER", code: missing}
+      - {eval_split: test_fold, subset: all, metric: weighted_f1, source: "PEER T5"}
   reaction:
     family: protein_function
     kind: multiclass

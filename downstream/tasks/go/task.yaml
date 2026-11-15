@@ -50,6 +50,13 @@ expected_chain_counts: {train: 29898, valid: 3322, test: 3415}
 test_cutoffs: [30, 40, 50, 70, 95]     # 95 = the full test set (headline); 30 = the hard, remote-homolog subset
 metric: fmax                            # CAFA protein-centric Fmax (downstream/common/metrics.py); AUPR also reported
 
+# DeepFRI Fig. 3f: macro AUPR over terms with information content IC > t. DeepFRI takes IC = -log2(n_term / n) from
+# UniProt-GOA, which is not available here, so IC comes from the train-split term frequencies of the branch.
+# The first threshold is the headline cell `ic_binned_macro_aupr`; DeepFRI's text names IC > 5 and IC > 10.
+ic_binned_aupr:
+  ic_reference: train_frequency
+  ic_thresholds: [5.0, 10.0]
+
 # Chains with NO term in a branch. TorchDrug keeps them as all-zero rows; the CAFA/DeepFRI protocol evaluates only
 # annotated proteins and our Fmax raises on an empty row. Policy: exclude them per
 # branch from train/valid/test of that branch and record the counts. Only `exclude` is implemented.
