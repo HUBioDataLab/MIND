@@ -46,7 +46,9 @@ def make_molecule(atoms, target, *, ori_index, smi=None, flat_all=False, conform
     count = len(atoms)
     frames = []
     for k in range(conformers):
-        xyz = rng.normal(0.0, 1.8, (count, 3)).astype(np.float32)
+        # A zig-zag chain with 1.4 Angstrom bonds plus conformer-specific noise: a plausible Angstrom structure.
+        xyz = np.stack([1.4 * np.arange(count), 0.3 * (np.arange(count) % 2), np.zeros(count)], axis=1)
+        xyz = (xyz + rng.normal(0.0, 0.08, (count, 3))).astype(np.float32)
         if flat_all or k == conformers - 1:
             xyz[:, 2] = 0.0
         frames.append(xyz)

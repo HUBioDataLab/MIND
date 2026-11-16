@@ -24,10 +24,20 @@
 #                  `single_heavy_atom`; its graph has no edge. No molecule of the 14 data sets of this release
 #                  has 0 heavy atoms.
 #   labels         the LMDB codes a missing classification label as -1; stored as NaN plus a boolean mask.
+#   coordinates    stored in Angstrom. Every dataset declares the unit of its LMDB coordinates (`coordinate_unit`, no
+#                  default); processing multiplies by the factor of that unit (bohr 0.529177210903, CODATA 2018). The
+#                  QM7 release stores Bohr (median nearest-neighbour distance 2.64 against 1.37-1.46 for the other
+#                  13 sets; the heavy-atom skeleton of 1923 of 1963 molecules equals the SMILES graph after the
+#                  conversion, 1 before it). After conversion the median over molecules of the per-molecule median
+#                  nearest-neighbour distance of each split must lie in `plausible_median_nn_angstrom`, else
+#                  processing stops naming the task.
 
 family: molnet
 modality: small_molecule
+# Default revision of the processed directory; a dataset entry may override it. QM7 is v2 (Bohr coordinates converted
+# to Angstrom); a v1 QM7 directory holds unconverted coordinates and is refused at load time.
 processed_revision: v1
+plausible_median_nn_angstrom: [1.0, 2.0]
 source_name: unimol_molnet
 source_root: ${MIND_DATA_ROOT}/downstream/unimol_molnet      # task data_root = <source_root>/<task>
 raw_subdir: raw/extracted/molecular_property_prediction
@@ -88,17 +98,17 @@ finetune:
 # labels; targets with one class in a split are skipped and counted. Regression: RMSE and MAE averaged over targets;
 # the primary (early stopping) metric is the one Uni-Mol reports: RMSE for ESOL/FreeSolv/Lipophilicity, MAE for QM7/QM8.
 datasets:
-  bbbp: {task: mn_bbbp, kind: multilabel_masked, num_targets: 1, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1631, valid: 204, test: 204}}
-  bace: {task: mn_bace, kind: multilabel_masked, num_targets: 1, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1210, valid: 151, test: 152}}
-  clintox: {task: mn_clintox, kind: multilabel_masked, num_targets: 2, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1182, valid: 148, test: 148}}
-  tox21: {task: mn_tox21, kind: multilabel_masked, num_targets: 12, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 6264, valid: 783, test: 784}}
-  toxcast: {task: mn_toxcast, kind: multilabel_masked, num_targets: 617, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 6860, valid: 858, test: 858}}
-  sider: {task: mn_sider, kind: multilabel_masked, num_targets: 27, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1141, valid: 143, test: 143}}
-  hiv: {task: mn_hiv, kind: multilabel_masked, num_targets: 1, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 32901, valid: 4113, test: 4113}}
-  pcba: {task: mn_pcba, kind: multilabel_masked, num_targets: 128, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 350343, valid: 43793, test: 43793}}
-  muv: {task: mn_muv, kind: multilabel_masked, num_targets: 17, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 74469, valid: 9309, test: 9309}}
-  esol: {task: mn_esol, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 902, valid: 113, test: 113}}
-  freesolv: {task: mn_freesolv, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 513, valid: 64, test: 65}}
-  lipo: {task: mn_lipo, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 3360, valid: 420, test: 420}}
-  qm7dft: {task: mn_qm7, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: mae, expected_counts: {train: 5464, valid: 685, test: 681}}
-  qm8dft: {task: mn_qm8, kind: multitarget_regression, num_targets: 12, metrics: [rmse, mae], primary_metric: mae, expected_counts: {train: 17428, valid: 2179, test: 2179}}
+  bbbp: {coordinate_unit: angstrom, task: mn_bbbp, kind: multilabel_masked, num_targets: 1, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1631, valid: 204, test: 204}}
+  bace: {coordinate_unit: angstrom, task: mn_bace, kind: multilabel_masked, num_targets: 1, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1210, valid: 151, test: 152}}
+  clintox: {coordinate_unit: angstrom, task: mn_clintox, kind: multilabel_masked, num_targets: 2, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1182, valid: 148, test: 148}}
+  tox21: {coordinate_unit: angstrom, task: mn_tox21, kind: multilabel_masked, num_targets: 12, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 6264, valid: 783, test: 784}}
+  toxcast: {coordinate_unit: angstrom, task: mn_toxcast, kind: multilabel_masked, num_targets: 617, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 6860, valid: 858, test: 858}}
+  sider: {coordinate_unit: angstrom, task: mn_sider, kind: multilabel_masked, num_targets: 27, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 1141, valid: 143, test: 143}}
+  hiv: {coordinate_unit: angstrom, task: mn_hiv, kind: multilabel_masked, num_targets: 1, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 32901, valid: 4113, test: 4113}}
+  pcba: {coordinate_unit: angstrom, task: mn_pcba, kind: multilabel_masked, num_targets: 128, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 350343, valid: 43793, test: 43793}}
+  muv: {coordinate_unit: angstrom, task: mn_muv, kind: multilabel_masked, num_targets: 17, metrics: [roc_auc, prc_auc], primary_metric: roc_auc, expected_counts: {train: 74469, valid: 9309, test: 9309}}
+  esol: {coordinate_unit: angstrom, task: mn_esol, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 902, valid: 113, test: 113}}
+  freesolv: {coordinate_unit: angstrom, task: mn_freesolv, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 513, valid: 64, test: 65}}
+  lipo: {coordinate_unit: angstrom, task: mn_lipo, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 3360, valid: 420, test: 420}}
+  qm7dft: {processed_revision: v2, coordinate_unit: bohr, task: mn_qm7, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: mae, expected_counts: {train: 5464, valid: 685, test: 681}}
+  qm8dft: {coordinate_unit: angstrom, task: mn_qm8, kind: multitarget_regression, num_targets: 12, metrics: [rmse, mae], primary_metric: mae, expected_counts: {train: 17428, valid: 2179, test: 2179}}

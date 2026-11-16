@@ -64,7 +64,11 @@ and a `provenance.json`. Rules (`downstream/tasks/molnet/task.yaml`): first of t
 no atom-count cropping; molecules are never dropped for chemistry reasons but flagged and counted (flat conformers,
 rare elements mapped to id 119, one heavy atom, no heavy atom, more than 256 heavy atoms). A molecule left with no
 heavy atom is kept but cannot be embedded: loading its graph raises. Missing classification labels (-1 in the LMDB) become
-NaN with a mask. The ligand graph is the one of the LBA "separate" ligand path (`dataset_type="unimol"`, 5 A radius, 64
+NaN with a mask. Coordinates are stored in Angstrom: every dataset declares the unit of its LMDB coordinates in
+`task.yaml` (`coordinate_unit`, no default; QM7 stores Bohr and is converted by 0.529177210903), and processing stops
+when the median nearest-neighbour distance of a split is outside `plausible_median_nn_angstrom` (1.0-2.0; the real
+sets give 1.37-1.46), naming the task. QM7 is processed revision `v2` (the other 13 stay `v1`); a QM7 `v1` file is
+refused at load time. The ligand graph is the one of the LBA "separate" ligand path (`dataset_type="unimol"`, 5 A radius, 64
 neighbours). The probe trains a masked BCE head (classification) or a masked MSE head on train-standardized targets
 (regression), selects the epoch by the primary metric and also reports the QC-flagged subsets of the test set.
 `downstream.finetune` refuses these kinds. Embedding with a MIND checkpoint requires CUDA and a checkpoint trained with
@@ -109,7 +113,7 @@ and is valid for that processed revision only.
 ## Layout
 
 Data (outside Git): `<data_root>/downstream/<task>/<modality>/{raw,processed,splits,provenance.json}`.
-`processed_revision` in `task.yaml` (EC and GO: `v3`; Fold and Reaction: `v2`) is appended to the processed
+`processed_revision` in `task.yaml` (EC and GO: `v3`; Fold, Reaction and MoleculeNet QM7: `v2`) is appended to the processed
 directory name. EC/GO v2 reads PDB chain ids of two or three characters, which the unsuffixed revision dropped as
 `parse_error`; EC/GO v3 and Fold/Reaction v2 keep the sequence gap of dropped residues in `block_idx` (schema
 `source.block_index`), and the earlier directories are refused at load time. Embedding paths carry no data revision,

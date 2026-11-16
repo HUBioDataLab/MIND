@@ -8,6 +8,9 @@ Processing rules (``task.yaml``):
 
 * the Uni-Mol scaffold split of the LMDB files is the split; nothing is re-split;
 * the FIRST conformer (index 0) of the 11 per molecule is used; the last one is Uni-Mol's flat fallback and is ignored;
+* coordinates are stored in Angstrom: each dataset declares the unit of its LMDB coordinates (QM7: Bohr) and the
+  conversion is applied before anything is stored; a split whose median nearest-neighbour distance is not a plausible
+  Angstrom value is refused;
 * hydrogens are dropped (counted); no atom-count cropping (molecules above 256 heavy atoms are only counted);
 * molecules are never dropped for chemistry reasons: flat conformers, rare elements (id 119 at graph-build time),
   a single heavy atom, no heavy atom at all and more than 256 heavy atoms are flagged and counted instead;
@@ -50,11 +53,14 @@ CLASSIFICATION_KIND = "multilabel_masked"
 REGRESSION_KIND = "multitarget_regression"
 MOLNET_KINDS = (CLASSIFICATION_KIND, REGRESSION_KIND)
 REQUIRED_KEYS = (
-    "family", "modality", "processed_revision", "source_name", "source_root", "raw_subdir", "archive", "splits",
+    "family", "modality", "processed_revision", "plausible_median_nn_angstrom", "source_name", "source_root",
+    "raw_subdir", "archive", "splits",
     "conformer", "hydrogens", "max_atoms_policy", "report_atom_threshold", "missing_classification_code", "embedding",
     "probe", "finetune", "datasets",
 )
-DATASET_KEYS = ("task", "kind", "num_targets", "metrics", "primary_metric", "expected_counts")
+DATASET_KEYS = ("task", "kind", "num_targets", "metrics", "primary_metric", "expected_counts", "coordinate_unit")
+# Factor to Angstrom of every unit a dataset may declare for its LMDB coordinates (Bohr: CODATA 2018).
+COORDINATE_UNIT_TO_ANGSTROM = {"angstrom": 1.0, "bohr": 0.529177210903}
 ARCHIVE_KEYS = ("url", "name", "bytes", "md5", "sha256", "extract_subdir")
 REQUIRED_RECORD_KEYS = frozenset(("atoms", "coordinates", "smi", "scaffold", "target", "ori_index"))
 FLAG_NAMES = (
@@ -119,6 +125,12 @@ def load_task_config(path: Path = TASK_YAML, *, data_root: Optional[Path] = None
         raise ValueError(f"dataset {dataset}: kind must be one of {MOLNET_KINDS}")
     if int(entry["num_targets"]) < 1:
         raise ValueError(f"dataset {dataset}: num_targets must be positive")
+    if entry["coordinate_unit"] not in COORDINATE_UNIT_TO_ANGSTROM:
+        raise ValueError(f"dataset {dataset}: coordinate_unit {entry['coordinate_unit']!r} is not one of "
+                         f"{sorted(COORDINATE_UNIT_TO_ANGSTROM)}")
+    low, high = (float(v) for v in config["plausible_median_nn_angstrom"])
+    if not 0.0 < low < high:
+        raise ValueError(f"{path}: plausible_median_nn_angstrom must be [low, high] with 0 < low < high")
     if sorted(entry["expected_counts"]) != sorted(config["splits"]):
         raise ValueError(f"dataset {dataset}: expected_counts must name every split")
     wanted = {"roc_auc", "prc_auc"} if entry["kind"] == CLASSIFICATION_KIND else {"rmse", "mae"}
@@ -134,6 +146,9 @@ def load_task_config(path: Path = TASK_YAML, *, data_root: Optional[Path] = None
         config["source_root"] = str(Path(data_root).parent)
     config["expected_counts"] = {k: int(v) for k, v in entry["expected_counts"].items()}
     config["num_targets"] = int(entry["num_targets"])
+    config["coordinate_scale"] = COORDINATE_UNIT_TO_ANGSTROM[entry["coordinate_unit"]]
+    config["plausible_median_nn_angstrom"] = (low, high)
+    config["processed_revision"] = str(config["processed_revision"])
     return config
 
 
@@ -207,7 +222,7 @@ class Molecule:
     smiles: str
     scaffold: str
     elements: Tuple[str, ...]          # heavy atoms of conformer 0, input order
-    positions: np.ndarray              # [L, 3] float32
+    positions: np.ndarray              # [L, 3] float32, Angstrom (converted from the dataset's declared unit)
     labels: np.ndarray                 # [T] float32, NaN = missing
     total_atoms: int
     hydrogens_removed: int
@@ -273,7 +288,8 @@ def convert_record(record: object, *, config: dict, where: str) -> Molecule:
     heavy = [i for i, atom in enumerate(atoms) if atom != "H"]
     elements = tuple(atoms[i] for i in heavy)
     rare = tuple(sorted({e for e in elements if element_to_atomic_number(e) == RARE_ATOMIC_NUMBER}))
-    positions = np.asarray(conformers[0], dtype=np.float32)[heavy].reshape(len(heavy), 3)
+    positions = (np.asarray(conformers[0], dtype=np.float64)[heavy].reshape(len(heavy), 3)
+                 * config["coordinate_scale"]).astype(np.float32)
     flags = {
         "all_conformers_flat": all(flat),
         "first_conformer_flat": flat[0],
@@ -342,6 +358,43 @@ def _qc_summary(config: dict, split: str, molecules: Sequence[Molecule], labels:
     }
 
 
+def median_nearest_neighbour(molecules: Sequence[Molecule]) -> Tuple[float, int]:
+    """Median over molecules of the per-molecule median nearest-neighbour distance (heavy atoms, first conformer).
+
+    Molecules with fewer than two heavy atoms and those with a flat first conformer (RDKit failed; their coordinates
+    are not a 3-D structure) are skipped. Returns ``(median, number of molecules used)``; ``(nan, 0)`` when none is left.
+    """
+    per_molecule = []
+    for m in molecules:
+        if len(m.elements) < 2 or m.flags["first_conformer_flat"]:
+            continue
+        gaps = np.linalg.norm(m.positions[:, None, :] - m.positions[None, :, :], axis=-1)
+        np.fill_diagonal(gaps, np.inf)
+        per_molecule.append(float(np.median(gaps.min(axis=1))))
+    return (float(np.median(per_molecule)), len(per_molecule)) if per_molecule else (float("nan"), 0)
+
+
+def check_coordinate_scale(config: dict, split: str, molecules: Sequence[Molecule]) -> dict:
+    """Unit guard on the converted coordinates of one split; raises when they are not plausible Angstrom values.
+
+    Bond lengths between heavy atoms are 1.2-1.6 Angstrom, so the median nearest-neighbour distance of a set in
+    Angstrom is about 1.4; the same set in Bohr gives about 2.6 and in nanometres about 0.14. The accepted range is
+    ``plausible_median_nn_angstrom``. Returns the QC entry (unit, factor, median, range).
+    """
+    low, high = config["plausible_median_nn_angstrom"]
+    median, used = median_nearest_neighbour(molecules)
+    if used == 0:
+        raise ValueError(f"{config['task']} {split}: no molecule with a 3-D conformer and two heavy atoms, so the "
+                         "coordinate unit cannot be checked")
+    if not low <= median <= high:
+        raise ValueError(
+            f"{config['task']} {split}: median nearest-neighbour distance {median:.3f} after converting from "
+            f"{config['coordinate_unit']} (factor {config['coordinate_scale']}) is outside the plausible Angstrom range "
+            f"[{low}, {high}]; the declared coordinate_unit of dataset {config['dataset']} in task.yaml is probably wrong")
+    return {"declared_unit": config["coordinate_unit"], "scale_to_angstrom": config["coordinate_scale"],
+            "median_nn_angstrom": round(median, 4), "molecules_checked": used, "plausible_range": [low, high]}
+
+
 def process_split(config: dict, split: str, owner: Dict[int, str]) -> Tuple[dict, List[Molecule], dict]:
     """Read one LMDB split into ``(payload, molecules, summary)``; ``owner`` tracks ``ori_index`` across splits."""
     path = lmdb_path(config, split)
@@ -362,10 +415,13 @@ def process_split(config: dict, split: str, owner: Dict[int, str]) -> Tuple[dict
     positions = (np.concatenate([m.positions for m in molecules]) if offsets[-1]
                  else np.zeros((0, 3), np.float32)).astype(np.float32)
     summary = _qc_summary(config, split, molecules, labels)
+    summary["coordinates"] = check_coordinate_scale(config, split, molecules)
     ids = [f"{config['dataset']}_{m.ori_index}" for m in molecules]
     payload = {
         "schema": {"format": "unimol_molnet_v1", "conformer": "first", "hydrogens": "dropped",
-                   "source": config["source_name"], "revision": str(config["processed_revision"])},
+                   "source": config["source_name"], "revision": str(config["processed_revision"]),
+                   "coordinate_unit": "angstrom", "coordinate_source_unit": config["coordinate_unit"],
+                   "coordinate_scale": config["coordinate_scale"]},
         "kind": config["kind"], "task": config["task"], "dataset": config["dataset"], "split": split,
         "num_targets": config["num_targets"], "ids": ids, "smiles": [m.smiles for m in molecules],
         "scaffolds": [m.scaffold for m in molecules],
@@ -434,6 +490,30 @@ def build_processed(config: dict, *, splits: Sequence[str], config_path: Path, d
 # Processed split
 # ---------------------------------------------------------------------------
 
+def check_schema_matches_task_yaml(payload: dict, path: Path) -> None:
+    """Refuse a processed split of another revision than task.yaml declares for its dataset, and any split whose
+    dataset is declared in a unit other than Angstrom but whose payload does not record the conversion.
+
+    Only QM7 (Bohr) has a revision above the family default; the v1 files of the other 13 datasets are unchanged.
+    """
+    schema = payload["schema"]
+    values = _read_yaml(TASK_YAML)
+    if payload["dataset"] not in values["datasets"]:
+        raise ValueError(f"{path}: unknown MoleculeNet dataset {payload['dataset']!r}")
+    entry = values["datasets"][payload["dataset"]]
+    revision = str(entry.get("processed_revision", values["processed_revision"]))
+    if str(schema.get("revision")) != revision:
+        raise ValueError(
+            f"{path}: processed with revision {schema.get('revision')!r} but task.yaml declares {revision!r} for "
+            f"{entry['task']}; the older data is not valid for this task (QM7 v1 coordinates are in Bohr, not "
+            "Angstrom): reprocess with `make ds-process TASK=" + entry["task"] + "`")
+    unit = entry["coordinate_unit"]
+    if unit != "angstrom" and (schema.get("coordinate_source_unit") != unit or schema.get("coordinate_unit") != "angstrom"
+                               or schema.get("coordinate_scale") != COORDINATE_UNIT_TO_ANGSTROM[unit]):
+        raise ValueError(f"{path}: {entry['task']} coordinates are declared in {unit} but the file does not record the "
+                         f"conversion to Angstrom (schema {schema}); reprocess it")
+
+
 class MolnetProcessedSplit:
     """One processed split: ids, labels (NaN = missing) with mask, flags and the first-conformer heavy atoms.
 
@@ -449,6 +529,7 @@ class MolnetProcessedSplit:
                 raise ValueError(f"{self.path}: processed split lacks {key!r}")
         if payload["kind"] not in MOLNET_KINDS:
             raise ValueError(f"{self.path}: unknown kind {payload['kind']!r}")
+        check_schema_matches_task_yaml(payload, self.path)
         count = len(payload["ids"])
         targets = int(payload["num_targets"])
         labels, mask = payload["labels"].numpy(), payload["label_mask"].numpy()
