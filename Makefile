@@ -292,7 +292,8 @@ eval-counterfactual:
 #   make ds-validate TASK=mn_esol        validate reads and checks without writing; probe/report work as for the other tasks)
 #   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D|saprot_650m_pdb> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
-#   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]
+#   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1] [SEEDS="0 1 2"] [OUTPUTS_ROOT=<dir>]
+#        (one GPU; every task kind; settings from the task.yaml finetune block, FT_ARGS="--epochs 2" overrides them)
 #   make ds-report TASK=ec
 # LBA adds SPLIT_TAG=identity30|identity60 and REPRESENTATION=joint|separate to
 # ds-embed and ds-probe (ds-finetune takes SPLIT_TAG only; it is joint-only).
@@ -305,13 +306,17 @@ eval-counterfactual:
 #   make ds-ledger-recompute MODEL=<model> CONTROL=<model with macro AUPR> DATA_REVISION=<rev> [TASK=ec] [DRY_RUN=1]
 #        (macro AUPR a probe did not record, from its saved predictions.npz; four checks, nothing written on failure)
 # MODELS defaults to summary_models in $(MIND_RESULTS_ROOT)/comparisons.yaml, else every model of the ledger.
-# One command for one MIND model (downstream/run_all.py; GPU embeds + CPU probes, user-started, no fine-tune):
+# One command for one MIND model (downstream/run_all.py; GPU embeds, CPU probes, GPU fine-tuning; user-started):
 #   make ds-run MODEL=<snapshot | path/to.ckpt> [NAME=<snapshot name, required with a ckpt>] [TASKS=all|molnet|ec,go_mf,...]
-#        GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp] [PROBE_JOBS=1] [RANDOM_INIT=1] [OUTPUTS_ROOT=<dir>] [PLAN=1]
+#        GPU=2,3 [PER_GPU=1] [HEADS=linear,mlp[,finetune]] [FT_PER_GPU=1] [PROBE_JOBS=1] [RANDOM_INIT=1]
+#        [OUTPUTS_ROOT=<dir>] [PLAN=1]   (MODELS="a b a.random_init" instead of MODEL: one model after another)
 #        [COMPARE_TO=<snapshot[.random_init],...> [BOOTSTRAP=1000]] [COUNTERFACTUAL=1 [CF_MODES=...] [EVAL_CONFIG=...]]
-#   snapshot (ckpt) -> embeds on the GPUs (every model) -> [counterfactual sweep] -> probes (SEEDS) -> ledger add ->
+#   snapshot (ckpt) -> embeds on the GPUs (every model) -> [counterfactual sweep] -> probes (SEEDS) ->
+#   [HEADS with finetune: fine-tune jobs (SEEDS), FT_PER_GPU per GPU] -> ledger add ->
 #   final metrics + missing cells per model -> ds-compare A=<each COMPARE_TO> B=MODEL -> ledger report.
-#   PLAN=1 prints what would run and writes nothing. ds-run and ds-probe run detached by default (setsid + nohup:
+#   HEADS=finetune alone skips the embeddings and probes. Seeds whose metrics.json exists are skipped. Fine-tune jobs
+#   run longest first, FT_PER_GPU per GPU; every finished probe/fine-tune job is added to the ledger at once.
+#   PLAN=1 prints what would run and writes nothing. ds-run, ds-probe and ds-finetune run detached (setsid + nohup:
 #   closing the terminal does not stop them; the log ends with EXIT_CODE=<n>; make ds-status lists the logs);
 #   FOREGROUND=1 runs them in the terminal. TASKS=molnet stands for the 14 mn_* tasks (it may be combined: molnet,ec).
 # ===================================================================
@@ -324,14 +329,14 @@ POOLING ?=
 DS_THREADS ?= 8
 DS_ENV := OMP_NUM_THREADS=$(DS_THREADS) OPENBLAS_NUM_THREADS=$(DS_THREADS) MKL_NUM_THREADS=$(DS_THREADS)
 DS_LOG = $(LOG_MONTH_DIR)/ds_$(TASK)_$(1)_$(_LOG_DATETIME).log
-# Long ds-* jobs (ds-probe, ds-run) run in their own session (setsid + nohup, no terminal): closing the SSH/terminal
+# Long ds-* jobs (ds-probe, ds-finetune, ds-run) run in their own session (setsid + nohup, no terminal): closing the SSH/terminal
 # connection does not stop them. $(1) = log, $(2) = command; the log ends with EXIT_CODE=<n> of the command
 # (non-zero when the Python step fails). FOREGROUND=1 runs the job in the terminal instead.
 # The terminal prints only the log path; follow the job with `make ds-status`.
 DS_DETACH = log=$(1); echo "Log: $$log"; \
 	setsid nohup bash -c '$(2); code=$$?; echo "EXIT_CODE=$$code"; exit $$code' > $$log 2>&1 < /dev/null &
 DS_RANDOM_INIT_ARGS := $(if $(filter 1,$(RANDOM_INIT)),--random-init,)
-# Fine-tune overrides: a random-init encoder needs a far larger LR than a pretrained one.
+# Fine-tune overrides of task.yaml (--epochs, --lr-encoder, --patience), recorded in config.json; no single quotes.
 FT_ARGS ?=
 # Baseline weights: the Hugging Face cache of MIND_HF_HOME, else the one fetch_models fills under MIND_MODELS_ROOT.
 DS_HF_ARGS := $(if $(filter esm2_% saprot_%,$(MODEL)),--hf-cache-dir $(or $(strip $(MIND_HF_HOME)),$(MIND_MODELS_ROOT)/huggingface)/hub,)
@@ -383,15 +388,32 @@ ds-leakage:
 		--reference "$(REFERENCE)" --query-namespace "$(NAMESPACE)" --provenance "$(PROVENANCE)" \
 		$(foreach q,$(QUERIES),--query $(q)) $(if $(strip $(ID_MAP)),--id-map $(ID_MAP),)
 
-ds-embed ds-finetune:
+ds-embed:
 	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name, alias or ESM-2 name)"; exit 1; }
 	@if [ "$(RESOLVED_GPU)" = "NONE" ]; then echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; exit 1; fi
 	@mkdir -p $(LOG_MONTH_DIR)
 	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) nohup python -u -m downstream.$(patsubst ds-%,%,$@) \
 		--threads $(DS_THREADS) --task $(TASK) --model "$(MODEL)" --device cuda:0 $(DS_RANDOM_INIT_ARGS) \
-		$(if $(filter ds-embed,$@),$(DS_HF_ARGS) $(DS_LBA_ARGS),--seeds $(SEEDS) $(DS_SPLIT_TAG_ARGS) $(FT_ARGS)) \
+		$(DS_HF_ARGS) $(DS_LBA_ARGS) \
 		> $(call DS_LOG,$(patsubst ds-%,%,$@)) 2>&1 &
 	@echo "GPU: $(RESOLVED_GPU)   Log: $(call DS_LOG,$(patsubst ds-%,%,$@))"
+
+# One GPU per fine-tune job (GPU=<one id> or auto).
+DS_FINETUNE_CMD = $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES=$(RESOLVED_GPU) python -u -m downstream.finetune \
+	--threads $(DS_THREADS) --task $(TASK) --model "$(MODEL)" --device cuda:0 $(DS_RANDOM_INIT_ARGS) --seeds $(SEEDS) \
+	$(DS_SPLIT_TAG_ARGS) $(if $(strip $(OUTPUTS_ROOT)),--outputs-root "$(OUTPUTS_ROOT)",) $(FT_ARGS)
+
+ds-finetune:
+	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name or alias)"; exit 1; }
+	@case "$(RESOLVED_GPU)" in NONE) echo "ERROR: No GPU with >= $(MIN_VRAM_MB) MB free VRAM found."; exit 1;; \
+		*,*) echo "ERROR: ds-finetune uses one GPU; set GPU=<one id>"; exit 1;; esac
+	@mkdir -p $(LOG_MONTH_DIR)
+	@echo "GPU: $(RESOLVED_GPU)"
+ifeq ($(FOREGROUND),1)
+	set -o pipefail; $(DS_FINETUNE_CMD) 2>&1 | tee $(call DS_LOG,finetune)
+else
+	$(call DS_DETACH,$(call DS_LOG,finetune),$(DS_FINETUNE_CMD))
+endif
 
 DS_PROBE_CMD = $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.probe --threads $(DS_THREADS) \
 	--task $(TASK) --model-id "$(MODEL_ID)" --head $(HEAD) --seeds $(SEEDS) $(if $(strip $(POOLING)),--pooling $(POOLING),) \
@@ -446,15 +468,19 @@ ds-ledger-recompute:
 HEADS ?= linear,mlp
 PER_GPU ?= 1
 PROBE_JOBS ?= 1
+# Concurrent fine-tune jobs per GPU (separate processes and output directories; ledger adds stay sequential).
+FT_PER_GPU ?= 1
 # TASKS=molnet stands for the 14 MoleculeNet tasks (downstream.tasks.MOLNET_TASKS; a test keeps the lists equal).
 MOLNET_TASKS := mn_bbbp,mn_bace,mn_clintox,mn_tox21,mn_toxcast,mn_sider,mn_hiv,mn_pcba,mn_muv,mn_esol,mn_freesolv,mn_lipo,mn_qm7,mn_qm8
 _comma := ,
 _space := $(subst ,, )
 DS_RUN_TASKS = $(subst $(_space),$(_comma),$(strip $(foreach t,$(subst $(_comma), ,$(or $(strip $(TASKS)),all)),\
 	$(if $(filter molnet,$(t)),$(MOLNET_TASKS),$(t)))))
-DS_RUN_CMD = python -u -m downstream.run_all --model "$(MODEL)" $(if $(strip $(NAME)),--name "$(NAME)",) \
+# $(1) = the model (MODEL, or each entry of MODELS).
+DS_RUN_CMD = python -u -m downstream.run_all --model "$(1)" $(if $(strip $(NAME)),--name "$(NAME)",) \
 	--tasks $(DS_RUN_TASKS) --gpus "$(GPU)" --per-gpu $(PER_GPU) --heads $(HEADS) --seeds $(SEEDS) \
-	--probe-jobs $(PROBE_JOBS) --threads $(DS_THREADS) --log-root $(LOG_MONTH_DIR) $(DS_RANDOM_INIT_ARGS) \
+	--probe-jobs $(PROBE_JOBS) --threads $(DS_THREADS) --log-root $(LOG_MONTH_DIR) --ft-per-gpu $(FT_PER_GPU) \
+	$(DS_RANDOM_INIT_ARGS) \
 	$(if $(strip $(OUTPUTS_ROOT)),--outputs-root "$(OUTPUTS_ROOT)",) \
 	$(if $(strip $(COMPARE_TO)),--compare-to "$(COMPARE_TO)" --bootstrap $(BOOTSTRAP),) \
 	$(if $(filter 1,$(COUNTERFACTUAL)),--counterfactual --cf-split $(or $(CF_SPLIT),test) --cf-seed $(or $(SEED),0) \
@@ -462,14 +488,21 @@ DS_RUN_CMD = python -u -m downstream.run_all --model "$(MODEL)" $(if $(strip $(N
 		$(if $(strip $(EVAL_CONFIG)),--cf-eval-config core/$(EVAL_CONFIG).yaml,),) \
 	$(if $(filter 1,$(PLAN)),--plan,)
 
+# MODELS="a b a.random_init": the models one after another in one command and one log (a failing model does not stop
+# the next); each prints MODEL_EXIT_CODE <model>=<n>, the last line is EXIT_CODE (non-zero if any model failed).
+DS_RUN_MODELS = rc=0; for m in $(MODELS); do echo "=== ds-run MODEL=$$m"; $(LEDGER_ENV) $(call DS_RUN_CMD,$$m); \
+	c=$$?; echo "MODEL_EXIT_CODE $$m=$$c"; [ $$c -eq 0 ] || rc=1; done; [ $$rc -eq 0 ]
+DS_RUN_ANY = $(if $(strip $(MODELS)),$(DS_RUN_MODELS),$(LEDGER_ENV) $(call DS_RUN_CMD,$(MODEL)))
+
 # Detached by default (DETACH=1 is accepted and changes nothing); PLAN=1 and FOREGROUND=1 run in the terminal.
 ds-run:
-	@test -n "$(MODEL)" || { echo "ERROR: set MODEL (snapshot name or .ckpt path; a path also needs NAME)"; exit 1; }
+	@test -n "$(MODEL)$(MODELS)" -a -z "$(and $(MODEL),$(MODELS))" || { echo "ERROR: set MODEL (snapshot name or .ckpt path; a path also needs NAME) or MODELS=\"a b ...\" (snapshot names), not both"; exit 1; }
+	@test -z "$(and $(MODELS),$(NAME))" || { echo "ERROR: NAME goes with MODEL=<ckpt path>, not with MODELS"; exit 1; }
 ifeq ($(filter 1,$(PLAN) $(FOREGROUND)),)
 	@mkdir -p $(LOG_MONTH_DIR)
-	$(call DS_DETACH,$(LOG_MONTH_DIR)/ds_run_$(_LOG_DATETIME)_$$$$.log,$(CONDA_RUN) $(LEDGER_ENV) $(DS_RUN_CMD))
+	$(call DS_DETACH,$(LOG_MONTH_DIR)/ds_run_$(_LOG_DATETIME)_$$$$.log,$(CONDA_RUN) $(DS_RUN_ANY))
 else
-	$(CONDA_RUN) $(LEDGER_ENV) $(DS_RUN_CMD)
+	$(CONDA_RUN) $(DS_RUN_ANY)
 endif
 
 # Newest ds_*.log files of this month with their EXIT_CODE line. No EXIT_CODE: still running, killed, or a
@@ -505,6 +538,7 @@ help:
 	@echo "  Downstream (see downstream/README.md):"
 	@echo "    make ds-run MODEL=<snapshot|ckpt> [NAME=<name>] GPU=<ids> [TASKS=all|molnet|ec,go_mf,..] [PLAN=1]"
 	@echo "                                         Embed + probe + ledger for one model (GPU, detached)"
+	@echo "                                         HEADS=linear,mlp,finetune adds fine-tuning; HEADS=finetune alone"
 	@echo "    make ds-status                       Recent ds-* logs with their EXIT_CODE"
 	@echo "    make ds-snapshot CKPT=<ckpt> NAME=<snapshot> ALIAS=current_best"
 	@echo "    make ds-download TASK=ec / ds-process TASK=ec WORKERS=16   (data, explicit decision)"
@@ -513,7 +547,7 @@ help:
 	@echo "         make ds-process TASK=mn_<bbbp|bace|clintox|tox21|toxcast|sider|hiv|pcba|muv|esol|freesolv|lipo|qm7|qm8>"
 	@echo "    make ds-embed TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]   (GPU)"
 	@echo "    make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp"
-	@echo "    make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id>   (GPU, long)"
+	@echo "    make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]   (one GPU, long; every task)"
 	@echo "    make ds-report TASK=ec / make test-downstream"
 	@echo "    make ds-ledger-add OUTPUTS_ROOT=<dir> / ds-ledger-report / ds-compare A=<m> B=<m>   (results ledger, CPU)"
 	@echo "    make ds-ledger-annotate SELECT=.. STATUS=.. REASON=..   Mark ledger rows superseded/caveat (CPU)"

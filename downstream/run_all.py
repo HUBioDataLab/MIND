@@ -1,17 +1,24 @@
-"""Embed, probe and ledger every task for one MIND model, then print its final metrics (driver of ``make ds-run``).
+"""Embed, probe, fine-tune and ledger every task for one MIND model, then print its final metrics (``make ds-run``).
 
     python -m downstream.run_all --model <snapshot | path/to.ckpt> [--name NAME] --tasks all|ec,go_mf,...
-        --gpus 2,3 --heads linear,mlp --per-gpu 3 [--random-init] [--compare-to a,b.random_init] [--counterfactual]
-        [--plan]
+        --gpus 2,3 --heads linear,mlp[,finetune] --per-gpu 3 [--random-init] [--compare-to a,b.random_init]
+        [--counterfactual] [--plan]
 
-Steps (fine-tuning is not part of it). ``--compare-to`` models (snapshot names; ``.random_init`` = RANDOM_INIT=1)
-go through steps 2-5 the same way (what is complete is skipped):
+``--heads`` selects the protocols: ``linear`` / ``mlp`` are frozen-encoder probes, ``finetune`` is end-to-end
+fine-tuning (``downstream.finetune`` with the task.yaml ``finetune`` settings). ``--compare-to`` models (snapshot
+names; ``.random_init`` = RANDOM_INIT=1) go through steps 2-5 the same way (what is complete is skipped):
 
 1. A checkpoint path is snapshotted as NAME (``downstream.common.registry.snapshot_model``). NAME already naming
    another checkpoint (sha256 differs from the snapshot card or from the results ledger) stops everything.
 2. Embeddings (``downstream.embed``), one job per task (LBA: one per required split tag), on the GPUs given,
    at most ``--per-gpu`` jobs per GPU. Splits that already have an embedding (.npz and .json) are not redone.
+   Without a probe head no embedding is computed.
 3. When every embedding job has ended: probes (``downstream.probe``, CPU) per task x head, seeds missing only.
+   Then, with ``finetune`` in ``--heads``: one fine-tune job per task (seeds missing only, a seed counts as done when
+   its ``metrics.json`` exists and its config.json records the current settings and processed directory), at most
+   ``--ft-per-gpu`` jobs per GPU, the longest first (estimate: task.yaml ``finetune_seconds_per_epoch`` x epochs x
+   seeds), each next job on the first free slot. After every finished probe or fine-tune job its results are added to
+   the ledger (``ledger add`` is idempotent: files already ingested are skipped), so an interrupted run keeps them.
 4. ``downstream.ledger add`` of the outputs root into ``$MIND_RESULTS_ROOT``.
 5. One table: the catalog's primary metric for every task x head (a failed or skipped one says why), and the
    required cells still missing for this model (``ledger_report.missing_cells``); one table per model.
@@ -23,6 +30,8 @@ go through steps 2-5 the same way (what is complete is skipped):
 written to ``<outputs root>/eval/cf_<name>_<stamp>/<mode>`` and added to the ledger with step 4. The Make target
 itself detaches and returns at once, so ds-run cannot wait for it; it refuses to start if the target is gone.
 
+``--model <snapshot>.random_init`` is the same as ``--model <snapshot> --random-init``.
+
 ``all`` = EC, GO-MF/BP/CC, Fold, LBA (the catalog's required split tags, joint representation) and the 14
 MoleculeNet tasks. Reaction has no processed data and runs only when named. A task whose domain the
 model was not pretrained on (card ``domains``; protein needs ``pdb``, MoleculeNet needs ``unimol``) is skipped and
@@ -33,8 +42,8 @@ the run ends with the list of everything missing and exit code 1. Jobs have no t
 running PID, its age and its log's size and last write is printed every ``--status-every`` seconds.
 
 Logs: ``<log root>/ds_run_<model>_<stamp>_<pid>/<kind>_<task>_<model>_<YYYYMMDD_HHMMSS_mmm>_<child pid>.log``
-(kind ``embed`` / ``probe_linear`` / ``probe_mlp`` / ``counterfactual`` / ``ledger_add`` / ``compare`` /
-``ledger_report``; ``<model>`` is the job's own model), next to ``summary.md`` and ``missing.csv``; ``make ds-embed``
+(kind ``embed`` / ``probe_linear`` / ``probe_mlp`` / ``finetune`` / ``counterfactual`` / ``ledger_add`` /
+``compare`` / ``ledger_report``; ``<model>`` is the job's own model), next to ``summary.md`` and ``missing.csv``; ``make ds-embed``
 and ``ds-probe`` logs are unchanged.
 """
 
@@ -55,9 +64,12 @@ from typing import Callable, Dict, List, Optional
 
 from downstream import ledger, ledger_report
 from downstream.common import registry
+from downstream.finetune_settings import resolve_settings, same_settings
 from downstream.tasks import MOLNET_TASKS, TASKS, load_task
 
 HEADS = ("linear", "mlp")  # downstream.common.heads.HEADS (not imported: it pulls torch into the plan step)
+FINETUNE = "finetune"  # the --heads entry that selects end-to-end fine-tuning
+PROTOCOL_CHOICES = HEADS + (FINETUNE,)
 ALL_TASKS = ("ec", "go_mf", "go_bp", "go_cc", "fold", "lba") + MOLNET_TASKS
 # Pretraining domains (card "domains", the enabled multi_domain datasets) a task's input needs. The LBA joint graph
 # is a protein graph (ligand atoms with pos_code sm).
@@ -86,7 +98,9 @@ class Unit:
         return f"{self.split_tag}.{self.representation}." if self.split_tag else ""
 
     def protocol(self, head: str) -> str:
-        return f"{head}_probe" + (f".{self.split_tag}.{self.representation}" if self.split_tag else "")
+        """Results protocol of a probe head or of ``finetune`` (fine-tuning of LBA is joint-only)."""
+        base = FINETUNE if head == FINETUNE else f"{head}_probe"
+        return base + (f".{self.split_tag}.{self.representation}" if self.split_tag else "")
 
     def cli(self) -> list:
         return ["--split-tag", self.split_tag, "--representation", self.representation] if self.split_tag else []
@@ -115,12 +129,16 @@ def expand_tasks(text: str, catalog: dict) -> tuple[list, bool]:
 
 
 def describe_task(unit: Unit) -> dict:
-    """Modality, split names, probe pooling and processed split files of one unit (reads task.yaml only)."""
+    """Modality, split names, probe and fine-tune pooling and processed split files of one unit (reads task.yaml)."""
     task = load_task(unit.task)
     config = task.load_task_config(task.TASK_YAML)
     directory = task.processed_dir(config, unit.split_tag) if unit.task == "lba" else task.processed_dir(config)
     splits = list(config["splits"])
+    cost = config["finetune_seconds_per_epoch"]
+    cost = cost[unit.task] if isinstance(cost, dict) else cost
     return {"modality": config["modality"], "splits": splits, "pooling": config["probe"]["pooling"],
+            "finetune_pooling": config["finetune"]["pooling"], "finetune": config["finetune"],
+            "finetune_seconds": float(cost) * int(config["finetune"]["epochs"]),
             "processed": {split: Path(directory) / f"{split}.pt" for split in splits}}
 
 
@@ -225,10 +243,11 @@ def _known_timings(unit: Unit, splits: list, outputs_root: Path, model_id: str) 
 
 def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, seeds: list, outputs_root: Path,
                describe: Callable[[Unit], dict] = None) -> dict:
-    """What runs, what is skipped and what already cannot run, per unit and head."""
+    """What runs, what is skipped and what already cannot run, per unit and head (``finetune`` included)."""
     describe = describe or describe_task
-    plan = {"embed": [], "embed_done": [], "probe": [], "probe_done": [], "domain_skips": [], "failed": [],
-            "notes": [], "timings": {}, "units": [], "info": {}}
+    probe_heads = [head for head in heads if head != FINETUNE]
+    plan = {"embed": [], "embed_done": [], "probe": [], "probe_done": [], "finetune": [], "finetune_done": [],
+            "domain_skips": [], "failed": [], "notes": [], "timings": {}, "units": [], "info": {}}
     for unit in units:
         try:
             info = describe(unit)
@@ -250,6 +269,10 @@ def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, se
         if info["modality"] == "complex" and not {"unimol", "metabolite"} & set(model.domains):
             plan["notes"].append(f"{unit.key}: ligand atoms, but {model.name} saw no small-molecule domain")
         plan["units"].append(unit)
+        if FINETUNE in heads:
+            _plan_finetune(plan, unit, info, model, seeds=seeds, outputs_root=outputs_root)
+        if not probe_heads:
+            continue
         missing, broken, stale = [], [], []
         for split in info["splits"]:
             npz = registry.embeddings_path(unit.task, model.model_id, unit.prefix + split, root=outputs_root)
@@ -277,7 +300,7 @@ def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, se
             plan["timings"][unit] = _known_timings(unit, missing, outputs_root, model.model_id)
         else:
             plan["embed_done"].append(unit)
-        for head in heads:
+        for head in probe_heads:
             done = [s for s in seeds if (registry.results_dir(unit.task, model.model_id, unit.protocol(head), s,
                                                               pooling=info["pooling"], root=outputs_root)
                                          / "metrics.json").is_file()]
@@ -289,8 +312,48 @@ def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, se
     return plan
 
 
+def _plan_finetune(plan: dict, unit: Unit, info: dict, model: ModelPlan, *, seeds: list, outputs_root: Path) -> None:
+    """Seeds of one unit still to fine-tune; missing processed data, a non-joint LBA unit or a finished seed trained on
+    another processed directory (results paths carry no data revision) cannot run."""
+    label = f"{FINETUNE} {unit.key}"
+    no_data = [str(path) for split, path in info["processed"].items() if not Path(path).is_file()]
+    if unit.representation not in (None, "joint"):
+        plan["failed"].append((label, "fine-tuning supports the joint LBA representation only"))
+        return
+    if no_data:
+        plan["failed"].append((label, f"no processed data: {no_data}"))
+        return
+    expected = sorted({Path(path).parent.name for path in info["processed"].values()})
+    settings = resolve_settings(info["finetune"], random_init=model.model_id.endswith(registry.RANDOM_INIT_SUFFIX))
+    todo, stale = [], []
+    for seed in seeds:
+        directory = registry.results_dir(unit.task, model.model_id, unit.protocol(FINETUNE), seed,
+                                         pooling=info["finetune_pooling"], root=outputs_root)
+        if not (directory / "metrics.json").is_file():
+            todo.append(seed)
+            continue
+        config = json.loads((directory / "config.json").read_text()) if (directory / "config.json").is_file() else {}
+        built = sorted({Path(entry["path"]).parent.name for entry in (config.get("processed") or {}).values()})
+        if built != expected:
+            stale.append(f"seed{seed} trained on {built or 'unrecorded processed data'}")
+        elif not same_settings(config.get("finetune"), settings):
+            stale.append(f"seed{seed} trained with other finetune settings than task.yaml")
+    if stale:
+        plan["failed"].append((label, f"{stale}, but the task reads {expected} with the current task.yaml finetune "
+                                      "settings; use a new OUTPUTS_ROOT"))
+    elif todo:
+        plan["finetune"].append((unit, todo))
+    else:
+        plan["finetune_done"].append(unit)
+
+
+def finetune_seconds(plan: dict, unit: Unit, seeds: list) -> float:
+    """Estimated seconds of one fine-tune job (task.yaml estimate per epoch x epochs x seeds); orders the queue."""
+    return plan["info"][unit]["finetune_seconds"] * len(seeds)
+
+
 def plan_text(model: ModelPlan, plan: dict, *, outputs_root: Path, results_root: Optional[Path], gpus: list,
-              per_gpu: int, probe_jobs: int, heads: list, seeds: list) -> str:
+              per_gpu: int, probe_jobs: int, heads: list, seeds: list, ft_per_gpu: int = 1) -> str:
     lines = [f"Model: {model.name} (model_id {model.model_id}), sha256 {model.sha256}, epoch {model.epoch}, "
              f"domains {model.domains}; {model.action}" + (f" from {model.ckpt}" if model.ckpt else "")]
     lines += [f"  not: {note}" for note in model.notes]
@@ -308,7 +371,18 @@ def plan_text(model: ModelPlan, plan: dict, *, outputs_root: Path, results_root:
     lines += [f"   WILL RUN  probe {unit.key} {head}: seeds {' '.join(map(str, todo))}"
               for unit, head, todo in plan["probe"]]
     lines += [f"   WILL SKIP  probe {unit.key} {head}: already complete" for unit, head in plan["probe_done"]]
-    lines += ["3. ledger add (outputs root -> results ledger)", "4. summary table + missing required cells"]
+    step = 3
+    if plan["finetune"] or plan["finetune_done"]:
+        lines.append(f"3. Fine-tune ({len(plan['finetune'])} jobs after the probes, longest first, at most "
+                     f"{ft_per_gpu} per GPU; task.yaml finetune settings; hours = task.yaml estimate for one job alone "
+                     "on a GPU):")
+        lines += [f"   WILL RUN  finetune {unit.key}: seeds {' '.join(map(str, todo))} (about "
+                  f"{plan['info'][unit]['finetune_seconds'] * len(todo) / 3600:.1f} h)"
+                  for unit, todo in sorted(plan["finetune"], key=lambda item: -finetune_seconds(plan, *item))]
+        lines += [f"   WILL SKIP  finetune {unit.key}: already complete" for unit in plan["finetune_done"]]
+        step = 4
+    lines += [f"{step}. ledger add (outputs root -> results ledger)",
+              f"{step + 1}. summary table + missing required cells"]
     if plan["domain_skips"]:
         lines += ["", "Skipped tasks (domain mismatch):"] + [f"   SKIPPED  {u.key}: {r}" for u, r in plan["domain_skips"]]
     if plan["notes"]:
@@ -337,6 +411,7 @@ class Job:
     check: Callable[[], Optional[str]]  # None when the expected outputs exist
     head: Optional[str] = None
     model_id: Optional[str] = None  # the model in the log name (default: the Runner's)
+    seconds: float = 0.0  # estimated duration (fine-tune jobs; orders the queue)
 
     @property
     def label(self) -> str:
@@ -383,8 +458,10 @@ class Runner:
         self.out(f"[{datetime.now():%H:%M:%S}] status: running {len(running)}, pending {pending}, finished {finished}, "
                  f"failed {failed}" + "".join(f"\n    {p}" for p in parts))
 
-    def run(self, jobs: List[Job], slots: List[str]) -> Dict[int, tuple]:
-        """``{job index: (ok, reason, log)}``; every job runs even when others fail."""
+    def run(self, jobs: List[Job], slots: List[str],
+            on_done: Optional[Callable[[Job, bool], None]] = None) -> Dict[int, tuple]:
+        """``{job index: (ok, reason, log)}``; every job runs even when others fail. ``on_done(job, ok)`` runs in this
+        process after each job ends (the next jobs start after it returns)."""
         pending = deque(enumerate(jobs))
         free = list(range(len(slots)))
         running, results = {}, {}
@@ -412,6 +489,8 @@ class Runner:
                 results[index] = (reason is None, reason, log)
                 self.out(f"[{datetime.now():%H:%M:%S}] {'FINISHED' if reason is None else 'ERROR'} {job.label} pid "
                          f"{process.pid} ({int(time.monotonic() - started)} s)" + (f": {reason}" if reason else ""))
+                if on_done is not None:
+                    on_done(job, reason is None)
             if running and time.monotonic() - last_status >= self.status_every:
                 view = {i: (slots[s], rest) for i, (s, rest) in running.items()}
                 self._status(view, len(pending), sum(r[0] for r in results.values()),
@@ -434,7 +513,8 @@ def default_commands() -> dict:
     python = [sys.executable, "-u", "-m"]
     return {"embed": python + ["downstream.embed"], "probe": python + ["downstream.probe"],
             "ledger": python + ["downstream.ledger"], "report": python + ["downstream.ledger_report"],
-            "compare": python + ["downstream.ledger_compare"], "cf": python + ["core.evaluate_pretrain"]}
+            "compare": python + ["downstream.ledger_compare"], "cf": python + ["core.evaluate_pretrain"],
+            "finetune": python + ["downstream.finetune"]}
 
 
 def _thread_env(threads: int) -> dict:
@@ -442,8 +522,8 @@ def _thread_env(threads: int) -> dict:
 
 
 def build_jobs(plan: dict, model: ModelPlan, *, commands: dict, outputs_root: Path, threads: int,
-               random_init: bool) -> tuple[list, list]:
-    embed_jobs, probe_jobs = [], []
+               random_init: bool) -> tuple[list, list, list]:
+    embed_jobs, probe_jobs, finetune_jobs = [], [], []
     common = ["--threads", str(threads), "--outputs-root", str(outputs_root)]
     for unit, splits in plan["embed"]:
         def argv(slot, unit=unit, splits=splits):
@@ -471,7 +551,24 @@ def build_jobs(plan: dict, model: ModelPlan, *, commands: dict, outputs_root: Pa
             return f"metrics.json missing for seeds {absent}" if absent else None
         probe_jobs.append(Job(f"probe_{head}", unit, argv, lambda slot: {"CUDA_VISIBLE_DEVICES": "",
                                                                          **_thread_env(threads)}, check, head))
-    return embed_jobs, probe_jobs
+    for unit, seeds in plan["finetune"]:
+        pooling = plan["info"][unit]["finetune_pooling"]
+
+        def argv(slot, unit=unit, seeds=seeds):
+            return (commands["finetune"] + common + ["--task", unit.task, "--model", model.name, "--device", "cuda:0",
+                                                     "--seeds", *map(str, seeds)]
+                    + (["--random-init"] if random_init else []) + (["--split-tag", unit.split_tag] if unit.split_tag
+                                                                    else []))
+
+        def check(unit=unit, seeds=seeds, pooling=pooling):
+            absent = [s for s in seeds if not (registry.results_dir(unit.task, model.model_id, unit.protocol(FINETUNE),
+                                                                    s, pooling=pooling, root=outputs_root)
+                                               / "metrics.json").is_file()]
+            return f"metrics.json missing for seeds {absent}" if absent else None
+        finetune_jobs.append(Job(FINETUNE, unit, argv, lambda slot: {"CUDA_VISIBLE_DEVICES": slot,
+                                                                     **_thread_env(threads)}, check, FINETUNE,
+                                 seconds=finetune_seconds(plan, unit, seeds)))
+    return embed_jobs, probe_jobs, finetune_jobs
 
 
 def summary(results_root: Path, model: ModelPlan, plan: dict, heads: list, failures: list) -> tuple[str, list]:
@@ -494,7 +591,8 @@ def summary(results_root: Path, model: ModelPlan, plan: dict, heads: list, failu
             protocol = unit.protocol(head)
             found = ledger_report.lookup(state, unit.task, model.model_id, protocol, primary)
             text = found["text"]
-            problems = [text for kind, text in failed_units.get(unit.key, []) if kind in ("embed", f"probe_{head}")]
+            kinds = (FINETUNE,) if head == FINETUNE else ("embed", f"probe_{head}")
+            problems = [text for kind, text in failed_units.get(unit.key, []) if kind in kinds]
             if problems and not found["filled"]:
                 text = "ERROR: " + " | ".join(problems)
             lines.append(f"| {unit.key} | {protocol} | {primary['metric']} ({primary['eval_split']}/{primary['subset']}) "
@@ -599,7 +697,8 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
     parser.add_argument("--tasks", default="all", help="'all' or a comma list (lba = its required split tags)")
     parser.add_argument("--gpus", default="", help="comma list of GPU indices for the embeddings, e.g. 2,3")
     parser.add_argument("--per-gpu", type=int, default=1, help="concurrent embedding jobs per GPU")
-    parser.add_argument("--heads", default="linear,mlp")
+    parser.add_argument("--ft-per-gpu", type=int, default=1, help="concurrent fine-tune jobs per GPU")
+    parser.add_argument("--heads", default="linear,mlp", help=f"comma list of {', '.join(PROTOCOL_CHOICES)}")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--probe-jobs", type=int, default=1, help="concurrent probe jobs (CPU)")
     parser.add_argument("--threads", type=int, default=8, help="CPU threads of every child process")
@@ -623,10 +722,12 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
     commands = {**default_commands(), **(commands or {})}
     try:
         heads = [h.strip() for h in args.heads.split(",") if h.strip()]
-        if not heads or any(h not in HEADS for h in heads):
-            raise PlanError(f"HEADS={args.heads}: choose from {HEADS}")
-        if args.per_gpu < 1 or args.probe_jobs < 1 or args.threads < 1 or args.bootstrap < 1:
-            raise PlanError("--per-gpu, --probe-jobs, --threads and --bootstrap must be at least 1")
+        if not heads or any(h not in PROTOCOL_CHOICES for h in heads) or len(set(heads)) != len(heads):
+            raise PlanError(f"HEADS={args.heads}: choose from {PROTOCOL_CHOICES}, each at most once")
+        if min(args.per_gpu, args.ft_per_gpu, args.probe_jobs, args.threads, args.bootstrap) < 1:
+            raise PlanError("--per-gpu, --ft-per-gpu, --probe-jobs, --threads and --bootstrap must be at least 1")
+        if args.model.endswith(registry.RANDOM_INIT_SUFFIX) and not args.model.endswith(".ckpt"):
+            args.model, args.random_init = args.model[: -len(registry.RANDOM_INIT_SUFFIX)], True
         gpus = [g.strip() for g in args.gpus.split(",") if g.strip()]
         outputs_root = registry.outputs_root(args.outputs_root).resolve()
         results_root = ledger.results_root(args.results_root)
@@ -643,17 +744,20 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
             (other, plan_units(units, explicit, other, heads=heads, seeds=args.seeds, outputs_root=outputs_root,
                                describe=describe), random_init) for other, random_init in others]
         n_embed = sum(len(p["embed"]) for _, p, _ in runs)
-        if (n_embed or args.counterfactual) and (not gpus or not all(g.isdigit() for g in gpus)):
-            raise PlanError(f"{n_embed} embedding job(s)" + (" and the counterfactual sweep" if args.counterfactual
-                                                             else "") + f" to run but GPU={args.gpus!r}: give GPU "
-                            "indices like GPU=2,3 (ds-run does not pick GPUs itself)")
+        n_finetune = sum(len(p["finetune"]) for _, p, _ in runs)
+        if (n_embed or n_finetune or args.counterfactual) and (not gpus or not all(g.isdigit() for g in gpus)):
+            raise PlanError(f"{n_embed} embedding job(s), {n_finetune} fine-tune job(s)"
+                            + (" and the counterfactual sweep" if args.counterfactual else "")
+                            + f" to run but GPU={args.gpus!r}: give GPU indices like GPU=2,3 (ds-run does not pick "
+                            "GPUs itself)")
     except (PlanError, ledger.LedgerError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     texts = []
     for index, (m, p, _) in enumerate(runs):
         text = plan_text(m, p, outputs_root=outputs_root, results_root=results_root, gpus=gpus,
-                         per_gpu=args.per_gpu, probe_jobs=args.probe_jobs, heads=heads, seeds=args.seeds)
+                         per_gpu=args.per_gpu, probe_jobs=args.probe_jobs, heads=heads, seeds=args.seeds,
+                         ft_per_gpu=args.ft_per_gpu)
         texts.append(text if index == 0 else f"=== COMPARE_TO {m.model_id} ===\n{text}")
     if others or args.counterfactual:
         texts.append(extra_plan_text(model, others, args, gpus, outputs_root))
@@ -675,14 +779,15 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
         if card["sha256"] != model.sha256:
             raise RuntimeError(f"snapshot {destination} has sha256 {card['sha256']}, the plan hashed {model.sha256}")
         print(f"snapshot: {destination}", flush=True)
-    embed_jobs, probe_jobs = [], []
+    embed_jobs, probe_jobs, finetune_jobs = [], [], []
     for m, p, random_init in runs:
-        embeds, probes = build_jobs(p, m, commands=commands, outputs_root=outputs_root, threads=args.threads,
-                                    random_init=random_init)
-        for job in embeds + probes:
+        embeds, probes, finetunes = build_jobs(p, m, commands=commands, outputs_root=outputs_root,
+                                               threads=args.threads, random_init=random_init)
+        for job in embeds + probes + finetunes:
             job.model_id = m.model_id
         embed_jobs += embeds
         probe_jobs += probes
+        finetune_jobs += finetunes
     runner = Runner(run_dir, model.model_id, status_every=args.status_every, poll=args.poll,
                     out=lambda message: print(message, flush=True))
     embed_failed = set()
@@ -700,19 +805,38 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
                 eval_dirs.append(cf_dirs[index])
             else:
                 extra_failures.append((cf_jobs[index].label, reason))
-    failed_before = {m.model_id: {label.partition(" ")[2] for label, _ in p["failed"]} for m, p, _ in runs}
+    # Probes need the embedding: only an embedding that could not run blocks them (not a fine-tune problem).
+    failed_before = {m.model_id: {label.partition(" ")[2] for label, _ in p["failed"]
+                                  if label.partition(" ")[0] == "embed"} for m, p, _ in runs}
     runnable = []
     for job in probe_jobs:
         if (job.model_id, job.unit) in embed_failed or job.unit.key in failed_before[job.model_id]:
             failures[job.model_id].append((f"{job.kind} {job.unit.key}", "not run: the embedding of this task failed"))
         else:
             runnable.append(job)
-    for index, (ok, reason, _) in runner.run(runnable, [f"cpu{i}" for i in range(args.probe_jobs)]).items():
+    def ledger_add(key: str, extra: list) -> Job:
+        return _cpu_job("ledger_add", key, commands["ledger"] + ["--results-root", str(results_root), "add",
+                                                                 "--outputs-root", str(outputs_root)] + extra,
+                        model.model_id)
+
+    def ingest_finished(job: Job, ok: bool) -> None:
+        """Add the results of a finished job to the ledger now (sequential, in this process; re-adding is a no-op)."""
+        if not ok:
+            return
+        (added, reason, _), = runner.run([ledger_add(f"after_{job.kind}_{job.unit.key}", [])], ["cpu0"]).values()
+        if not added:
+            extra_failures.append((f"ledger_add after {job.label}", reason))
+
+    for index, (ok, reason, _) in runner.run(runnable, [f"cpu{i}" for i in range(args.probe_jobs)],
+                                             on_done=ingest_finished).items():
         if not ok:
             failures[runnable[index].model_id].append((runnable[index].label, reason))
-    add = _cpu_job("ledger_add", "all", commands["ledger"] + ["--results-root", str(results_root), "add",
-                                                               "--outputs-root", str(outputs_root)]
-                   + [item for d in eval_dirs for item in ("--eval-dir", str(d))], model.model_id)
+    finetune_jobs.sort(key=lambda job: -job.seconds)  # longest first; the small ones fill the gaps
+    ft_slots = [g for _ in range(args.ft_per_gpu) for g in gpus]  # interleaved like the embedding slots
+    for index, (ok, reason, _) in runner.run(finetune_jobs, ft_slots, on_done=ingest_finished).items():
+        if not ok:
+            failures[finetune_jobs[index].model_id].append((finetune_jobs[index].label, reason))
+    add = ledger_add("all", [item for d in eval_dirs for item in ("--eval-dir", str(d))])
     (ok, reason, _), = runner.run([add], ["cpu0"]).values()
     if not ok:
         extra_failures.append(("ledger_add all", reason))

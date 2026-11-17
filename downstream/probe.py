@@ -40,7 +40,7 @@ from downstream.common.metrics import (
     accuracy, evaluate, evaluate_multiclass, evaluate_multitask_classification, evaluate_regression,
     multitarget_regression_errors, multitask_roc_auc, protein_fmax, rmse, train_term_ic,
 )
-from downstream.common.registry import embeddings_path, new_results_dir, run_record
+from downstream.common.registry import embeddings_path, new_results_dir, run_record, write_text_atomic
 from downstream.tasks import KINDS, TASKS, load_task
 from downstream.tasks.multiclass import split_roles
 
@@ -129,10 +129,8 @@ def ic_options(config: dict, train_labels: np.ndarray) -> dict:
     return {"term_ic": train_term_ic(train_labels), "ic_thresholds": tuple(float(t) for t in settings["ic_thresholds"])}
 
 
-@torch.no_grad()
-def predict(head: nn.Module, features: torch.Tensor, *, kind: str = "multilabel", scale=None) -> np.ndarray:
-    head.eval()
-    output = head(features)
+def output_scores(output: torch.Tensor, *, kind: str, scale=None) -> np.ndarray:
+    """Head output (CPU) -> the scores the metrics read: probabilities, or targets in their original units."""
     if kind in ("multilabel", "multilabel_masked"):
         return torch.sigmoid(output).numpy()
     if kind == "multiclass":
@@ -144,6 +142,85 @@ def predict(head: nn.Module, features: torch.Tensor, *, kind: str = "multilabel"
     if kind != "regression":
         raise ValueError(f"unknown task kind {kind!r}; choose from {KINDS}")
     return output.squeeze(-1).numpy()
+
+
+@torch.no_grad()
+def predict(head: nn.Module, features: torch.Tensor, *, kind: str = "multilabel", scale=None) -> np.ndarray:
+    head.eval()
+    return output_scores(head(features), kind=kind, scale=scale)
+
+
+def output_dim(kind: str, num_classes, train_labels: np.ndarray) -> int:
+    """Width of the head's last layer: classes (multiclass), 1 (regression) or one column per label/target."""
+    if kind == "multiclass":
+        if not num_classes:
+            raise ValueError("a multiclass head needs num_classes (task.yaml label_count)")
+        return int(num_classes)
+    return 1 if kind == "regression" else int(train_labels.shape[1])
+
+
+def evaluate_task(kind: str, config: dict, *, train_labels: np.ndarray, val_labels: np.ndarray,
+                  val_scores: np.ndarray, test_labels: Dict[str, np.ndarray], test_scores: Dict[str, np.ndarray],
+                  subsets: dict) -> tuple:
+    """``(metrics_val, metrics_test, headline)`` of one trained model; shared by the probe and fine-tuning.
+
+    ``test_labels`` / ``test_scores`` map each test split name to its arrays, the primary test split first (only
+    multiclass tasks have more than one). ``subsets`` are the primary test split's row masks (identity cutoffs or
+    QC flags); empty for kinds without subsets.
+    """
+    if list(test_scores) != list(test_labels) or not test_labels:
+        raise ValueError(f"test splits of labels {list(test_labels)} and scores {list(test_scores)} differ")
+    if kind != "multiclass" and len(test_labels) != 1:
+        raise ValueError(f"a {kind} task has exactly one test split, got {list(test_labels)}")
+    test_split = next(iter(test_labels))
+    labels, scores = test_labels[test_split], test_scores[test_split]
+    if kind == "multilabel":
+        ic = ic_options(config, train_labels)
+        metrics_val = evaluate(val_labels, val_scores, **ic)
+        metrics_test = evaluate_with_cutoffs(labels, scores, subsets, **ic)
+        headline = f"val fmax {metrics_val['fmax']:.4f} test fmax {metrics_test['all']['fmax']:.4f}"
+    elif kind == "multiclass":
+        metrics_val = evaluate_multiclass(val_labels, val_scores)
+        metrics_test = {name: evaluate_multiclass(test_labels[name], test_scores[name]) for name in test_labels}
+        headline = f"val accuracy {metrics_val['accuracy']:.4f} " + " ".join(
+            f"{name} {metrics_test[name]['accuracy']:.4f}" for name in test_labels)
+    elif kind in MASKED_KINDS:
+        evaluator = (evaluate_multitask_classification if kind == "multilabel_masked"
+                     else multitarget_regression_errors)
+        metrics_val = evaluator(val_labels, val_scores)
+        metrics_test = {"all": evaluator(labels, scores),
+                        "subsets": evaluate_masked_subsets(evaluator, labels, scores, subsets)}
+        headline = (f"val roc_auc {metrics_val['roc_auc']:.4f} test roc_auc {metrics_test['all']['roc_auc']:.4f} "
+                    f"prc_auc {metrics_test['all']['prc_auc']:.4f} "
+                    f"(tasks skipped {metrics_test['all']['num_tasks_skipped']})"
+                    if kind == "multilabel_masked" else
+                    f"val rmse {metrics_val['rmse']:.4f} mae {metrics_val['mae']:.4f} "
+                    f"test rmse {metrics_test['all']['rmse']:.4f} mae {metrics_test['all']['mae']:.4f}")
+    elif kind == "regression":
+        metrics_val = evaluate_regression(val_labels.reshape(-1), val_scores)
+        metrics_test = {"all": evaluate_regression(labels.reshape(-1), scores)}
+        headline = (f"val rmse {metrics_val['rmse']:.4f} test rmse {metrics_test['all']['rmse']:.4f} "
+                    f"pearson {_format_optional(metrics_test['all']['pearson_r'])} "
+                    f"spearman {_format_optional(metrics_test['all']['spearman_rho'])}")
+        if metrics_test["all"]["correlation_undefined_reason"]:
+            headline += f" (correlation undefined: {metrics_test['all']['correlation_undefined_reason']})"
+    else:
+        raise ValueError(f"unknown task kind {kind!r}; choose from {KINDS}")
+    return metrics_val, metrics_test, headline
+
+
+def save_predictions(path: Path, kind: str, *, test_chains: Dict[str, list], test_labels: Dict[str, np.ndarray],
+                     test_scores: Dict[str, np.ndarray], val_scores: np.ndarray) -> None:
+    """``predictions.npz``: the primary test split as ``test_*``, further (multiclass) test splits as ``<name>_*``."""
+    names = list(test_labels)
+    label_dtype = np.int64 if kind == "multiclass" else np.float32
+    extra = {f"{name}_{field}": value for name in names[1:] for field, value in (
+        ("chains", np.array(test_chains[name])), ("scores", test_scores[name].astype(np.float32)),
+        ("labels", test_labels[name]))}
+    np.savez_compressed(path, test_chains=np.array(test_chains[names[0]]),
+                        test_scores=test_scores[names[0]].astype(np.float32),
+                        test_labels=test_labels[names[0]].astype(label_dtype),
+                        valid_scores=val_scores.astype(np.float32), **extra)
 
 
 def build_loss(kind: str, settings: dict) -> nn.Module:
@@ -186,6 +263,14 @@ def validation_score(kind: str, targets: np.ndarray, predictions: np.ndarray, me
     return -rmse(targets.reshape(-1), predictions.reshape(-1))
 
 
+def validation_label(kind: str, score: float, metric: str = None) -> tuple:
+    """``(name, value)`` of a ``validation_score`` for the run log; errors are shown with their own sign."""
+    return (("val_fmax", score) if kind == "multilabel" else
+            ("val_accuracy", score) if kind == "multiclass" else
+            ("val_roc_auc", score) if kind == "multilabel_masked" else
+            (f"val_{metric}", -score) if kind == "multitarget_regression" else ("val_rmse", -score))
+
+
 def train_probe(train_x, train_y, val_x, val_y, *, head_kind, settings, seed, log, kind="multilabel",
                 num_classes=None, scale=None, metric=None):
     torch.manual_seed(seed)
@@ -194,12 +279,9 @@ def train_probe(train_x, train_y, val_x, val_y, *, head_kind, settings, seed, lo
         if scale is None:
             raise ValueError("a multitarget_regression probe needs scale=(mean, std) of the train targets")
         fit_y = (train_y - torch.from_numpy(scale[0])) / torch.from_numpy(scale[1])  # NaN stays NaN (missing)
-    if kind == "multiclass":
-        if not num_classes:
-            raise ValueError("a multiclass probe needs num_classes (task.yaml label_count)")
-        out_dim = int(num_classes)
-    else:
-        out_dim = 1 if kind == "regression" else train_y.shape[1]
+    if kind == "multiclass" and not num_classes:
+        raise ValueError("a multiclass probe needs num_classes (task.yaml label_count)")
+    out_dim = output_dim(kind, num_classes, train_y)
     head = build_head(head_kind, train_x.shape[1], out_dim,
                       hidden_dim=settings["mlp_hidden"], dropout=settings["mlp_dropout"])
     optimizer = torch.optim.AdamW(head.parameters(), lr=settings["lr"], weight_decay=settings["weight_decay"])
@@ -221,10 +303,7 @@ def train_probe(train_x, train_y, val_x, val_y, *, head_kind, settings, seed, lo
             optimizer.step()
             total += float(loss) * len(rows)
         score = validation_score(kind, val_y.numpy(), predict(head, val_x, kind=kind, scale=scale), metric)
-        label, shown = (("val_fmax", score) if kind == "multilabel" else
-                        ("val_accuracy", score) if kind == "multiclass" else
-                        ("val_roc_auc", score) if kind == "multilabel_masked" else
-                        (f"val_{metric}", -score) if kind == "multitarget_regression" else ("val_rmse", -score))
+        label, shown = validation_label(kind, score, metric)
         log(f"epoch {epoch} train_loss {total / len(order):.5f} {label} {shown:.4f}")
         if score > best["score"]:
             best = {"score": score, "epoch": epoch, "state": copy.deepcopy(head.state_dict())}
@@ -293,39 +372,12 @@ def main(argv=None) -> int:
                                  settings=settings, seed=seed, log=log, kind=kind,
                                  num_classes=config.get("label_count"), scale=scale,
                                  metric=config.get("primary_metric"))
-        test_scores = predict(head, tensors[test_split][0], kind=kind, scale=scale)
         val_scores = predict(head, tensors[val_split][0], kind=kind, scale=scale)
-        if kind == "multilabel":
-            ic = ic_options(config, data[train_split][1])
-            metrics_val = evaluate(data[val_split][1], val_scores, **ic)
-            metrics_test = evaluate_with_cutoffs(data[test_split][1], test_scores, subsets, **ic)
-            headline = f"val fmax {metrics_val['fmax']:.4f} test fmax {metrics_test['all']['fmax']:.4f}"
-        elif kind == "multiclass":
-            metrics_val = evaluate_multiclass(data[val_split][1], val_scores)
-            all_test_scores = {name: predict(head, tensors[name][0], kind=kind) for name in test_splits}
-            metrics_test = {name: evaluate_multiclass(data[name][1], all_test_scores[name]) for name in test_splits}
-            headline = f"val accuracy {metrics_val['accuracy']:.4f} " + " ".join(
-                f"{name} {metrics_test[name]['accuracy']:.4f}" for name in test_splits)
-        elif kind in MASKED_KINDS:
-            evaluator = (evaluate_multitask_classification if kind == "multilabel_masked"
-                         else multitarget_regression_errors)
-            metrics_val = evaluator(data[val_split][1], val_scores)
-            metrics_test = {"all": evaluator(data[test_split][1], test_scores),
-                            "subsets": evaluate_masked_subsets(evaluator, data[test_split][1], test_scores, subsets)}
-            headline = (f"val roc_auc {metrics_val['roc_auc']:.4f} test roc_auc {metrics_test['all']['roc_auc']:.4f} "
-                        f"prc_auc {metrics_test['all']['prc_auc']:.4f} "
-                        f"(tasks skipped {metrics_test['all']['num_tasks_skipped']})"
-                        if kind == "multilabel_masked" else
-                        f"val rmse {metrics_val['rmse']:.4f} mae {metrics_val['mae']:.4f} "
-                        f"test rmse {metrics_test['all']['rmse']:.4f} mae {metrics_test['all']['mae']:.4f}")
-        else:
-            metrics_val = evaluate_regression(data[val_split][1].reshape(-1), val_scores)
-            metrics_test = {"all": evaluate_regression(data[test_split][1].reshape(-1), test_scores)}
-            headline = (f"val rmse {metrics_val['rmse']:.4f} test rmse {metrics_test['all']['rmse']:.4f} "
-                        f"pearson {_format_optional(metrics_test['all']['pearson_r'])} "
-                        f"spearman {_format_optional(metrics_test['all']['spearman_rho'])}")
-            if metrics_test["all"]["correlation_undefined_reason"]:
-                headline += f" (correlation undefined: {metrics_test['all']['correlation_undefined_reason']})"
+        test_scores = {name: predict(head, tensors[name][0], kind=kind, scale=scale) for name in test_splits}
+        test_labels = {name: data[name][1] for name in test_splits}
+        metrics_val, metrics_test, headline = evaluate_task(
+            kind, config, train_labels=data[train_split][1], val_labels=data[val_split][1], val_scores=val_scores,
+            test_labels=test_labels, test_scores=test_scores, subsets=subsets)
         metrics = {
             "task": args.task, "kind": kind, "model_id": args.model_id, "protocol": protocol,
             "pooling": pooling, "seed": seed, "best_epoch": best["epoch"],
@@ -335,13 +387,8 @@ def main(argv=None) -> int:
         if scale is not None:
             metrics["target_standardization"] = {"mean": scale[0].tolist(), "std": scale[1].tolist(),
                                                  "primary_metric": config["primary_metric"]}
-        extra = ({f"{name}_{field}": value for name in test_splits[1:] for field, value in (
-            ("chains", np.array(data[name][0])), ("scores", all_test_scores[name].astype(np.float32)),
-            ("labels", data[name][1]))} if kind == "multiclass" else {})
-        np.savez_compressed(out / "predictions.npz", test_chains=np.array(data[test_split][0]),
-                            test_scores=test_scores.astype(np.float32),
-                            test_labels=data[test_split][1].astype(np.float32 if kind != "multiclass" else np.int64),
-                            valid_scores=val_scores.astype(np.float32), **extra)
+        save_predictions(out / "predictions.npz", kind, test_chains={name: data[name][0] for name in test_splits},
+                         test_labels=test_labels, test_scores=test_scores, val_scores=val_scores)
         torch.save({"state_dict": head.state_dict(), "feature_mean": mean, "feature_std": std,
                     "head": args.head, "in_dim": int(mean.shape[0]),
                     **({"target_mean": scale[0], "target_std": scale[1]} if scale is not None else {})}, out / "head.pt")
@@ -350,7 +397,7 @@ def main(argv=None) -> int:
                                                      "outputs_root": str(args.outputs_root)},
                                                      "probe": settings, "embeddings": provenance, "run": run},
                                                     indent=1))
-        (out / "metrics.json").write_text(json.dumps(metrics, indent=1))
+        write_text_atomic(out / "metrics.json", json.dumps(metrics, indent=1))  # last: marks the seed complete
         log_handle.close()
         print(f"seed {seed}: {headline} -> {out}")
     return 0

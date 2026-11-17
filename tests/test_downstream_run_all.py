@@ -1,7 +1,7 @@
-"""``downstream.run_all`` (``make ds-run``): plan, skips, failures, log names, GPU slots, model identity.
+"""``downstream.run_all`` (``make ds-run``): plan, skips, failures, log names, GPU slots, model identity, fine-tuning.
 
-No GPU and no real embed/probe: the embed and probe commands are a fake script (written per test) that takes the
-same arguments and writes the files ``downstream.embed`` / ``downstream.probe`` would (shapes from
+No GPU and no real embed/probe/fine-tune: those commands are a fake script (written per test) that takes the same
+arguments and writes the files ``downstream.embed`` / ``downstream.probe`` / ``downstream.finetune`` would (shapes from
 ``ledger_helpers``). The ledger step and the summary are the real modules. Task configs are stubbed by
 ``describe`` (one test reads the real task.yaml files, without data).
 """
@@ -20,6 +20,7 @@ import pytest
 
 from downstream import ledger, run_all
 from downstream.common import registry
+from downstream.finetune_settings import resolve_settings
 from ledger_helpers import card
 
 REPO = Path(__file__).resolve().parents[1]
@@ -43,7 +44,7 @@ start = time.time()
 print(f"fake {kind} pid {os.getpid()}", flush=True)
 time.sleep(float(os.environ.get("FAKE_SLEEP", "0.2")))
 event = {"kind": kind, "task": a.task, "gpu": os.environ.get("CUDA_VISIBLE_DEVICES"), "pid": os.getpid(),
-         "start": start, "splits": a.splits, "seeds": a.seeds, "split_tag": a.split_tag}
+         "start": start, "splits": a.splits, "seeds": a.seeds, "split_tag": a.split_tag, "random_init": a.random_init}
 if a.task in os.environ.get("FAKE_FAIL", "").split(","):
     print(f"boom {a.task}", flush=True)
     sys.exit(3)
@@ -67,12 +68,29 @@ if kind == "probe":
             metrics, splits = H.molnet_cls_metrics(a.model_id, seed, 0.8), ("train", "valid", "test")
             metrics.update(task=a.task, protocol=f"{a.head}_probe")
         H.write_probe(root, metrics, splits=splits, sha=sha)
+if kind == "finetune":
+    model_id = a.model + (".random_init" if a.random_init else "")
+    for seed in a.seeds:
+        if a.task == "ec":
+            metrics = H.ec_metrics(model_id, seed, 0.6, protocol="finetune")
+        elif a.task == "lba":
+            metrics = H.lba_metrics(model_id, seed, 1.4, split_tag=a.split_tag)
+            metrics["protocol"] = f"finetune.{a.split_tag}.joint"
+        else:
+            metrics = H.molnet_cls_metrics(model_id, seed, 0.85)
+            metrics.update(task=a.task, protocol="finetune")
+        H.write_finetune(root, metrics, sha=sha, random_init=a.random_init)
 event["end"] = time.time()
 with open(os.environ["FAKE_EVENTS"], "a") as handle:
     handle.write(json.dumps(event) + "\n")
 '''
+FT_BLOCK = {"pooling": "mean_atoms", "head": "mlp", "seeds": [0, 1, 2], "epochs": 50, "patience": None,
+            "max_atoms_per_batch": 15000, "max_samples_per_batch": None, "lr_encoder": 1e-5,
+            "lr_encoder_random_init": 3e-4, "lr_head": 1e-3, "weight_decay": 1e-4, "grad_clip_norm": 0.5,
+            "mlp_hidden": 512, "mlp_dropout": 0.2}
+FT_SECONDS = {"ec": 900.0, "lba": 25.0}  # per epoch; MoleculeNet tasks get 5.0 (the queue starts with the longest)
 REVISION = "rev_v2"  # processed directory name of the fixture data and of H.embedding_record
-LOG_NAME = re.compile(r"^(embed|probe_linear|probe_mlp|ledger_add|ledger_report)_([A-Za-z0-9_.]+)_(model_a)_(\d{8}_\d{6}_\d{3})_(\d+)\.log$")
+LOG_NAME = re.compile(r"^(embed|probe_linear|probe_mlp|finetune|ledger_add|ledger_report)_([A-Za-z0-9_.]+)_(model_a)_(\d{8}_\d{6}_\d{3})_(\d+)\.log$")
 
 
 @pytest.fixture
@@ -93,7 +111,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", f"{REPO}{os.pathsep}{REPO / 'tests'}")
     monkeypatch.delenv("FAKE_FAIL", raising=False)
     commands = {"embed": [sys.executable, str(fake), "embed"], "probe": [sys.executable, str(fake), "probe"],
-                "ledger": [sys.executable, "-m", "downstream.ledger"]}
+                "finetune": [sys.executable, str(fake), "finetune"], "ledger": [sys.executable, "-m", "downstream.ledger"]}
     data = tmp_path / "data"
 
     def describe(unit):
@@ -101,7 +119,9 @@ def world(tmp_path, monkeypatch):
                     else "protein")
         splits = ["train", "val", "test"] if unit.task == "lba" else ["train", "valid", "test"]
         pooling = "concat_pocket_ligand" if unit.task == "lba" else "mean_atoms"
-        return {"modality": modality, "splits": splits, "pooling": pooling,
+        return {"modality": modality, "splits": splits, "pooling": pooling, "finetune_pooling": pooling,
+                "finetune": dict(FT_BLOCK, pooling=pooling),
+                "finetune_seconds": FT_SECONDS.get(unit.task, 5.0) * FT_BLOCK["epochs"],
                 "processed": {s: data / unit.key / REVISION / f"{s}.pt" for s in splits}}
 
     def processed(*keys):
@@ -202,7 +222,8 @@ def test_real_task_configs_describe_every_unit_of_all():
     assert [u.key for u in units if u.task == "lba"] == ["lba.identity30.joint", "lba.identity60.joint"]
     for unit in units:
         info = run_all.describe_task(unit)
-        assert info["modality"] in run_all.MODALITY_DOMAINS and info["splits"]
+        assert info["modality"] in run_all.MODALITY_DOMAINS and info["splits"] and info["finetune_pooling"]
+        assert info["finetune_seconds"] > 0 and resolve_settings(info["finetune"], random_init=True)
         assert set(info["processed"]) == set(info["splits"])
     with pytest.raises(run_all.PlanError, match="unknown task"):
         run_all.expand_tasks("ec,nope", ledger.load_catalog())
@@ -261,6 +282,7 @@ def test_checkpoint_path_snapshot_and_name_conflicts(world, capsys):
     (["--model", "model_a", "--name", "other"], "only for a checkpoint path"),
     (["--model", "nosuch"], "no snapshot or alias"),
     (["--model", "model_a", "--heads", "mlp,cnn"], "HEADS="),
+    (["--model", "model_a", "--heads", "finetune,finetune"], "HEADS="),
     (["--model", "model_a", "--gpus", "auto"], "ds-run does not pick GPUs"),
 ])
 def test_bad_arguments_stop_before_anything(world, capsys, args, message):
@@ -316,7 +338,7 @@ def test_log_names_are_unique_and_carry_the_child_pid(world):
     world.main("--model", "model_a", "--tasks", "ec,mn_bace,mn_esol,mn_hiv,lba", "--gpus", "1", "--per-gpu", "6",
                "--probe-jobs", "4", "--heads", "linear,mlp")
     logs = sorted(p.name for p in next(world.logs.glob("ds_run_model_a_*")).glob("*.log"))
-    assert len(logs) == len(set(logs)) == 6 + 12 + 1 + 1  # + the final ledger report
+    assert len(logs) == len(set(logs)) == 6 + 12 + 12 + 1 + 1  # + a ledger add per probe, final add and report
     pids = {e["pid"] for e in _events(world)}
     for name in logs:
         match = LOG_NAME.match(name)
@@ -372,7 +394,7 @@ def test_ds_run_make_target(tmp_path):
 
 @pytest.mark.parametrize("args", [
     ["ds-embed", "TASK=ec", "MODEL=m", "GPU=1"], ["ds-embed", "TASK=lba", "MODEL=m", "GPU=1", "SPLIT_TAG=identity60"],
-    ["ds-probe", "TASK=ec", "MODEL_ID=m", "HEAD=mlp", "FOREGROUND=1"], ["ds-finetune", "TASK=ec", "MODEL=m", "GPU=1"],
+    ["ds-probe", "TASK=ec", "MODEL_ID=m", "HEAD=mlp", "FOREGROUND=1"],
     ["ds-snapshot", "CKPT=c", "NAME=n"], ["ds-report", "TASK=ec"], ["ds-ledger-add", "OUTPUTS_ROOT=/o"],
     ["ds-compare", "A=a", "B=b"], ["ds-summary"], ["ds-missing"], ["ds-ledger-verify"],
 ])
@@ -627,3 +649,152 @@ def test_ds_run_is_detached_by_default_and_plan_or_foreground_stay_in_the_termin
         assert "setsid" not in text and "python -u -m downstream.run_all" in text
     text, _ = _make("ds-probe", "TASK=ec", "MODEL_ID=m", "HEAD=mlp", "FOREGROUND=1")
     assert "set -o pipefail;" in text and "| tee logs/" in text and "setsid" not in text
+
+
+# -- fine-tuning (HEADS=...,finetune) ------------------------------------------------------------------------
+
+def test_finetune_only_skips_embeddings_runs_one_job_per_gpu_and_reaches_the_ledger(world, monkeypatch):
+    world.processed("ec", "mn_bace", "lba.identity30.joint", "lba.identity60.joint")
+    monkeypatch.setenv("FAKE_SLEEP", "0.4")
+    assert world.main("--model", "model_a", "--tasks", "ec,mn_bace,lba", "--gpus", "3,4", "--per-gpu", "3",
+                      "--heads", "finetune") == 0
+    events = _events(world)
+    assert {e["kind"] for e in events} == {"finetune"}  # no probe head: no embedding, no probe
+    assert sorted((e["task"], e["split_tag"]) for e in events) == [
+        ("ec", None), ("lba", "identity30"), ("lba", "identity60"), ("mn_bace", None)]
+    assert all(e["seeds"] == [0, 1, 2] and not e["random_init"] for e in events)
+    assert {e["gpu"] for e in events} == {"3", "4"}
+    for gpu in ("3", "4"):  # --per-gpu applies to embeddings only; fine-tuning takes a whole GPU
+        spans = [(e["start"], e["end"]) for e in events if e["gpu"] == gpu]
+        assert max(sum(1 for s, e in spans if s <= t < e) for t, _ in spans) == 1
+    rows = ledger.read_records(world.results, "measurements")
+    assert {r["protocol_family"] for r in rows} == {"finetune"}
+    assert {r["protocol_id"] for r in rows} == {"finetune", "finetune.identity30.joint", "finetune.identity60.joint"}
+    summary = next(world.logs.glob("ds_run_model_a_*/summary.md")).read_text()
+    assert re.search(r"\| ec \| finetune \| fmax \(test/all\) \| 0\.600 ± 0\.000 \(n_seeds=3", summary)
+    assert re.search(r"\| lba.identity60.joint \| finetune.identity60.joint \| rmse \(test/all\) \| 1\.400", summary)
+
+
+def _finished_finetune(world, task, seed, revision=REVISION, **changed):
+    done = registry.results_dir(task, "model_a", "finetune", seed, pooling="mean_atoms", root=world.outputs)
+    done.mkdir(parents=True)
+    (done / "metrics.json").write_text("{}")
+    (done / "config.json").write_text(json.dumps({
+        "finetune": resolve_settings({**FT_BLOCK, **changed}, random_init=False),
+        "processed": {split: {"path": f"/data/{task}/{revision}/{split}.pt", "sha256": "0" * 64}
+                      for split in ("train", "valid", "test")}}))
+
+
+def test_finetune_plan_skips_done_seeds_reports_missing_data_and_needs_gpus(world, capsys):
+    world.processed("ec", "mn_esol")
+    _finished_finetune(world, "ec", 0)
+    _finished_finetune(world, "mn_esol", 0, revision="rev_v1")  # trained on an older processed directory
+    assert world.main("--model", "model_a", "--tasks", "ec,mn_bace,mn_esol", "--gpus", "2", "--heads", "finetune",
+                      "--plan") == 1
+    out = capsys.readouterr().out
+    assert "1. Embed (0 jobs)" in out and "3. Fine-tune (1 jobs" in out
+    assert "WILL RUN  finetune ec: seeds 1 2" in out
+    assert re.search(r"ERROR  finetune mn_bace: no processed data: .*mn_bace/rev_v2/train\.pt", out)
+    assert re.search(r"ERROR  finetune mn_esol: .*seed0 trained on \['rev_v1'\].*but the task reads \['rev_v2'\]", out)
+    assert world.main("--model", "model_a", "--tasks", "ec", "--heads", "finetune", "--plan") == 2
+    assert "1 fine-tune job(s)" in capsys.readouterr().err
+    for seed in (1, 2):
+        _finished_finetune(world, "ec", seed)
+    assert world.main("--model", "model_a", "--tasks", "ec", "--heads", "finetune", "--plan") == 0  # nothing on GPU
+    assert "WILL SKIP  finetune ec: already complete" in capsys.readouterr().out
+
+
+def test_finetune_runs_after_the_probes_and_the_random_init_arm_has_its_own_model_id(world):
+    world.processed("ec")
+    assert world.main("--model", "model_a", "--random-init", "--tasks", "ec", "--gpus", "1", "--heads",
+                      "mlp,finetune", "--seeds", "0") == 0
+    events = _events(world)
+    tuned = [e for e in events if e["kind"] == "finetune"]
+    assert len(tuned) == 1 and tuned[0]["random_init"] and tuned[0]["gpu"] == "1" and tuned[0]["seeds"] == [0]
+    assert tuned[0]["start"] >= max(e["end"] for e in events if e["kind"] == "probe")
+    assert (world.outputs / "downstream" / "ec" / "model_a.random_init" / "finetune.mean_atoms" / "seed0"
+            / "metrics.json").is_file()
+    rows = ledger.read_records(world.results, "measurements")
+    assert {r["model_kind"] for r in rows if r["protocol_family"] == "finetune"} == {"mind_random_init"}
+
+
+def test_finetune_protocol_names_match_downstream_finetune():
+    assert run_all.Unit("lba", "identity30", "joint").protocol("finetune") == "finetune.identity30.joint"
+    assert run_all.Unit("ec").protocol("finetune") == "finetune" and run_all.Unit("ec").protocol("mlp") == "mlp_probe"
+
+
+def test_ds_finetune_make_target():
+    text, result = _make("ds-finetune", "TASK=mn_bbbp", "MODEL=m", "GPU=3", "SEEDS=0", "RANDOM_INIT=1",
+                         "OUTPUTS_ROOT=/o", "FT_ARGS=--epochs 2")
+    assert result.returncode == 0, result.stderr
+    assert ('CUDA_VISIBLE_DEVICES=3 python -u -m downstream.finetune --threads 8 --task mn_bbbp --model "m" '
+            '--device cuda:0 --random-init --seeds 0 --outputs-root "/o" --epochs 2') in text
+    assert "setsid nohup" in text and "EXIT_CODE" in text and "> $log 2>&1 < /dev/null &" in text
+    text, _ = _make("ds-finetune", "TASK=lba", "MODEL=m", "GPU=3", "SPLIT_TAG=identity60", "FOREGROUND=1")
+    assert "--split-tag identity60" in text and "| tee logs/" in text and "setsid" not in text
+    refused = subprocess.run(["make", "--no-print-directory", "ds-finetune", "TASK=ec", "MODEL=m", "GPU=2,3"],
+                             cwd=REPO, capture_output=True, text=True)
+    assert refused.returncode != 0 and "uses one GPU" in refused.stdout + refused.stderr
+
+
+def test_ds_run_passes_finetune_through_heads():
+    text, result = _make("ds-run", "MODEL=g1", "TASKS=ec", "GPU=2", "HEADS=linear,mlp,finetune", "PLAN=1")
+    assert result.returncode == 0, result.stderr
+    assert "--heads linear,mlp,finetune" in text
+
+
+def test_a_stale_fine_tune_never_blocks_the_probes_and_other_settings_count_as_stale(world, capsys):
+    world.processed("ec", "mn_esol")
+    _finished_finetune(world, "ec", 0, revision="rev_v1")  # fine-tune of an older processed directory
+    _finished_finetune(world, "mn_esol", 0, epochs=2)  # a trial run with other settings in the same outputs root
+    for split in ("train", "valid", "test"):
+        _write_embedding(world, "ec", "model_a", split)
+    assert world.main("--model", "model_a", "--tasks", "ec,mn_esol", "--gpus", "2", "--heads", "mlp,finetune",
+                      "--seeds", "0", "--plan") == 1
+    out = capsys.readouterr().out
+    assert re.search(r"ERROR  finetune ec: .*trained on \['rev_v1'\]", out)
+    assert re.search(r"ERROR  finetune mn_esol: .*trained with other finetune settings", out)
+    assert "WILL RUN  probe ec mlp: seeds 0" in out and "WILL SKIP  embed ec: already complete" in out
+    assert world.main("--model", "model_a", "--tasks", "ec", "--gpus", "2", "--heads", "mlp,finetune",
+                      "--seeds", "0") == 1  # the fine-tune error is listed ...
+    assert [e["task"] for e in _events(world) if e["kind"] == "probe"] == ["ec"]  # ... and the probe still ran
+    summary = next(world.logs.glob("ds_run_model_a_*/summary.md")).read_text()
+    assert "the embedding of this task failed" not in summary and "- finetune ec:" in summary
+
+
+def test_fine_tune_queue_starts_longest_first_honours_ft_per_gpu_and_ingests_each_job(world, monkeypatch, capsys):
+    keys = ("mn_bace", "mn_bbbp", "ec", "mn_hiv", "lba.identity30.joint", "lba.identity60.joint")
+    world.processed(*keys)
+    monkeypatch.setenv("FAKE_SLEEP", "0.5")
+    assert world.main("--model", "model_a", "--tasks", "mn_bace,mn_bbbp,ec,mn_hiv,lba", "--gpus", "3,4",
+                      "--ft-per-gpu", "2", "--heads", "finetune", "--seeds", "0") == 0
+    started = re.findall(r"STARTED finetune (\S+) \((\d)\)", capsys.readouterr().out)
+    assert started[:3] == [("ec", "3"), ("lba.identity30.joint", "4"), ("lba.identity60.joint", "3")]  # longest first
+    events = _events(world)
+    for gpu in ("3", "4"):
+        spans = [(e["start"], e["end"]) for e in events if e["gpu"] == gpu]
+        assert max(sum(1 for s, e in spans if s <= t < e) for t, _ in spans) == 2
+    ingests = ledger.read_records(world.results, "ingests")
+    # one add per finished job (two jobs ending together: the first add takes both); the final add finds nothing new
+    assert len(ingests) == len(events) + 1 and ingests[-1]["rows_added"] == 0
+    assert ingests[0]["rows_added"] > 0 and sum(record["rows_added"] for record in ingests) == len(
+        ledger.read_records(world.results, "measurements"))
+    run_dir = next(world.logs.glob("ds_run_model_a_*"))
+    assert len(list(run_dir.glob("ledger_add_after_finetune_*.log"))) == len(events)
+
+
+def test_model_name_with_random_init_suffix_is_the_random_init_arm(world, capsys):
+    world.processed("ec")
+    assert world.main("--model", "model_a.random_init", "--tasks", "ec", "--gpus", "1", "--heads", "finetune",
+                      "--plan") == 0
+    assert "(model_id model_a.random_init)" in capsys.readouterr().out
+
+
+def test_ds_run_models_runs_each_model_in_one_detached_command():
+    text, result = _make("ds-run", "MODELS=a b.random_init", "GPU=4,5", "HEADS=finetune", "SEEDS=0", "FT_PER_GPU=2")
+    assert result.returncode == 0, result.stderr
+    assert "setsid nohup" in text and "for m in a b.random_init; do" in text and '--model "$m"' in text
+    assert "--ft-per-gpu 2" in text and 'MODEL_EXIT_CODE $m=$c' in text and "EXIT_CODE=$code" in text
+    both = subprocess.run(["make", "--no-print-directory", "ds-run", "MODEL=a", "MODELS=b"], cwd=REPO,
+                          capture_output=True, text=True)
+    assert both.returncode != 0 and "not both" in both.stdout + both.stderr

@@ -225,6 +225,14 @@ def results_dir(
             / f"{protocol}.{_check_name('pooling', pooling)}" / f"seed{int(seed)}")
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write ``path`` through a temporary sibling and a rename, so a reader never sees a half-written file."""
+    path = Path(path)
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(text)
+    os.replace(partial, path)
+
+
 def new_results_dir(
     task: str, model_id: str, protocol: str, seed: int, *, pooling: str, root: Optional[Path] = None
 ) -> Path:

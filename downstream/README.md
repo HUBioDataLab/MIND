@@ -45,7 +45,7 @@ make ds-status                               # state of this month's ds_* logs
 | Foldseek 3Di | `python -m downstream.baselines.foldseek_3di --task ec --foldseek BIN --threads 16` | data processing, CPU |
 | SaProt | `python -m downstream.embed --task ec --model saprot_650m_pdb --hf-cache-dir DIR` | GPU inference |
 | probe | `python -m downstream.probe --task <task> --model-id <id> --head linear\|mlp [--pooling P]` | CPU training |
-| fine-tune | `python -m downstream.finetune --task <task> --model <snapshot> [--random-init]` | GPU training |
+| fine-tune | `python -m downstream.finetune --task <task> --model <snapshot> [--random-init]` | GPU training, one GPU |
 | report | `python -m downstream.report --task <task>` | CPU |
 | ledger | `python -m downstream.ledger add --outputs-root DIR`, `downstream.ledger_report report`, `downstream.ledger_compare --a A --b B` | CPU, writes only under `$MIND_RESULTS_ROOT` |
 
@@ -54,6 +54,31 @@ For `lba`, `embed`, `probe` and `finetune` also take `--split-tag identity30|ide
 combination writes its own embeddings and results directory.
 
 Training-like steps (embed, probe, fine-tune) are user-run through Make targets.
+
+### Fine-tuning
+
+`downstream.finetune` trains encoder and head together for every task kind, with the probe's loss, validation score and
+evaluation function (`downstream.probe.evaluate_task`), so a `finetune` row in the results ledger carries the same
+metrics as the probe rows of that task (EC/GO Fmax per identity cutoff and AUPRs, GO's IC-binned AUPR, Fold/Reaction
+accuracy per test split, LBA RMSE/Pearson/Spearman, MoleculeNet ROC-AUC/PRC-AUC or RMSE/MAE with the QC subsets).
+MoleculeNet classification uses BCE over the labelled cells only (NaN = missing); MoleculeNet regression standardizes
+the targets with train statistics and reports errors in the original units. Settings come from the `finetune` block of
+each `task.yaml` (`downstream/finetune_settings.py` resolves them): AdamW, `lr_encoder` (pretrained encoder) below
+`lr_head`; gradients clipped to `grad_clip_norm` 0.5 (the pretraining value); `--random-init` trains the same
+architecture from untrained weights (seeded with the run seed) with `lr_encoder_random_init`; `epochs` epochs
+(`patience: null`), the epoch with the best validation score is kept and evaluated on the test split(s); seeds 0, 1, 2.
+As in the probe, the head reads pooled features standardized with the train mean / std, taken once from the initial
+encoder and kept as fixed head buffers (saved in `head.pt`). A batch holds at most `max_atoms_per_batch` graph nodes
+and, for MoleculeNet, at most `max_samples_per_batch` 32 molecules (the per-process batch of the Uni-Mol recipe;
+without it a 15,000-node budget packs hundreds of molecules into one step). MoleculeNet per-dataset changes live in
+`finetune_overrides` of its task.yaml (PCBA: 20 epochs; the others keep 50). Validation and test scoring use
+deterministic CUDA kernels, training does not. `run.log` gives the train and validation seconds of every epoch and
+notes when the best epoch is the last one (the arm may still have been improving). `--lr-encoder`, `--epochs` and
+`--patience` override the file and are recorded in `config.json`; use a separate `OUTPUTS_ROOT` for such trial runs.
+All requested seeds are checked before training, and `metrics.json` is written last and atomically (it marks a
+finished seed). One process uses one GPU; there is no multi-GPU path. `make ds-finetune TASK=<task> MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1] [SEEDS="0 1 2"]
+[OUTPUTS_ROOT=<dir>] [FT_ARGS="--epochs 2"]` runs one task detached; `make ds-run ... HEADS=linear,mlp,finetune` (or
+`HEADS=finetune`) runs it for every task (below).
 
 ### MoleculeNet (`mn_*`)
 
@@ -71,7 +96,7 @@ sets give 1.37-1.46), naming the task. QM7 is processed revision `v2` (the other
 refused at load time. The ligand graph is the one of the LBA "separate" ligand path (`dataset_type="unimol"`, 5 A radius, 64
 neighbours). The probe trains a masked BCE head (classification) or a masked MSE head on train-standardized targets
 (regression), selects the epoch by the primary metric and also reports the QC-flagged subsets of the test set.
-`downstream.finetune` refuses these kinds. Embedding with a MIND checkpoint requires CUDA and a checkpoint trained with
+`downstream.finetune` fine-tunes both kinds with the same losses and metrics. Embedding with a MIND checkpoint requires CUDA and a checkpoint trained with
 `geometry_neutral_virtual_slots` (protein flag set).
 
 SaProt (`saprot_650m_pdb`, `saprot_650m_af2`, `saprot_35m_af2`) sees the residues
@@ -232,7 +257,7 @@ Id matching does not detect homologs. `make ds-leakage ...` (see the Makefile he
 - Source notes and pinned checksums are at the top of each `task.yaml`. Reaction's Google Drive archive has no published
   size or md5: `download` stops until `archive_sha256` / `archive_bytes` are pinned after reviewing `provenance.json`.
 - Probe: cross-entropy head, validation accuracy, one accuracy per test split in `metrics.json`; `downstream.report`
-  adds the GearNet-paper literature rows. Fine-tuning refuses multiclass tasks (not implemented).
+  adds the GearNet-paper literature rows. Fine-tuning uses the same loss and reports the same blocks.
 - Commands: `make ds-download|ds-validate|ds-process TASK=fold` (same for `reaction`).
 - Leakage: Fold ids are SCOPe domain ids (`scop_domain`, no map to the AFDB UniProt reference, so the tool refuses);
   Reaction ids are `4xi6.A` (`pdb_chain`, needs `--id-map`). See `queries:` in `leakage_references.yaml`.
@@ -298,7 +323,21 @@ when named. A task outside the model's pretraining domains (protein needs `pdb`,
 and listed under `all`, refused when named. A failing job is reported with its log and the others continue; the
 run ends with the list of what is missing and exit code 1. `PLAN=1` prints what would run (and recorded embedding
 times of other models, when there are any) and writes nothing. Logs and `summary.md` go to
-`logs/<Month><Year>/ds_run_<model>_<stamp>_<pid>/`; fine-tuning is not part of this command.
+`logs/<Month><Year>/ds_run_<model>_<stamp>_<pid>/`.
+
+- `HEADS=linear,mlp,finetune` adds fine-tuning: after the probes, one `downstream.finetune` job per task (SEEDS),
+  at most `FT_PER_GPU` jobs per GPU (default 1; PER_GPU applies to embeddings only), the longest first (estimate:
+  task.yaml `finetune_seconds_per_epoch` x epochs x seeds), each next job on the first free slot. Rows are tagged
+  `protocol_family=finetune`, `protocol_id=finetune` (LBA `finetune.<split_tag>.joint`). A seed counts as done only
+  when its `metrics.json` exists and its `config.json` records the current task.yaml settings and processed directory;
+  otherwise the task is reported as an error ("use a new OUTPUTS_ROOT"), never silently skipped or overwritten.
+  `HEADS=finetune` alone skips the embeddings and probes; a fine-tune problem never blocks the probes.
+  `RANDOM_INIT=1`, `MODEL=<snapshot>.random_init` and `COMPARE_TO=<snapshot>.random_init` fine-tune the untrained
+  control the same way.
+- After every finished probe or fine-tune job, ds-run adds the outputs root to the ledger (one add at a time;
+  `ledger add` skips files already ingested), so an interrupted multi-day run keeps what finished.
+- `MODELS="a b a.random_init"` (instead of MODEL) runs ds-run for each model one after another in one detached
+  command and one log; each model ends with `MODEL_EXIT_CODE <model>=<n>`, the log with `EXIT_CODE`.
 
 - `COMPARE_TO=a,b.random_init`: every listed model goes through the same tasks, heads and seeds (what is complete
   is skipped; `.random_init` is the RANDOM_INIT=1 control of that snapshot), gets its own table, and at the end
@@ -311,11 +350,11 @@ times of other models, when there are any) and writes nothing. Logs and `summary
   `make ds-run MODEL=/path/to/best-checkpoint.ckpt NAME=<new snapshot> OUTPUTS_ROOT=<outputs root> GPU=2,3
   COMPARE_TO=<reference snapshot>,<reference snapshot>.random_init` (first with `PLAN=1`).
 
-**Every long ds-* job keeps running when the terminal or SSH connection closes.** `ds-run` and `ds-probe` start in
+**Every long ds-* job keeps running when the terminal or SSH connection closes.** `ds-run`, `ds-probe` and `ds-finetune` start in
 their own session (`setsid nohup`, no terminal) and return at once with the log path; the log's last line is
 `EXIT_CODE=<n>` of the Python command (non-zero when it failed). `make ds-status [N=15]`
 lists this month's `ds_*.log` files with that line (no line: still running or killed; check the process with
 `make status`). `FOREGROUND=1` runs them in the terminal (`| tee`); `PLAN=1` always runs in the terminal.
-`ds-embed`, `ds-finetune`, `eval-pretrain` and `eval-counterfactual` also run as `nohup ... &`. Short CPU steps
+`ds-finetune` is detached the same way. `ds-embed`, `eval-pretrain` and `eval-counterfactual` run as `nohup ... &`. Short CPU steps
 (`ds-snapshot`, `ds-report`, `ds-ledger-*`, `ds-compare`, `ds-summary`, `ds-missing`) and the data steps
 (`ds-download`/`ds-process`/`ds-validate`/`ds-leakage`) stay in the foreground.

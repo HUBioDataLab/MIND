@@ -21,7 +21,7 @@ import yaml
 
 from core.pretraining_config import create_pretraining_config, load_config_yaml
 from data_loading.atom_position_vocab import RARE_ATOMIC_NUMBER
-from downstream import finetune, probe, report
+from downstream import probe, report
 from downstream.common import complex_graph as cg
 from downstream.common.metrics import multitarget_regression_errors, multitask_prc_auc, multitask_roc_auc
 from downstream.tasks import KINDS, TASKS, load_task
@@ -571,12 +571,6 @@ def test_probe_refuses_an_unlabelled_or_constant_regression_target(tmp_path):
     _write_qc("mn_esol", tmp_path / "unimol_molnet" / "mn_esol", ids["test"])
     with pytest.raises(ValueError, match="constant"):
         _run_probe(tmp_path, "mn_esol", tmp_path / "unimol_molnet" / "mn_esol")
-
-
-def test_finetune_refuses_the_new_kinds_until_they_are_implemented():
-    for task in ("mn_esol", "mn_tox21"):
-        with pytest.raises(SystemExit):
-            finetune.main(["--task", task, "--model", "x", "--device", "cuda:0"])
 
 
 def test_report_builds_tables_for_both_new_kinds(tmp_path):

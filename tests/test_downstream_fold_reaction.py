@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import yaml
 
-from downstream import finetune, probe, report
+from downstream import probe, report
 from downstream.common import leakage, structure_io
 from downstream.common.metrics import accuracy, evaluate_multiclass
 from downstream.tasks import KINDS, TASKS, load_task, multiclass
@@ -657,13 +657,6 @@ def test_probe_needs_num_classes_and_unknown_kinds_raise():
                  lambda: probe.predict(torch.nn.Linear(2, 2), x, kind="ordinal")):
         with pytest.raises(ValueError, match="unknown task kind 'ordinal'"):
             call()
-
-
-def test_finetune_refuses_multiclass_tasks_loudly():
-    for task in ("fold", "reaction"):
-        with pytest.raises(SystemExit) as exc:
-            finetune.main(["--task", task, "--model", "anything"])
-        assert exc.value.code == 2
 
 
 def test_split_roles_keep_three_split_tasks_unchanged():

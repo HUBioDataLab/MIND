@@ -142,17 +142,27 @@ probe:
                           # high- and low-affinity tails that drive RMSE.
   huber_delta: 1.0
 
+# Fine-tuning (downstream.finetune, user-run on one GPU): AdamW with an encoder LR below the head LR; a
+# random-init encoder trains from scratch with lr_encoder_random_init. patience: null runs every epoch; the
+# epoch with the best validation score (valid split only) is evaluated on the test split(s).
 finetune:
   pooling: concat_pocket_ligand
   head: mlp
-  seeds: [0]
+  seeds: [0, 1, 2]
   epochs: 50
-  patience: 10
+  patience: null
   max_atoms_per_batch: 15000
+  max_samples_per_batch: null
   lr_encoder: 0.00001
+  lr_encoder_random_init: 0.0003
   lr_head: 0.001
   weight_decay: 0.0001
+  grad_clip_norm: 0.5                # global gradient norm, as in pretraining
   mlp_hidden: 512
   mlp_dropout: 0.2
   loss: mse
   huber_delta: 1.0
+
+# Estimated seconds per fine-tune epoch (train + validation) of one job alone on a GPU; ds-run uses it only to
+# start the longest fine-tune jobs first. Source: measured in fine-tune run logs (21-28 s per epoch).
+finetune_seconds_per_epoch: 25

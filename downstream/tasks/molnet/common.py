@@ -517,8 +517,8 @@ def check_schema_matches_task_yaml(payload: dict, path: Path) -> None:
 class MolnetProcessedSplit:
     """One processed split: ids, labels (NaN = missing) with mask, flags and the first-conformer heavy atoms.
 
-    Interface-compatible with the other tasks' ``ProcessedSplit`` for ``embed``/``probe`` (``chains``, ``labels``,
-    ``runtime``, ``iter_runtime``, ``chain_embeddings``). One sample per molecule.
+    Interface-compatible with the other tasks' ``ProcessedSplit`` for ``embed``/``probe``/``finetune`` (``chains``,
+    ``labels``, ``sample_chain``, ``runtime``, ``iter_runtime``, ``chain_embeddings``). One sample per molecule.
     """
 
     def __init__(self, path: Path):
@@ -561,6 +561,7 @@ class MolnetProcessedSplit:
         self.kind, self.task, self.dataset, self.split = payload["kind"], payload["task"], payload["dataset"], payload["split"]
         self.ids: List[str] = list(payload["ids"])
         self.chains = self.ids
+        self.sample_chain = torch.arange(count)  # one sample per molecule (label row of each training sample)
         self.smiles: List[str] = list(payload["smiles"])
         self.scaffolds: List[str] = list(payload["scaffolds"])
         self.ori_index = payload["ori_index"].numpy()
@@ -624,6 +625,24 @@ def test_subsets(config: dict, chains: Sequence[str]) -> Dict[str, np.ndarray]:
 # Registry surface
 # ---------------------------------------------------------------------------
 
+def with_finetune_entries(config: dict, path: Path = TASK_YAML) -> dict:
+    """The dataset's ``finetune_overrides`` merged into ``finetune`` and its ``finetune_seconds_per_epoch`` (task.yaml
+    mappings keyed by dataset). An override must name an existing finetune key; every dataset needs a cost entry."""
+    values = _read_yaml(path)
+    dataset = config["dataset"]
+    overrides = (values.get("finetune_overrides") or {}).get(dataset) or {}
+    unknown = sorted(set(overrides) - set(config["finetune"]))
+    if unknown:
+        raise ValueError(f"{path}: finetune_overrides.{dataset} names unknown finetune keys {unknown}")
+    costs = values.get("finetune_seconds_per_epoch") or {}
+    if dataset not in costs:
+        raise ValueError(f"{path}: finetune_seconds_per_epoch has no entry for {dataset}")
+    config = dict(config)
+    config["finetune"] = {**config["finetune"], **overrides}
+    config["finetune_seconds_per_epoch"] = costs[dataset]
+    return config
+
+
 def task_module(name: str) -> types.ModuleType:
     """A module-like object with the surface ``downstream.tasks.load_task`` and the CLIs expect, for one ``mn_*`` task."""
     if name not in DATASET_OF_TASK:
@@ -633,8 +652,8 @@ def task_module(name: str) -> types.ModuleType:
     module.DATASET = dataset
     module.TASK_YAML = TASK_YAML
     module.KIND = _read_yaml(TASK_YAML)["datasets"][dataset]["kind"]
-    module.load_task_config = lambda path=TASK_YAML, *, data_root=None: load_task_config(
-        path, data_root=data_root, dataset=dataset)
+    module.load_task_config = lambda path=TASK_YAML, *, data_root=None: with_finetune_entries(load_task_config(
+        path, data_root=data_root, dataset=dataset), path)
     module.processed_dir = processed_dir
     module.test_subsets = test_subsets
     module.ProcessedSplit = MolnetProcessedSplit
