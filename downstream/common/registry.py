@@ -34,7 +34,7 @@ import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRETRAIN_GROUPS = ("multidomain", "protein_only", "rna_only", "unimol_only", "coconut_only")
-PROTOCOLS = ("linear_probe", "mlp_probe", "finetune")
+PROTOCOLS = ("linear_probe", "mlp_probe", "finetune", "sklearn_tuned")  # sklearn_tuned: downstream.baselines.ecfp_tuned
 RANDOM_INIT_SUFFIX = ".random_init"
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 

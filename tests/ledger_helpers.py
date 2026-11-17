@@ -100,15 +100,23 @@ def molnet_reg_metrics(model_id: str, seed: int, rmse: float) -> dict:
             "target_standardization": {"mean": [0.0], "std": [1.0], "primary_metric": "rmse"}}
 
 
+FINGERPRINT = {"algorithm": "Morgan fingerprint (ECFP4)", "radius": 2, "n_bits": 2048, "variant": "bits",
+               "rdkit_version": "2022.09.5", "include_chirality": False, "use_bond_types": True}
+
+
 def embedding_record(task: str, model_id: str, split: str, *, sha=SHA_A, revision="rev_v2", git=EMBED_GIT,
-                     random_init=False, init_seed=0, hf=False, chains=4, data_sha=None) -> dict:
+                     random_init=False, init_seed=0, hf=False, chains=4, data_sha=None, fingerprint=None) -> dict:
     snapshot = model_id.split(".random_init")[0]
     record = {"task": task, "started_utc": "2026-11-09T10:07:01.342092+00:00", "git": git, "device": "cuda:0",
               "seed": 0, "deterministic_algorithms": True, "split": split, "model_id": model_id,
               "processed": f"/data/downstream/{task}/processed/{revision}/{split}.pt",
               "processed_sha256": data_sha or f"{revision}-{split}".ljust(64, "0")[:64],
               "chains": chains, "poolings": ["mean_atoms"], "dim": 8, "seconds": 1.0}
-    if hf:
+    if fingerprint is not None:
+        record.update(model_id=model_id, fingerprint=fingerprint, device="cpu")
+        for key in ("seed", "deterministic_algorithms"):
+            del record[key]
+    elif hf:
         record.update(model=f"facebook/{model_id}", hf_revision="c731040fcd8d73dceaa04b0a8e6329b345b0f5df")
     else:
         record.update(model_ref=snapshot, snapshot=snapshot, sha256=sha, random_init=random_init, init_seed=init_seed)
@@ -116,7 +124,7 @@ def embedding_record(task: str, model_id: str, split: str, *, sha=SHA_A, revisio
 
 
 def write_probe(outputs: Path, metrics: dict, *, splits=("train", "valid", "test"), run_git=RUN_GIT,
-                predictions=None, settings=None, **record_kwargs) -> Path:
+                predictions=None, settings=None, feature_scaling=None, **record_kwargs) -> Path:
     """One probe seed directory; ``run_git=None`` imitates the probe code before the run-trace patch."""
     task, model_id = metrics["task"], metrics["model_id"]
     out = (outputs / "downstream" / task / model_id / f"{metrics['protocol']}.{metrics['pooling']}"
@@ -124,7 +132,8 @@ def write_probe(outputs: Path, metrics: dict, *, splits=("train", "valid", "test
     out.mkdir(parents=True, exist_ok=True)
     (out / "metrics.json").write_text(json.dumps(metrics, indent=1))
     config = {"args": {"task": task, "model_id": model_id, "head": metrics["protocol"].split("_")[0],
-                       "pooling": None, "seeds": None},
+                       "pooling": None, "seeds": None,
+                       **({} if feature_scaling is None else {"feature_scaling": feature_scaling})},
               "probe": copy.deepcopy(settings or PROBE_SETTINGS),
               "embeddings": {split: embedding_record(task, model_id, split, **record_kwargs) for split in splits}}
     if run_git is not None:

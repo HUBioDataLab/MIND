@@ -80,6 +80,13 @@ def load_state(root: Optional[Path] = None, *, catalog: Optional[dict] = None) -
     catalog = catalog or ledger.load_catalog()
     records = {name: ledger.read_records(root, name) for name in ledger.LEDGER_FILES}
     rows = ledger.apply_annotations(records["measurements"], records["annotations"])
+    baselines = catalog.get("fingerprint_baselines") or {}
+    for row in rows:  # a fingerprint probe is tabulated beside the encoder probes of its task (see the catalog)
+        if row.get("model_kind") == "fingerprint_baseline":
+            if row["model_key"] not in baselines:
+                raise ValueError(f"model {row['model_key']!r} is a fingerprint baseline but the catalog has no "
+                                 f"fingerprint_baselines.{row['model_key']}")
+            row["input_pooling"], row["pooling"] = row["pooling"], baselines[row["model_key"]]["table_pooling"]
     # Keyed by the source file and its content hash, not by the ingest: a row recomputed later from the same
     # file (``ledger recompute-macro-aupr``) keeps the setting of that file's other rows.
     fingerprints = defaultdict(set)
@@ -197,6 +204,12 @@ def _literature_cell(state: dict, task: str, eval_split: str, subset: str, metri
     return "; ".join(parts)
 
 
+def _describe_feature(row: dict) -> str:
+    feature = row["input_feature"]
+    return (f"{feature['algorithm']}, radius {feature['radius']}, {feature['n_bits']} {feature['variant']}, "
+            f"RDKit {feature['rdkit_version']}, feature scaling {feature['feature_scaling']}")
+
+
 def _section_title(index: int, section: dict) -> str:
     return (f"### Setting {index}: {section['protocol_family']} / {section['protocol_id']} / pooling={section['pooling']}"
             f" / data={section['data_revision']} / split_tag={section['split_tag']} / "
@@ -218,15 +231,19 @@ def task_report(state: dict, task: str) -> tuple[str, list]:
         lines += ["No valid measurement for this task. For the missing cells see missing_cells.md.", ""]
     for index, section in enumerate(task_sections, start=1):
         models = section["models"]
+        features = {r["model_key"]: r for r in section["rows"] if r.get("input_feature")}
         lines += [_section_title(index, section), "",
-                  "| eval_split | subset | metric | direction | unit | " + " | ".join(models)
+                  "| eval_split | subset | metric | direction | unit | "
+                  + " | ".join(m + (" §" if m in features else "") for m in models)
                   + " | literature (best; separate protocol) |", "|" + "---|" * (6 + len(models))]
         by_cell = defaultdict(list)
         for row in section["rows"]:
             by_cell[(row["eval_split"], row["subset"], row["metric"]), row["model_key"]].append(row)
         code_missing = {(c["eval_split"], c["subset"], c["metric"]) for c in spec["required"]
                         if c.get("code", "present") == "missing"}
-        footnotes = []
+        footnotes = [f"§ {m}: input is a fingerprint, not a pooled embedding ({_describe_feature(r)}); listed in this "
+                     f"setting beside the encoder probes (the ledger keeps pooling {r['input_pooling']})"
+                     for m, r in sorted(features.items())]
         for cell in _cell_order(spec, section["rows"]):
             info = ledger.metric_info(state["catalog"], task, cell[2])
             texts = []
@@ -308,13 +325,16 @@ def summary_tasks(catalog: dict) -> list:
     return [task for task, spec in catalog["tasks"].items() if spec["family"] not in NON_SUMMARY_FAMILIES]
 
 
-def _hint(task: str, model: str, protocol: str, category: str) -> str:
+def _hint(task: str, model: str, protocol: str, category: str, baseline_command: Optional[str] = None) -> str:
     head, *qualifiers = protocol.split(".")
     lba = f" SPLIT_TAG={qualifiers[0]} REPRESENTATION={qualifiers[1]}" if len(qualifiers) == 2 else ""
     probe = (f"make ds-probe TASK={task} MODEL_ID={model} HEAD={ledger.PROBE_HEADS.get(head, head)}{lba}"
              if head in ledger.PROBE_HEADS else f"make ds-finetune TASK={task} MODEL={model} GPU=<id>")
     if category == "NO-CODE":
         return "no metric code: add it to downstream/common/metrics.py (separate task)"
+    if baseline_command and category.startswith(("MISSING:not-run", "MISSING:model-not-in-ledger",
+                                                 "MISSING:embedding-only", "MISSING:seeds")):
+        return baseline_command.format(task=task)
     if category == "MISSING:model-not-in-ledger":
         return (f"model not in the ledger: make ds-snapshot CKPT=<ckpt> NAME={model}, make ds-embed TASK={task} "
                 f"MODEL={model} GPU=<id>, {probe}, then make ds-ledger-add")
@@ -372,19 +392,39 @@ def _known_model(state: dict, model: str) -> bool:
             or any(entry[1] == model for entry in state["embedding_sets"]))
 
 
+def applicable(catalog: dict, task: str, model: str) -> bool:
+    """False for a fingerprint baseline on a task family the catalog does not list for it."""
+    entry = (catalog.get("fingerprint_baselines") or {}).get(model)
+    return entry is None or catalog["tasks"][task]["family"] in entry["families"]
+
+
+def model_protocols(catalog: dict, task: str, model: str) -> list:
+    """Required protocols of ``model`` on ``task``: the catalog's, or the one protocol of a baseline that names it."""
+    protocol = ((catalog.get("fingerprint_baselines") or {}).get(model) or {}).get("protocol")
+    return [protocol] if protocol else list(catalog["tasks"][task]["required_protocols"])
+
+
+def summary_protocol(catalog: dict, task: str, model: str) -> str:
+    protocol = ((catalog.get("fingerprint_baselines") or {}).get(model) or {}).get("protocol")
+    return protocol or catalog["tasks"][task]["summary_protocol"]
+
+
 def missing_cells(state: dict, models: list, tasks: Optional[list] = None) -> list:
     out = []
     for task in tasks or summary_tasks(state["catalog"]):
         spec = state["catalog"]["tasks"][task]
         for model in models:
-            for protocol in spec["required_protocols"]:
+            if not applicable(state["catalog"], task, model):
+                continue
+            baseline_command = ((state["catalog"].get("fingerprint_baselines") or {}).get(model) or {}).get("command")
+            for protocol in model_protocols(state["catalog"], task, model):
                 for cell in spec["required"]:
                     found = lookup(state, task, model, protocol, cell)
                     if found["category"] is not None:
                         out.append({"task": task, "model_key": model, "protocol_id": protocol,
                                     "eval_split": cell["eval_split"], "subset": cell["subset"], "metric": cell["metric"],
                                     "category": found["category"], "source": cell.get("source", ""),
-                                    "hint": _hint(task, model, protocol, found["category"])})
+                                    "hint": _hint(task, model, protocol, found["category"], baseline_command)})
     return out
 
 
@@ -401,17 +441,25 @@ def summary_page(state: dict, models: list) -> str:
     for task in tasks:
         spec = catalog["tasks"][task]
         primary = spec["primary"]
-        cells = [lookup(state, task, model, spec["summary_protocol"], primary)["text"] for model in models]
+        cells = [lookup(state, task, model, summary_protocol(catalog, task, model), primary)["text"]
+                 if applicable(catalog, task, model) else "n/a (no baseline for this family)" for model in models]
         label = f"{primary['metric']} ({primary['eval_split']}/{primary['subset']}, {spec['summary_protocol']})"
         lines.append(f"| {task} | {label} | " + " | ".join(cells) + " | "
                      + _literature_cell(state, task, primary["eval_split"], primary["subset"], primary["metric"]) + " |")
+    baselines = catalog.get("fingerprint_baselines") or {}
+    own = [(m, baselines[m]["protocol"]) for m in models if m in baselines and baselines[m].get("protocol")]
+    if own:
+        lines += [""] + [f"`{m}` is read with its own protocol `{p}` (scikit-learn fit, one seed, validation-tuned), not "
+                         "the probe protocol of the other columns." for m, p in own]
     required = sum(len(catalog["tasks"][t]["required"]) for t in tasks)
     coded = sum(1 for t in tasks for c in catalog["tasks"][t]["required"] if c.get("code", "present") == "present")
     expected = filled = 0
     for task in tasks:
         spec = catalog["tasks"][task]
         for model in models:
-            for protocol in spec["required_protocols"]:
+            if not applicable(catalog, task, model):
+                continue
+            for protocol in model_protocols(catalog, task, model):
                 for cell in spec["required"]:
                     if cell.get("code", "present") == "present":
                         expected += 1

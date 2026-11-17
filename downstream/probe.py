@@ -20,6 +20,9 @@ the epoch with the best validation metric is kept (early stopping on
         minimized, test RMSE + MAE averaged over targets. Both also report subsets of the test molecules that
         the processing QC flagged (flat conformers, rare elements, ...); undefined subsets say why.
 
+``--feature-scaling none`` is for the sparse ECFP4 fingerprints of ``downstream.baselines.ecfp`` (which use their own
+model id and pooling name); encoder embeddings are always standardized, and the two are refused when mixed up.
+
 Results go to ``outputs/downstream/<task>/<model_id>/<protocol>.<pooling>/seed<k>/``.
 """
 
@@ -56,6 +59,7 @@ def load_embeddings(task: str, model_id: str, split: str, pooling: str, root=Non
 
 
 MASKED_KINDS = ("multilabel_masked", "multitarget_regression")
+FEATURE_SCALINGS = ("standardize", "none")
 
 
 class MaskedBCEWithLogitsLoss(nn.Module):
@@ -329,6 +333,9 @@ def main(argv=None) -> int:
     parser.add_argument("--split-tag", default=None, help="LBA only: identity30 (default) | identity60")
     parser.add_argument("--representation", default=None, help="LBA only: joint (default) | separate")
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
+    parser.add_argument("--feature-scaling", default="standardize", choices=FEATURE_SCALINGS,
+                        help="standardize: train mean/std per feature (every encoder embedding); none: raw features "
+                             "(sparse fingerprints, whose rare bits a train std would blow up)")
     args = parser.parse_args(argv)
     if args.threads < 1:
         parser.error("--threads must be at least 1")
@@ -354,8 +361,19 @@ def main(argv=None) -> int:
 
     data = {name: load_embeddings(args.task, args.model_id, prefix + name, pooling, args.outputs_root, kind=kind)
             for name in (train_split, val_split, *test_splits)}
-    mean = data[train_split][2].mean(axis=0)
-    std = data[train_split][2].std(axis=0).clip(min=1e-6)
+    provenance = {s: json.loads(Path(p).with_suffix(".json").read_text()) for s, (_, _, _, p) in data.items()}
+    fingerprint = {"fingerprint" in record for record in provenance.values()}
+    if len(fingerprint) != 1:
+        parser.error("the embedding splits disagree on being a fingerprint")
+    if fingerprint.pop() != (args.feature_scaling == "none"):
+        parser.error("fingerprint features need --feature-scaling none and encoder embeddings --feature-scaling "
+                     "standardize (the ledger groups probes by their settings and cannot tell the two apart)")
+    if args.feature_scaling == "standardize":
+        mean = data[train_split][2].mean(axis=0)
+        std = data[train_split][2].std(axis=0).clip(min=1e-6)
+    else:
+        mean = np.zeros(data[train_split][2].shape[1], np.float32)
+        std = np.ones_like(mean)
     tensors = {name: (torch.from_numpy((x - mean) / std), torch.from_numpy(y))
                for name, (_, y, x, _) in data.items()}
     subsets = task.test_subsets(config, data[test_split][0]) if kind in ("multilabel", *MASKED_KINDS) else {}
@@ -392,7 +410,6 @@ def main(argv=None) -> int:
         torch.save({"state_dict": head.state_dict(), "feature_mean": mean, "feature_std": std,
                     "head": args.head, "in_dim": int(mean.shape[0]),
                     **({"target_mean": scale[0], "target_std": scale[1]} if scale is not None else {})}, out / "head.pt")
-        provenance = {s: json.loads(Path(p).with_suffix(".json").read_text()) for s, (_, _, _, p) in data.items()}
         (out / "config.json").write_text(json.dumps({"args": vars(args) | {"data_root": str(args.data_root),
                                                      "outputs_root": str(args.outputs_root)},
                                                      "probe": settings, "embeddings": provenance, "run": run},

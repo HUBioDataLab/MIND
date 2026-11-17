@@ -350,7 +350,7 @@ times of other models, when there are any) and writes nothing. Logs and `summary
   `make ds-run MODEL=/path/to/best-checkpoint.ckpt NAME=<new snapshot> OUTPUTS_ROOT=<outputs root> GPU=2,3
   COMPARE_TO=<reference snapshot>,<reference snapshot>.random_init` (first with `PLAN=1`).
 
-**Every long ds-* job keeps running when the terminal or SSH connection closes.** `ds-run`, `ds-probe` and `ds-finetune` start in
+**Every long ds-* job keeps running when the terminal or SSH connection closes.** `ds-run`, `ds-ecfp`, `ds-probe` and `ds-finetune` start in
 their own session (`setsid nohup`, no terminal) and return at once with the log path; the log's last line is
 `EXIT_CODE=<n>` of the Python command (non-zero when it failed). `make ds-status [N=15]`
 lists this month's `ds_*.log` files with that line (no line: still running or killed; check the process with
@@ -358,3 +358,44 @@ lists this month's `ds_*.log` files with that line (no line: still running or ki
 `ds-finetune` is detached the same way. `ds-embed`, `eval-pretrain` and `eval-counterfactual` run as `nohup ... &`. Short CPU steps
 (`ds-snapshot`, `ds-report`, `ds-ledger-*`, `ds-compare`, `ds-summary`, `ds-missing`) and the data steps
 (`ds-download`/`ds-process`/`ds-validate`/`ds-leakage`) stay in the foreground.
+
+## ECFP4 fingerprint baselines (`make ds-ecfp`)
+
+`downstream/baselines/ecfp.py` and `ecfp_tuned.py`: two baselines for the 14 MoleculeNet tasks on the same features, the
+Morgan fingerprint (radius 2 = ECFP4, 2048 bits, RDKit `rdFingerprintGenerator`) of the SMILES stored in the processed
+splits, and on the same Uni-Mol scaffold split. CPU only, no checkpoint.
+
+| model id | protocol | what it is | seeds |
+|---|---|---|---|
+| `ecfp4` | `linear_probe`, `mlp_probe` | the MIND probe (`downstream.probe`: same heads, masked losses, validation-metric epoch selection, `task.yaml` probe settings) with the fingerprint as the feature | 0-2 |
+| `ecfp4_tuned` | `sklearn_tuned` | scikit-learn `LogisticRegression` (liblinear; grid C in 0.01, 0.1, 1; 0.05, 0.5 from 30,000 train molecules) or `Ridge` (alpha in 0.1 ... 1000) per target, the parameter chosen on the validation split by the primary metric, test scored once, no feature scaling, no subsampling | 0 only (the fit is deterministic) |
+
+```bash
+make ds-ecfp PLAN=1                                   # what would run; writes nothing
+make ds-ecfp TASKS=all [VARIANT=probe|tuned|both] [HEADS=linear,mlp] [SEEDS="0 1 2"] [PROBE_JOBS=2] [DS_THREADS=8] [OUTPUTS_ROOT=<dir>]
+```
+
+Per task: fingerprints -> `<outputs>/downstream/<task>/ecfp4/embeddings/<split>.{npz,json}` (pooling name
+`ecfp4_bits2048`; the json holds the RDKit version, radius, size and variant), then the probes (VARIANT `probe` or `both`)
+for the seeds without a `metrics.json`, and the tuned fit (VARIANT `tuned` or `both`, default `both`) whose files go to
+`<outputs>/downstream/<task>/ecfp4_tuned/sklearn_tuned.ecfp4_bits2048/seed0/` (the same `metrics.json`, `predictions.npz`,
+`config.json`, `run.log`; the config holds the grid, the chosen value, the library versions and the embedding records of
+`ecfp4`), then `ledger add` and the ledger reports of `$MIND_RESULTS_ROOT`. Detached like `ds-run` (log ends with
+`EXIT_CODE=<n>`; `NO_LEDGER=1` stops before the ledger, `FOREGROUND=1` runs in the terminal). A SMILES RDKit cannot parse
+fails the task (it is never replaced by an all-zero row); a rerun with another fingerprint definition into the same outputs
+root is refused. `--feature counts` (count vector) and `--n-bits N` are available on the module's command line.
+`PROBE_JOBS` processes run at a time (largest tasks first); `DS_THREADS` is the thread count of a probe and the number of
+worker processes that fit the targets of a tuned model.
+
+The probe baseline does not standardize the fingerprint with train statistics (`downstream.probe --feature-scaling none`),
+because a bit set in one train molecule would become a value of about 40 and a bit never set in train 1e6 when a test
+molecule has it. `downstream.probe` and the ledger refuse a fingerprint that is standardized and an embedding that is not.
+
+Ledger and reports: rows have `model_key` `ecfp4` or `ecfp4_tuned`, `model_kind` `fingerprint_baseline`, no checkpoint
+hash, and an `input_feature` field (fingerprint definition and feature scaling). The catalog's `fingerprint_baselines` entries
+list the task families a baseline is required on (`molecule_property`), so `missing_cells` and `summary.md` never ask for
+it on EC, GO, Fold, Reaction or LBA (`n/a`); `ecfp4_tuned` is required and summarized under its own protocol
+`sklearn_tuned`. In the task tables and in `ds-compare` the probe baseline `ecfp4` sits in the same setting as the encoder
+probes (the report maps its pooling to the catalog's `table_pooling`, `mean_atoms`; a footnote names the real input);
+`ecfp4_tuned` has its own setting because its protocol differs, so `ds-compare` lists its cells as only in one model instead of
+comparing it. Add the models to `summary_models` of `<root>/comparisons.yaml` to give them a column in `summary.md`.

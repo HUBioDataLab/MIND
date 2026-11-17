@@ -42,7 +42,9 @@ CATALOG_PATH = Path(__file__).with_name("ledger_catalog.yaml")
 LEDGER_FILES = ("measurements", "models", "annotations", "ingests")
 STATUSES = ("valid", "superseded", "invalid", "caveat", "smoke")
 DOWNSTREAM_KINDS = ("multilabel", "multiclass", "regression", "multilabel_masked", "multitarget_regression")
-PROBE_HEADS = {"linear_probe": "linear", "mlp_probe": "mlp"}
+PROBE_HEADS = {"linear_probe": "linear", "mlp_probe": "mlp", "sklearn_tuned": "sklearn_tuned"}
+# Models without a MIND checkpoint card: a Hugging Face baseline and the fingerprint baseline (downstream.baselines.ecfp).
+UNTRAINED_KINDS = ("hf_baseline", "fingerprint_baseline")
 EVAL_METRICS = ("top1_acc_real", "top3_acc_real", "ce_real", "ece_real")
 _TOP_KEYS = {"task", "kind", "model_id", "protocol", "pooling", "seed", "best_epoch", "split_tag", "representation",
              "val", "test", "target_standardization"}
@@ -104,6 +106,15 @@ def load_catalog(path: Path = CATALOG_PATH) -> dict:
     if catalog.get("schema_version") != 1:
         raise ValueError(f"{path}: unsupported catalog schema_version {catalog.get('schema_version')!r}")
     metrics, tasks = catalog["metrics"], catalog["tasks"]
+    families = {spec.get("family") for spec in tasks.values()}
+    for model, entry in (catalog.get("fingerprint_baselines") or {}).items():
+        unknown = sorted(set(entry.get("families") or ()) - families)
+        if entry.get("protocol") is not None and entry["protocol"] not in PROBE_HEADS:
+            raise ValueError(f"{path}: fingerprint_baselines.{model}.protocol must be one of {sorted(PROBE_HEADS)}")
+        if not entry.get("families") or unknown or not entry.get("table_pooling") or "{task}" not in str(entry.get("command")):
+            raise ValueError(f"{path}: fingerprint_baselines.{model} needs families (task families of the catalog"
+                             f"{', unknown: ' + str(unknown) if unknown else ''}), table_pooling and a command "
+                             "containing {task}")
     for name, info in metrics.items():
         if info.get("direction") not in ("higher", "lower") or not info.get("unit"):
             raise ValueError(f"{path}: metric {name!r} needs direction higher|lower and a unit")
@@ -438,6 +449,10 @@ def _probe_provenance(config: dict, metrics: dict, where: str, missing: list) ->
     if len(hf) != 1 or len(shas) != 1:
         raise ValueError(f"{where}: embedding splits come from different checkpoints {sorted(map(str, shas | hf))}")
     first = next(iter(records.values()))
+    scaling = config.get("args", {}).get("feature_scaling", "standardize")  # older probes had no such option
+    fingerprints = {json.dumps(record.get("fingerprint"), sort_keys=True) for record in records.values()}
+    if len(fingerprints) != 1:
+        raise ValueError(f"{where}: embedding splits disagree on the fingerprint definition")
     settings = config.get("probe")
     run = config.get("run") or {}
     if not run.get("git"):
@@ -449,7 +464,16 @@ def _probe_provenance(config: dict, metrics: dict, where: str, missing: list) ->
               "code_git_run": run.get("git"), "run_started_utc": run.get("started_utc"), "expected_seeds": seeds,
               "processed": {_split_name(key): (record.get("processed"), record.get("processed_sha256"))
                             for key, record in records.items()}}
-    if "hf_revision" in first:
+    if "fingerprint" in first:  # downstream.baselines.ecfp: the feature is a fingerprint, there is no checkpoint
+        if "hf_revision" in first or "sha256" in first:
+            raise ValueError(f"{where}: an embedding record cannot be both a fingerprint and a model embedding")
+        if scaling != "none":
+            raise ValueError(f"{where}: a fingerprint probe must run with feature_scaling 'none', got {scaling!r}")
+        fields.update(model_kind="fingerprint_baseline", model_sha256=None, hf_revision=None, hf_model=None,
+                      snapshot=None, init_seed=None, input_feature={**first["fingerprint"], "feature_scaling": scaling})
+    elif scaling != "standardize":
+        raise ValueError(f"{where}: feature_scaling {scaling!r} is only valid for a fingerprint baseline")
+    elif "hf_revision" in first:
         fields.update(model_kind="hf_baseline", model_sha256=None, hf_revision=first["hf_revision"],
                       hf_model=first.get("model"), snapshot=None, init_seed=None)
     else:
@@ -530,9 +554,9 @@ def flatten_run(metrics_path: Path, catalog: dict, outputs_root: Optional[Path])
         missing.append("protocol_settings")
     random_init = prov["model_kind"] == "mind_random_init"
     card = card_path = None
-    if prov["model_kind"] != "hf_baseline":
+    if prov["model_kind"] not in UNTRAINED_KINDS:
         card, card_path = _load_card(outputs_root, prov["snapshot"], prov["model_sha256"])
-    train = _model_fields(card, card_path, untrained=random_init or prov["model_kind"] == "hf_baseline",
+    train = _model_fields(card, card_path, untrained=random_init or prov["model_kind"] in UNTRAINED_KINDS,
                           missing=missing)
     revisions = {Path(path).parent.name for path, _ in prov["processed"].values() if path}
     if len(revisions) > 1:
@@ -543,7 +567,7 @@ def flatten_run(metrics_path: Path, catalog: dict, outputs_root: Optional[Path])
         "schema_version": SCHEMA_VERSION, "model_key": metrics["model_id"], "model_kind": prov["model_kind"],
         "model_sha256": prov["model_sha256"], "hf_revision": prov["hf_revision"], "hf_model": prov["hf_model"],
         "template_model_key": prov["snapshot"] if random_init else None, "init_seed": prov["init_seed"], **train,
-        "task": task, "task_family": spec["family"], "kind": kind,
+        "input_feature": prov.get("input_feature"), "task": task, "task_family": spec["family"], "kind": kind,
         "data_revision": revisions.pop() if revisions else None, "split_tag": split_tag,
         "representation": representation, "protocol_family": prov["protocol_family"], "head": prov["head"],
         "protocol_id": metrics["protocol"], "pooling": metrics["pooling"], "run_seed": int(metrics["seed"]),

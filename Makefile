@@ -319,6 +319,13 @@ eval-counterfactual:
 #   PLAN=1 prints what would run and writes nothing. ds-run, ds-probe and ds-finetune run detached (setsid + nohup:
 #   closing the terminal does not stop them; the log ends with EXIT_CODE=<n>; make ds-status lists the logs);
 #   FOREGROUND=1 runs them in the terminal. TASKS=molnet stands for the 14 mn_* tasks (it may be combined: molnet,ec).
+# ECFP4 fingerprint baseline of the MoleculeNet tasks (downstream/baselines/ecfp.py; CPU only, no checkpoint):
+#   make ds-ecfp [TASKS=all|molnet|mn_bbbp,mn_esol,...] [VARIANT=probe|tuned|both] [HEADS=linear,mlp] [PROBE_JOBS=1]
+#        [OUTPUTS_ROOT=<dir>] [PLAN=1] [NO_LEDGER=1] [FOREGROUND=1]
+#   fingerprints (RDKit, radius 2, 2048 bits) -> VARIANT=probe: model ecfp4, the MIND probe code (SEEDS) | tuned: model
+#   ecfp4_tuned, scikit-learn logistic / ridge tuned on validation, seed 0 | both (default); finished work is skipped ->
+#   ledger add + report. Add the models to summary_models of comparisons.yaml to see them in summary.md.
+#   Runs detached like ds-run (EXIT_CODE in the log); DS_THREADS sets the threads of each probe process.
 # ===================================================================
 
 TASK ?= ec
@@ -357,7 +364,7 @@ DS_DOWNLOAD_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter l
 
 .PHONY: ds-snapshot ds-fetch-models ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
 	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify ds-ledger-recompute \
-	ds-run ds-status
+	ds-run ds-ecfp ds-status
 
 ds-snapshot:
 	@test -n "$(CKPT)" -a -n "$(NAME)" || { echo "ERROR: set CKPT and NAME"; exit 1; }
@@ -505,6 +512,20 @@ else
 	$(CONDA_RUN) $(DS_RUN_ANY)
 endif
 
+VARIANT ?= both
+DS_ECFP_CMD = python -u -m downstream.baselines.ecfp --tasks $(DS_RUN_TASKS) --heads $(HEADS) --seeds $(SEEDS) --models $(VARIANT) \
+	--jobs $(PROBE_JOBS) --threads $(DS_THREADS) --log-root $(LOG_MONTH_DIR) \
+	$(if $(strip $(OUTPUTS_ROOT)),--outputs-root "$(OUTPUTS_ROOT)",) $(if $(filter 1,$(NO_LEDGER)),--no-ledger,) \
+	$(if $(filter 1,$(PLAN)),--plan,)
+
+ds-ecfp:
+ifeq ($(filter 1,$(PLAN) $(FOREGROUND)),)
+	@mkdir -p $(LOG_MONTH_DIR)
+	$(call DS_DETACH,$(LOG_MONTH_DIR)/ds_ecfp_$(_LOG_DATETIME)_$$$$.log,$(CONDA_RUN) $(LEDGER_ENV) $(DS_ECFP_CMD))
+else
+	$(CONDA_RUN) $(LEDGER_ENV) $(DS_ECFP_CMD)
+endif
+
 # Newest ds_*.log files of this month with their EXIT_CODE line. No EXIT_CODE: still running, killed, or a
 # foreground log; check the process (make status) before concluding anything.
 ds-status:
@@ -538,7 +559,8 @@ help:
 	@echo "  Downstream (see downstream/README.md):"
 	@echo "    make ds-run MODEL=<snapshot|ckpt> [NAME=<name>] GPU=<ids> [TASKS=all|molnet|ec,go_mf,..] [PLAN=1]"
 	@echo "                                         Embed + probe + ledger for one model (GPU, detached)"
-	@echo "                                         HEADS=linear,mlp,finetune adds fine-tuning; HEADS=finetune alone"
+	@echo "                                         HEADS=linear,mlp,finetune adds fine-tuning; HEADS=finetune alone skips the probes"
+	@echo "    make ds-ecfp [TASKS=all|molnet|mn_bbbp,..] [PLAN=1]   ECFP4 fingerprint baselines of the MoleculeNet tasks (CPU, detached)"
 	@echo "    make ds-status                       Recent ds-* logs with their EXIT_CODE"
 	@echo "    make ds-snapshot CKPT=<ckpt> NAME=<snapshot> ALIAS=current_best"
 	@echo "    make ds-download TASK=ec / ds-process TASK=ec WORKERS=16   (data, explicit decision)"

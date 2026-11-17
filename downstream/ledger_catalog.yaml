@@ -31,6 +31,23 @@ metrics:
   ece_real: {direction: lower, unit: fraction}
   ce_real: {direction: lower, unit: nats}
 
+# fingerprint_baselines: models that are not MIND checkpoints, written by downstream/baselines/ecfp.py. A baseline is
+# required only on the task families it lists, so the missing-cell report never asks for it elsewhere. Its probes sit in
+# the same table column group as the MIND probes of `table_pooling` (the pooling the encoder probes of these tasks use);
+# the real input feature stays in the ledger rows (`pooling`, `input_feature`) and is footnoted in the task tables.
+fingerprint_baselines:
+  ecfp4:
+    families: [molecule_property]
+    table_pooling: mean_atoms
+    command: "make ds-ecfp TASKS={task} VARIANT=probe"    # the missing-cell hint
+  # Validation-tuned scikit-learn logistic / ridge regression on the same bits (downstream/baselines/ecfp_tuned.py):
+  # its own protocol, one seed; `protocol` replaces the task's required and summary protocol for this model.
+  ecfp4_tuned:
+    families: [molecule_property]
+    table_pooling: mean_atoms
+    protocol: sklearn_tuned
+    command: "make ds-ecfp TASKS={task} VARIANT=tuned"
+
 tasks:
   ec:
     family: protein_function
