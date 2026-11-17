@@ -302,7 +302,8 @@ eval-counterfactual:
 #   make ds-ledger-add OUTPUTS_ROOT=<outputs root> [EVAL_DIRS="<eval dir> ..."]   (re-running adds nothing new)
 #   make ds-ledger-annotate SELECT="task=ec data_revision=<rev>" STATUS=superseded REASON="..." [REPLACED_BY=<rev>]
 #   make ds-ledger-report [MODELS="<a> <b>"]   make ds-summary   make ds-missing   make ds-ledger-verify
-#   make ds-compare A=<model> B=<model> [TASKS="ec lba"] [BOOTSTRAP=1000]
+#   make ds-compare A=<model> B=<model> [TASKS="ec lba"] [BOOTSTRAP=1000] [COMPARE_WORKERS=<n>]
+#        (TASKS writes <A>__vs__<B>__tasks-<tasks>.* and leaves the all-task files alone; workers: cores of one compare, default min(16, usable))
 #   make ds-ledger-recompute MODEL=<model> CONTROL=<model with macro AUPR> DATA_REVISION=<rev> [TASK=ec] [DRY_RUN=1]
 #        (macro AUPR a probe did not record, from its saved predictions.npz; four checks, nothing written on failure)
 # MODELS defaults to summary_models in $(MIND_RESULTS_ROOT)/comparisons.yaml, else every model of the ledger.
@@ -461,7 +462,7 @@ ds-summary ds-missing:
 ds-compare:
 	@test -n "$(A)" -a -n "$(B)" || { echo "ERROR: set A and B (model keys as in the ledger)"; exit 1; }
 	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger_compare --a "$(A)" --b "$(B)" --bootstrap $(BOOTSTRAP) \
-		$(if $(strip $(TASKS)),--tasks $(TASKS),)
+		$(if $(strip $(COMPARE_WORKERS)),--workers $(COMPARE_WORKERS),) $(if $(strip $(TASKS)),--tasks $(TASKS),)
 
 ds-ledger-verify:
 	$(CONDA_RUN) $(LEDGER_ENV) python -m downstream.ledger verify

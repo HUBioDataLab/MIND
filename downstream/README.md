@@ -297,7 +297,16 @@ Std: ledger reports and comparisons use the sample std over run seeds (ddof=1, u
   `<root>/literature/literature.csv` (local) and is shown in its own column, unit and protocol.
 - `ledger_compare`: cell-by-cell A vs B with probe-seed std, a paired bootstrap interval over `predictions.npz` (chains
   aligned by id; each seed's predictions must reproduce the ledger value) and the unmeasured pretraining-seed noise
-  stated in a warning box, plus the expected number of chance "differences".
+  stated in a warning box, plus the expected number of chance "differences". Output: `reports/compare/<A>__vs__<B>.md|csv`
+  for a run over all tasks; a run restricted with `TASKS=...` writes `<A>__vs__<B>__tasks-<task>-<task>.md|csv` (sorted
+  task names; a hash for long lists), so it can never replace the all-task files of the pair. Speed: per-target ROC-AUC
+  and PRC-AUC of the multi-target tasks (ToxCast, PCBA, Tox21, MUV, SIDER) are computed for all resamples at once from
+  integer resample weights over the scores sorted once per target (ties handled as in scikit-learn); the random
+  resample indices, the decision rule and the files are unchanged, and the interval equals the earlier per-resample
+  scikit-learn computation to about 1e-15 (`tests/test_downstream_ledger_compare.py`). `COMPARE_WORKERS=N`
+  (`--workers N`) lets one comparison use N processes (one core each) for the per-target work of the large tasks; the
+  default is min(16, usable cores), the maximum is the number of usable cores, and the result agrees to floating-point rounding (about 1e-16) whatever the number.
+  The command prints the worker count it uses.
 - Commands: `make ds-ledger-add OUTPUTS_ROOT=<dir> [EVAL_DIRS=...]`, `ds-ledger-annotate`, `ds-ledger-report`,
   `ds-summary`, `ds-missing`, `ds-compare A=<model> B=<model>`, `ds-ledger-verify`. `ds-report` is unchanged.
   Report models: `MODELS=...`, else `summary_models` in `<root>/comparisons.yaml`, else every model of the ledger;

@@ -1,8 +1,9 @@
 """Compare two models cell by cell, with a paired bootstrap over the saved test predictions.
 
-    python -m downstream.ledger_compare --a <model_a> --b <model_b> [--tasks ec lba] [--bootstrap 1000]
+    python -m downstream.ledger_compare --a <model_a> --b <model_b> [--tasks ec lba] [--bootstrap 1000] [--workers N]
 
-Writes ``$MIND_RESULTS_ROOT/reports/compare/<A>__vs__<B>.md|.csv``. Only cells with the same comparable
+Writes ``$MIND_RESULTS_ROOT/reports/compare/<A>__vs__<B>.md|.csv`` (``<A>__vs__<B>__tasks-<tasks>`` when
+``--tasks`` restricts the run, so that it never replaces the all-task files). Only cells with the same comparable
 setting (see ``downstream.ledger_report``: protocol, pooling, data revision and data fingerprint, settings
 hash) are compared; every other cell is listed as "only in A" / "only in B" with the reason.
 
@@ -24,8 +25,12 @@ mask is not in predictions.npz, validation rows, metrics without a bootstrap imp
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -35,6 +40,9 @@ from downstream import ledger, ledger_report
 from downstream.common import metrics as M
 
 REPRODUCE_TOLERANCE = 1e-4
+DEFAULT_WORKERS = 16  # upper bound of the default; --workers can ask for more (never more than the cores available)
+_RESAMPLE_BLOCK = 2_000_000  # resamples x samples handled at once (bounds the memory of one block)
+_PARALLEL_MIN_WORK = 20_000_000  # targets x samples x resamples below which a process pool does not pay off
 _SECTION_KEY = ("protocol_family", "protocol_id", "pooling", "data_revision", "split_tag", "representation",
                 "protocol_settings_sha256", "data_fingerprint")
 
@@ -63,6 +71,144 @@ def _fmax_fn(labels: np.ndarray, scores: np.ndarray) -> Callable:
     return fmax
 
 
+# ---------------------------------------------------------------------------------------------------------
+# Batched ROC-AUC / average precision of masked multi-target labels for many bootstrap resamples at once
+# ---------------------------------------------------------------------------------------------------------
+
+class _MaskedBinaryMetric:
+    """Mean over targets of ROC-AUC or average precision, as ``metrics.multitask_roc_auc`` / ``multitask_prc_auc``.
+
+    ``__call__(idx)`` is the reference implementation (one resample, scikit-learn). ``block_values`` evaluates many
+    resamples at once: a resample of the test set is a vector of integer weights (how often each sample was drawn),
+    and the AUC or average precision of weighted samples equals the value of the repeated samples. The scores of
+    each target are sorted once; the weights are then accumulated in sorted order, with tied scores merged into one
+    group (a tie counts half in ROC-AUC and forms one threshold in average precision), exactly as scikit-learn
+    treats them. A target with no positive or no negative sample in a resample is skipped for that resample; a
+    resample in which every target is skipped is undefined (NaN), where the reference raises ``ValueError``.
+    """
+
+    def __init__(self, metric: str, labels: np.ndarray, scores: np.ndarray):
+        self.metric = metric
+        self.labels, self.scores = M._check_masked(labels, scores, label_name="labels", score_name="scores")
+        observed = ~np.isnan(self.labels)
+        if not np.isin(self.labels[observed], (0, 1)).all():
+            raise ValueError("labels must be 0, 1 or NaN (missing)")
+        self.n_samples, self.n_targets = self.labels.shape
+        self.targets = []  # per target: (rows in ascending score order, 0/1 labels there, group starts or None)
+        for target in range(self.n_targets):
+            rows = np.flatnonzero(observed[:, target])
+            order = rows[np.argsort(self.scores[rows, target], kind="stable")]
+            sorted_scores = self.scores[order, target]
+            starts = np.flatnonzero(np.concatenate([[True], sorted_scores[1:] != sorted_scores[:-1]]))
+            self.targets.append((order, self.labels[order, target], None if len(starts) == len(order) else starts))
+
+    def __call__(self, idx):
+        function = M.multitask_roc_auc if self.metric == "roc_auc" else M.multitask_prc_auc
+        return function(self.labels[idx], self.scores[idx])[self.metric]
+
+    def _target_values(self, counts: np.ndarray, target: int) -> np.ndarray:
+        """Metric of one target for every resample; ``counts`` is (samples, resamples), NaN where one class is missing."""
+        order, truth, starts = self.targets[target]
+        if len(order) == 0:
+            return np.full(counts.shape[1], np.nan)
+        weight = counts[order]
+        positive = weight * truth[:, None]
+        negative = weight - positive
+        if starts is not None:
+            positive, negative = np.add.reduceat(positive, starts, axis=0), np.add.reduceat(negative, starts, axis=0)
+        n_pos, n_neg = positive.sum(axis=0), negative.sum(axis=0)
+        defined = (n_pos > 0) & (n_neg > 0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if self.metric == "roc_auc":
+                below = np.cumsum(negative, axis=0) - negative  # negatives with a lower score than the group
+                value = (positive * (below + 0.5 * negative)).sum(axis=0) / (n_pos * n_neg)
+            else:
+                true_pos = n_pos - np.cumsum(positive, axis=0) + positive  # positives scored >= the group threshold
+                predicted = true_pos + (n_neg - np.cumsum(negative, axis=0) + negative)
+                precision = np.divide(true_pos, predicted, out=np.zeros_like(true_pos), where=positive > 0)
+                value = (positive * precision).sum(axis=0) / n_pos
+        return np.where(defined, value, np.nan)
+
+    def full(self) -> float:
+        """The metric on the whole sample (every weight 1); ``ValueError`` when no target can be scored."""
+        total, defined = self.partial_sum(np.ones((self.n_samples, 1)), 0, self.n_targets)
+        if defined[0] == 0:
+            raise ValueError("every task is single-class (needs labelled positives and negatives); nothing to evaluate")
+        return float(total[0] / defined[0])
+
+    def partial_sum(self, counts: np.ndarray, lo: int, hi: int):
+        """(sum over targets lo..hi of the defined values, number of defined targets), per resample."""
+        total, defined = np.zeros(counts.shape[1]), np.zeros(counts.shape[1])
+        for target in range(lo, hi):
+            value = self._target_values(counts, target)
+            ok = ~np.isnan(value)
+            total += np.where(ok, value, 0.0)
+            defined += ok
+        return total, defined
+
+
+def _weights(draws: np.ndarray) -> np.ndarray:
+    """(samples, resamples) float64 table: how often each sample was drawn by each resample (draws: resamples x n)."""
+    n_boot, n = draws.shape
+    flat = (draws * n_boot + np.arange(n_boot)[:, None]).ravel()
+    return np.bincount(flat, minlength=n * n_boot).reshape(n, n_boot).astype(np.float64)
+
+
+_SHARED: dict = {}  # read by forked pool workers; set before the pool is created
+
+
+def _run_unit(unit):
+    function, part, lo, hi = unit
+    return _SHARED["functions"][function].partial_sum(_SHARED["counts"][part], lo, hi)
+
+
+def _block_values(functions: list, parts: list, draws: list, workers: int) -> list:
+    """Values of every function on every resample of one block: list of (resamples,) arrays, NaN where undefined.
+
+    ``functions[i]`` is evaluated on the draws of ``parts[i]``.
+    """
+    values: list = [None] * len(functions)
+    batched = [i for i, f in enumerate(functions) if isinstance(f, _MaskedBinaryMetric)]
+    for i in set(range(len(functions))) - set(batched):
+        out = np.full(len(draws[parts[i]]), np.nan)
+        for r, idx in enumerate(draws[parts[i]]):
+            try:
+                out[r] = functions[i](idx)
+            except ValueError:
+                pass  # undefined on this resample (the resample counts as failed)
+        values[i] = out
+    if batched:
+        counts = {p: _weights(draws[p]) for p in {parts[i] for i in batched}}
+        work = sum(functions[i].n_targets * counts[parts[i]].size for i in batched)
+        units = []  # (function, part, first target, end target); about 4 units per worker keep the pool balanced
+        step = max(1, -(-sum(functions[i].n_targets for i in batched) // (4 * max(workers, 1))))
+        for i in batched:
+            units += [(i, parts[i], lo, min(lo + step, functions[i].n_targets))
+                      for lo in range(0, functions[i].n_targets, step)]
+        if workers > 1 and work >= _PARALLEL_MIN_WORK:
+            _SHARED.update(functions=functions, counts=counts)
+            try:
+                with ProcessPoolExecutor(max_workers=workers, mp_context=get_context("fork")) as pool:
+                    results = list(pool.map(_run_unit, units))
+            finally:
+                _SHARED.clear()
+        else:
+            _SHARED.update(functions=functions, counts=counts)
+            try:
+                results = [_run_unit(unit) for unit in units]
+            finally:
+                _SHARED.clear()
+        total = {i: np.zeros(len(draws[parts[i]])) for i in batched}
+        defined = {i: np.zeros(len(draws[parts[i]])) for i in batched}
+        for unit, (part_sum, part_defined) in zip(units, results):
+            total[unit[0]] += part_sum
+            defined[unit[0]] += part_defined
+        for i in batched:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                values[i] = np.where(defined[i] > 0, total[i] / defined[i], np.nan)
+    return values
+
+
 def metric_fn(kind: str, metric: str, labels: np.ndarray, scores: np.ndarray) -> Optional[Callable]:
     """Resampling function for one (kind, metric), or None when no bootstrap is implemented for it."""
     if kind == "multilabel" and metric == "fmax":
@@ -87,8 +233,7 @@ def metric_fn(kind: str, metric: str, labels: np.ndarray, scores: np.ndarray) ->
         function = {"rmse": M.rmse, "mae": M.mae, "pearson_r": M.pearson_r, "spearman_rho": M.spearman_rho}[metric]
         return lambda idx: function(labels.reshape(-1)[idx], scores.reshape(-1)[idx])
     if kind == "multilabel_masked" and metric in ("roc_auc", "prc_auc"):
-        function = M.multitask_roc_auc if metric == "roc_auc" else M.multitask_prc_auc
-        return lambda idx: function(labels[idx], scores[idx])[metric]
+        return _MaskedBinaryMetric(metric, labels, scores)
     if kind == "multitarget_regression" and metric in ("rmse", "mae"):
         return lambda idx: M.multitarget_regression_errors(labels[idx], scores[idx])[metric]
     return None
@@ -140,8 +285,13 @@ def _parts(row: dict, spec: dict) -> list:
 
 
 def paired_bootstrap(rows_a: list, rows_b: list, spec: dict, *, sign: float, n_boot: int,
-                     rng_seed: int) -> dict:
-    """Interval of the signed (B better = +) difference, paired over test samples and common seeds."""
+                     rng_seed: int, workers: int = 1) -> dict:
+    """Interval of the signed (B better = +) difference, paired over test samples and common seeds.
+
+    The resample indices are drawn from ``default_rng(rng_seed)`` one resample after the other (one draw per test
+    part), so the interval depends neither on ``workers`` (processes that share the per-target metric work) nor on
+    how many resamples are evaluated at once.
+    """
     by_seed_a = {r["run_seed"]: r for r in rows_a}
     by_seed_b = {r["run_seed"]: r for r in rows_b}
     seeds = sorted(set(by_seed_a) & set(by_seed_b))
@@ -176,7 +326,8 @@ def paired_bootstrap(rows_a: list, rows_b: list, spec: dict, *, sign: float, n_b
                     return {"ci_low": None, "ci_high": None, "n_boot_failed": None, "common_seeds": seeds,
                             "ci_reason": f"no bootstrap defined for {row['kind']}/{row['metric']}"}
                 fns.append(function)
-            full = float(np.mean([f(np.arange(len(orders[p]))) for f, p in zip(fns, parts)]))
+            full = float(np.mean([f.full() if isinstance(f, _MaskedBinaryMetric) else f(np.arange(len(orders[p])))
+                                  for f, p in zip(fns, parts)]))
             if abs(full - row["value"]) > REPRODUCE_TOLERANCE:
                 raise ValueError(f"{path}: predictions.npz does not reproduce the ledger value of "
                                  f"{row['metric']} {row['eval_split']} (seed {seed}): {full:.6f} vs {row['value']:.6f}")
@@ -184,19 +335,24 @@ def paired_bootstrap(rows_a: list, rows_b: list, spec: dict, *, sign: float, n_b
         functions.append(per_model)
     rng = np.random.default_rng(rng_seed)
     sizes = [len(orders[p]) for p in parts]
+    flat = [(f, k) for per_model in functions for fns in per_model for k, f in enumerate(fns)]  # seed, model, part
+    block = max(1, min(n_boot, _RESAMPLE_BLOCK // max(sizes)))
     differences, failed = [], 0
-    for _ in range(n_boot):
-        draws = [rng.integers(0, n, n) for n in sizes]
-        try:
-            values = [np.mean([fb(i) for fb, i in zip(f_b, draws)]) - np.mean([fa(i) for fa, i in zip(f_a, draws)])
-                      for f_a, f_b in functions]
-        except ValueError:
-            failed += 1
-            continue
-        if not np.all(np.isfinite(values)):
-            failed += 1
-            continue
-        differences.append(sign * float(np.mean(values)))
+    for first in range(0, n_boot, block):
+        n_block = min(block, n_boot - first)
+        draws = [np.empty((n_block, n), dtype=np.int64) for n in sizes]
+        for r in range(n_block):  # one draw per part and resample, in order: the stream of a resample-by-resample loop
+            for k, n in enumerate(sizes):
+                draws[k][r] = rng.integers(0, n, n)
+        values = iter(_block_values([f for f, _ in flat], [k for _, k in flat], draws, workers))
+        per_seed = []
+        for per_model in functions:  # per_model = [functions of A, functions of B], each over the parts
+            mean_a, mean_b = (np.mean([next(values) for _ in fns], axis=0) for fns in per_model)
+            per_seed.append(mean_b - mean_a)
+        difference = np.mean(per_seed, axis=0)  # over the common seeds
+        finite = np.isfinite(difference)
+        failed += int((~finite).sum())
+        differences.extend((sign * difference[finite]).tolist())
     if not differences:
         return {"ci_low": None, "ci_high": None, "n_boot_failed": failed, "common_seeds": seeds,
                 "ci_reason": "metric undefined in every bootstrap sample"}
@@ -240,8 +396,13 @@ def _decision(diff, low, high, std_a, std_b, reason) -> str:
     return "indistinguishable"
 
 
+def default_workers() -> int:
+    """Processes of a run without ``--workers``: ``DEFAULT_WORKERS``, never more than the cores this process may use."""
+    return max(1, min(DEFAULT_WORKERS, len(os.sched_getaffinity(0))))
+
+
 def compare(state: dict, a: str, b: str, *, tasks: Optional[list] = None, n_boot: int = 1000,
-            rng_seed: int = 0) -> dict:
+            rng_seed: int = 0, workers: int = 1) -> dict:
     if a == b:
         raise ValueError("A and B must be different models")
     cells_a, cells_b = _cells(state, a, tasks), _cells(state, b, tasks)
@@ -263,7 +424,7 @@ def compare(state: dict, a: str, b: str, *, tasks: Optional[list] = None, n_boot
         diff = (None if stats_a["mean"] is None or stats_b["mean"] is None
                 else sign * (stats_b["mean"] - stats_a["mean"]))
         spec = ledger.task_spec(state["catalog"], task)
-        boot = paired_bootstrap(rows_a, rows_b, spec, sign=sign, n_boot=n_boot, rng_seed=rng_seed)
+        boot = paired_bootstrap(rows_a, rows_b, spec, sign=sign, n_boot=n_boot, rng_seed=rng_seed, workers=workers)
         pairs.append({"task": task, **dict(zip(_SECTION_KEY, key[1:9])), "eval_split": key[9], "subset": key[10],
                       "metric": metric, "direction": info["direction"], "unit": info["unit"],
                       "is_primary": rows_a[0]["is_primary"], "mean_a": stats_a["mean"], "mean_b": stats_b["mean"],
@@ -329,16 +490,33 @@ def compare_markdown(state: dict, result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def compare_stem(a: str, b: str, tasks: Optional[list] = None) -> str:
+    """File name (without extension) of a comparison: ``<A>__vs__<B>`` for all tasks of the ledger, with a
+    ``__tasks-<task>-<task>`` suffix when the run is restricted by ``--tasks``, so that a restricted run never
+    replaces the all-task files of the same pair."""
+    stem = f"{a}__vs__{b}"
+    if not tasks:
+        return stem
+    bad = [t for t in tasks if not t or any(c in t for c in "/\\") or t.startswith(".")]
+    if bad:
+        raise ValueError(f"invalid task name(s) for a file name: {bad}")
+    names = "-".join(sorted(set(tasks)))
+    if len(names) > 80:  # keep the file name short for long task lists; the full list is in the report
+        names = f"{len(set(tasks))}tasks-{hashlib.sha256(names.encode()).hexdigest()[:8]}"
+    return f"{stem}__tasks-{names}"
+
+
 def write_compare(root: Optional[Path], a: str, b: str, *, tasks: Optional[list] = None, n_boot: int = 1000,
-                  rng_seed: int = 0, state: Optional[dict] = None) -> list:
+                  rng_seed: int = 0, state: Optional[dict] = None, workers: int = 1) -> list:
     root = ledger.results_root(root)
     state = state or ledger_report.load_state(root)
-    result = compare(state, a, b, tasks=tasks, n_boot=n_boot, rng_seed=rng_seed)
+    result = compare(state, a, b, tasks=tasks, n_boot=n_boot, rng_seed=rng_seed, workers=workers)
     written: list = []
     directory = root / "reports" / "compare"
-    ledger_report._write(directory / f"{a}__vs__{b}.md", compare_markdown(state, result), written)
+    stem = compare_stem(a, b, tasks)
+    ledger_report._write(directory / f"{stem}.md", compare_markdown(state, result), written)
     rows = [{k: (json.dumps(v) if isinstance(v, list) else v) for k, v in p.items()} for p in result["pairs"]]
-    ledger_report._write(directory / f"{a}__vs__{b}.csv", ledger_report._csv_text(rows), written)
+    ledger_report._write(directory / f"{stem}.csv", ledger_report._csv_text(rows), written)
     return written
 
 
@@ -349,12 +527,20 @@ def main(argv=None) -> int:
     parser.add_argument("--tasks", nargs="*", default=None)
     parser.add_argument("--bootstrap", type=int, default=1000)
     parser.add_argument("--rng-seed", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=None,
+                        help="processes that share the per-target metric work of one comparison (results agree to "
+                             f"floating-point rounding, about 1e-16, whatever the number); default: min({DEFAULT_WORKERS}, usable cores); at most the usable cores")
     parser.add_argument("--results-root", type=Path, default=None, help=f"default: ${ledger.ENV_VAR}")
     args = parser.parse_args(argv)
     if args.bootstrap < 1:
         parser.error("--bootstrap must be at least 1")
+    usable = len(os.sched_getaffinity(0))
+    if args.workers is not None and not 1 <= args.workers <= usable:
+        parser.error(f"--workers must be between 1 and the {usable} usable cores")
+    workers = default_workers() if args.workers is None else args.workers
+    print(f"ds-compare: {workers} worker process(es) of {usable} usable cores", flush=True)
     written = write_compare(args.results_root, args.a, args.b, tasks=args.tasks, n_boot=args.bootstrap,
-                            rng_seed=args.rng_seed)
+                            rng_seed=args.rng_seed, workers=workers)
     print(json.dumps([str(p) for p in written], indent=1))
     return 0
 
