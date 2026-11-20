@@ -1,6 +1,8 @@
 # MIND runtime dependencies.
 # Versions are the ones installed in the reference environment (Python 3.11,
-# CUDA 12.8) that produced the reported results. Install order matters; see
+# CUDA 12.8) that produced the reported results, except transformers,
+# huggingface-hub, tokenizers, pytorch-lightning, biopython and requests, which
+# are raised to releases without known security advisories. Install order matters; see
 # "Installation" in README.md:
 #   1. torch==2.7.1 from the PyTorch cu128 index
 #   2. pip install -r requirements.txt
@@ -10,7 +12,7 @@
 -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
 
 # Training stack
-pytorch-lightning==2.5.2
+pytorch-lightning==2.6.6
 torchmetrics==1.7.4
 torch-geometric==2.6.1
 torch-scatter==2.1.2
@@ -26,11 +28,11 @@ numpy==1.26.4
 pandas==2.3.1
 scikit-learn==1.7.1
 networkx==3.4.2
-biopython==1.85
+biopython==1.87
 rdkit-pypi==2022.9.5
 tabulate==0.10.0
 tqdm==4.67.1
-requests==2.32.4
+requests==2.33.0
 scipy==1.16.0
 
 # LMDB readers (UniMol pretraining preprocessing, LBA and MoleculeNet downstream data)
@@ -38,5 +40,6 @@ lmdb==3.0.0
 # hdf5 structures of the Fold and Reaction downstream tasks
 h5py==3.16.0
 # ESM-2 and SaProt downstream baselines (downstream/baselines)
-transformers==4.35.0
-huggingface-hub==0.17.3
+transformers==5.10.4
+huggingface-hub==1.33.0
+tokenizers==0.22.2
