@@ -51,9 +51,9 @@ digest, raw file count, thresholds, manifest digest, chain set). A manifest that
 |---|---|---|
 | `2024-01` | `full-release` | 11,176 |
 | `2024-04` | `incremental-update` | 11,622 |
-| `2024-12` | `2024-12-04-full-release` | 12,892 |
-| `2025-10` | `2025-10-01-incremental-release` | 14,774 |
-| `2026-01` | `2026-01-05-full-release` | 15,441 |
+| `2024-12` | `2024-12-04-full-release` | 12,892 | <!-- main-ready: allow RNA3DB release tag (data-source provenance) -->
+| `2025-10` | `2025-10-01-incremental-release` | 14,774 | <!-- main-ready: allow RNA3DB release tag (data-source provenance) -->
+| `2026-01` | `2026-01-05-full-release` | 15,441 | <!-- main-ready: allow RNA3DB release tag (data-source provenance) -->
 
 The release is a required argument, because releases differ in size and content and the choice
 must be explicit. Releases are almost cumulative: each one contains nearly all chains of the previous one (a few chains are dropped between releases).

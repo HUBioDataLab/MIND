@@ -36,7 +36,7 @@ LIGAND_ENTITY = 1
 
 
 def geometry_domains(modality: str) -> tuple:
-    """Geometry-neutral domains a task's graphs need: RNA graphs ``rna``, everything else ``protein`` (as before)."""
+    """Geometry-neutral domains a task's graphs need: RNA graphs ``rna``, everything else ``protein``."""
     return ("rna",) if modality == "rna" else ("protein",)
 
 

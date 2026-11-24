@@ -793,7 +793,7 @@ def run_build(args: argparse.Namespace) -> int:
     work_dir = Path(f"{dest_prefix}_work")
     sdf_path, archive_sha256 = resolve_sdf(args.input, work_dir)
 
-    print("Stage 1/4: scanning records and applying filters", flush=True)
+    print("[1/4] scanning records and applying filters", flush=True)
     scan = scan_sdf(
         sdf_path, salt=args.split_salt, fractions=args.split_fractions,
         molecule_key=args.molecule_key, min_heavy_atoms=args.min_heavy_atoms,
@@ -807,7 +807,7 @@ def run_build(args: argparse.Namespace) -> int:
         raise ValueError("no record passed the filters")
     sdf_sha256 = _sha256_prefix(sdf_path, scan.scanned_bytes)
 
-    print("Stage 2/4: planning molecule-level splits and chunks", flush=True)
+    print("[2/4] planning molecule-level splits and chunks", flush=True)
     plan = build_plan(scan, chunk_size=args.chunk_size, shuffle_seed=args.shuffle_seed)
     plan_bytes = plan_csv_gz_bytes(plan)
     write_once_or_match(Path(f"{dest_prefix}_plan.csv.gz"), plan_bytes)
@@ -846,7 +846,7 @@ def run_build(args: argparse.Namespace) -> int:
     tasks = chunk_tasks(plan, scan, dest_prefix, max_failure_fraction=args.max_failure_fraction, source=source)
     total_chunks = plan.groupby(["split", "chunk"]).ngroups
     print(
-        f"Stage 3/4: converting {len(tasks)} chunks ({total_chunks - len(tasks)} already complete) "
+        f"[3/4] converting {len(tasks)} chunks ({total_chunks - len(tasks)} already complete) "
         f"with {args.workers} workers",
         flush=True,
     )
@@ -871,7 +871,7 @@ def run_build(args: argparse.Namespace) -> int:
                 flush=True,
             )
 
-    print("Stage 4/4: completeness check", flush=True)
+    print("[4/4] completeness check", flush=True)
     previous = json.loads(manifest_path.read_text())
     try:
         report = verify_build(dest_prefix)

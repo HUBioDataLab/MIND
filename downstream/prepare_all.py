@@ -54,7 +54,7 @@ from downstream.tasks import TASKS, load_task
 
 DISK_MARGIN = 1.10  # required free space = estimated need x this
 EXTRACT_FALLBACK = 6.0  # extracted size / archive size when a task.yaml has no disk estimate (measured 2.6 to 7)
-DONE, TODO, UNAVAILABLE, BLOCKED, PROBLEM, UNNEEDED = "done", "todo", "unavailable", "blocked", "problem", "unneeded"
+DONE, PENDING, UNAVAILABLE, BLOCKED, PROBLEM, UNNEEDED = "done", "todo", "unavailable", "blocked", "problem", "unneeded"
 
 
 class PrepareError(RuntimeError):
@@ -214,8 +214,8 @@ def download_state(spec: DownloadSpec) -> Tuple[str, str, int]:
     if spec.unavailable:
         return UNAVAILABLE, spec.unavailable, 0
     if missing:
-        return TODO, f"{len(missing)} archive(s) to fetch", sum(a.bytes or 0 for a in missing)
-    return TODO, f"archives present, {len(absent_outputs)} output(s) to extract or write", 0
+        return PENDING, f"{len(missing)} archive(s) to fetch", sum(a.bytes or 0 for a in missing)
+    return PENDING, f"archives present, {len(absent_outputs)} output(s) to extract or write", 0
 
 
 def processed_state(dirs: Sequence[Path], splits: Sequence[str]) -> Tuple[str, str]:
@@ -227,7 +227,7 @@ def processed_state(dirs: Sequence[Path], splits: Sequence[str]) -> Tuple[str, s
     if not absent:
         return DONE, "all split files present"
     if not present:
-        return TODO, f"{len(absent)} split file(s) to build"
+        return PENDING, f"{len(absent)} split file(s) to build"
     return PROBLEM, (f"partly built: {len(present)} split file(s) exist, {len(absent)} are missing "
                      f"({', '.join(str(p) for p in absent[:3])}{', ...' if len(absent) > 3 else ''}); process never "
                      "overwrites an existing file: move the directory aside and rerun")
@@ -269,7 +269,7 @@ def build_plan(infos: Sequence[TaskInfo], excluded: Sequence[str] = (), explicit
             if info.spec is not None:
                 state, detail, fetch = download_state(info.spec)
                 extracted = info.spec.extracted_gib
-                if state == TODO:
+                if state == PENDING:
                     fetched_size = sum(a.bytes or 0 for a in info.spec.archives if not a.path.exists())
                     unknown = any(a.bytes is None for a in info.spec.archives if not a.path.exists())
                     need = fetched_size + int((extracted if extracted is not None else
@@ -279,7 +279,7 @@ def build_plan(infos: Sequence[TaskInfo], excluded: Sequence[str] = (), explicit
                     unknown, need = False, 0
                 anchor = _anchor(info.spec.archives[0].path.parent) if info.spec.archives else _anchor(info.provenance)
             else:
-                state, detail, fetch, unknown, need = TODO, "no download_spec hook: size and state unknown", 0, True, 0
+                state, detail, fetch, unknown, need = PENDING, "no download_spec hook: size and state unknown", 0, True, 0
                 anchor = _anchor(info.provenance.parent)
             step = Step("download", (), info.module, _command(info.module, "download", extra("download")), state,
                         detail, spec=info.spec, fetch_bytes=fetch, need_bytes=need, size_unknown=unknown, key=key,
@@ -293,10 +293,10 @@ def build_plan(infos: Sequence[TaskInfo], excluded: Sequence[str] = (), explicit
         pstep = processes.get(pkey)
         if pstep is None:
             state, detail = processed_state(info.processed, info.splits)
-            need = int((info.processed_gib or 0.0) * GIB * len(info.processed)) if state == TODO else 0
+            need = int((info.processed_gib or 0.0) * GIB * len(info.processed)) if state == PENDING else 0
             pstep = Step("process", (), info.module, _command(info.module, "process", extra("process")), state,
                          detail, dirs=info.processed, splits=info.splits, provenance=info.provenance, need_bytes=need,
-                         size_unknown=state == TODO and info.processed_gib is None, requires=key,
+                         size_unknown=state == PENDING and info.processed_gib is None, requires=key,
                          key=pkey, anchor=_anchor(info.processed[0].parent))
             processes[pkey] = pstep
             plan.steps.append(pstep)
@@ -314,14 +314,14 @@ def _resolve_blocked(plan: Plan, downloads: Dict[Tuple, Step]) -> None:
     is done is not needed (the raw data may have been removed after processing)."""
     for step in plan.processes:
         download = downloads[step.requires]
-        if step.state == TODO and download.state in (UNAVAILABLE, PROBLEM):
+        if step.state == PENDING and download.state in (UNAVAILABLE, PROBLEM):
             step.derived = True
             step.state = BLOCKED if download.state == UNAVAILABLE else PROBLEM
             step.detail = (f"its download is unavailable: {download.detail}" if download.state == UNAVAILABLE
                            else "its download step has a problem (see above)")
     for key, download in downloads.items():
         dependents = [s for s in plan.processes if s.requires == key]
-        if download.state in (TODO, UNAVAILABLE) and dependents and all(s.state == DONE for s in dependents):
+        if download.state in (PENDING, UNAVAILABLE) and dependents and all(s.state == DONE for s in dependents):
             download.state, download.detail = UNNEEDED, "processed outputs are complete; the raw data is not needed"
             download.fetch_bytes = download.need_bytes = 0
             download.size_unknown = False
@@ -339,7 +339,7 @@ def _collect_errors(plan: Plan) -> None:
 def _check_disk(plan: Plan, free_bytes: Callable[[Path], int]) -> None:
     by_device: Dict[int, List] = {}
     for step in plan.steps:
-        if step.state != TODO or not step.need_bytes or step.anchor is None:
+        if step.state != PENDING or not step.need_bytes or step.anchor is None:
             continue
         entry = by_device.setdefault(os.stat(step.anchor).st_dev, [step.anchor, 0])
         entry[1] += step.need_bytes
@@ -379,7 +379,7 @@ def render(plan: Plan, *, tasks_text: str = "all", exclude_text: str = "") -> st
     for row in [header, *rows]:
         cells = [row[i].ljust(widths[i]) for i in range(5)]
         lines.append("  ".join(cells) + "  " + row[5])
-    todo = [s for s in plan.steps if s.state == TODO]
+    todo = [s for s in plan.steps if s.state == PENDING]
     fetch = sum(s.fetch_bytes for s in todo)
     need = sum(s.need_bytes for s in todo)
     lines += ["", f"Steps: {len(todo)} to run, {sum(s.state == DONE for s in plan.steps)} done (re-verified, not redone), "

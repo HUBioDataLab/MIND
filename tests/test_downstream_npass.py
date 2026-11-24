@@ -80,7 +80,7 @@ def built(tmp_path):
 
 def test_registry_lists_the_eight_npass_tasks_after_the_moleculenet_ones():
     assert NPASS_TASKS == tuple(f"npass_{name}" for name in PAPER_COUNTS)
-    assert TASKS[-8:] == NPASS_TASKS and SMILES_TASKS == MOLNET_TASKS + NPASS_TASKS
+    assert TASKS[7 + len(MOLNET_TASKS):7 + len(MOLNET_TASKS) + 8] == NPASS_TASKS and SMILES_TASKS == MOLNET_TASKS + NPASS_TASKS
     assert common.DATASET_OF_TASK == {f"npass_{name}": name for name in PAPER_COUNTS}
     for name in NPASS_TASKS:
         module = load_task(name)

@@ -83,13 +83,13 @@ RELEASES: dict[str, ReleaseSpec] = {
                     "rna3db-jsons.tar.gz", 5039350, None, 11176),
         ReleaseSpec("2024-04", "incremental-update", "rna3db-mmcifs.v2.tar.xz", 1646954288, None,
                     "rna3db-jsons.tar.gz", 5285023, None, 11622),
-        ReleaseSpec("2024-12", "2024-12-04-full-release", "rna3db-mmcifs.tar.xz", 1808700240, None,
+        ReleaseSpec("2024-12", "2024-12-04-full-release", "rna3db-mmcifs.tar.xz", 1808700240, None,  # main-ready: allow RNA3DB release tag (data-source provenance)
                     "rna3db-jsons.tar.gz", 5777021, None, 12892),
-        ReleaseSpec("2025-10", "2025-10-01-incremental-release", "rna3db-mmcifs.tar.xz", 2063786736,
+        ReleaseSpec("2025-10", "2025-10-01-incremental-release", "rna3db-mmcifs.tar.xz", 2063786736,  # main-ready: allow RNA3DB release tag (data-source provenance)
                     "a45624a136fcaf1b3016dfd76a86d67cf896905241f23bb05f31cc27c12f27f3",
                     "rna3db-jsons.tar.gz", 6522877,
                     "d4996a5f78ffa0453f9b817d49cde85de4f8c038655d8699f6a1eadb10270a01", 14774),
-        ReleaseSpec("2026-01", "2026-01-05-full-release", "rna3db-mmcifs.tar.xz", 2146440832,
+        ReleaseSpec("2026-01", "2026-01-05-full-release", "rna3db-mmcifs.tar.xz", 2146440832,  # main-ready: allow RNA3DB release tag (data-source provenance)
                     "4be4290ee40e1407e1356d804355ba5e4971da527baa5f381116bac327ec9067",
                     "rna3db-jsons.tar.gz", 6851100,
                     "820ba611042ef3e4ec1de7d00e739eefcbf1f78df1452252cc002e369babae8b", 15441),

@@ -90,8 +90,8 @@ probe:
   mlp_hidden: 512
   mlp_dropout: 0.2
 
-# Fine-tuning (downstream.finetune, user-run on one GPU), the MoleculeNet recipe with the decided encoder learning rate
-# for small tasks (1e-4). These sets have 112 to 490 training molecules (4 to 16 optimizer steps per epoch at 32
+# Fine-tuning (downstream.finetune, user-run on one GPU), the MoleculeNet recipe with an encoder learning rate of 1e-4
+# (the small-task rate). These sets have 112 to 490 training molecules (4 to 16 optimizer steps per epoch at 32
 # molecules); that 50 epochs suffice for them is not measured.
 finetune:
   pooling: mean_atoms

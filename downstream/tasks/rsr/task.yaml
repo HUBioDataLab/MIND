@@ -52,7 +52,7 @@ sources:
     # directories by name and `data.mdb` and stops unless exactly one set exists.
     lmdb_value_formats: [json, msgpack]
     # The indices archive holds indices/{train,val,test}_indices.txt, one LMDB-independent source index per line. Their
-    # line counts (12,479 / 4,000 / 4,000, counted on 2026-11-24) equal expected_counts and are re-checked at download.
+    # line counts (12,479 / 4,000 / 4,000) equal expected_counts and are re-checked at download.
     index_files: {train: indices/train_indices.txt, val: indices/val_indices.txt, test: indices/test_indices.txt}
 
 splits: [train, val, test]
@@ -131,8 +131,8 @@ probe:
 # Fine-tuning (downstream.finetune, user-run on one GPU): AdamW with an encoder LR below the head LR; a random-init
 # encoder trains from scratch with lr_encoder_random_init. patience: null runs every epoch; the epoch with the best
 # validation score (mean per-puzzle Spearman, valid split only) is evaluated on the test split.
-# lr_encoder 1e-4 is the small-task recipe decided after the learning-rate study; the molnet / lba / ec blocks of this
-# branch still carry 1e-5 until that change reaches them, so the value is stated here, not inherited.
+# lr_encoder 1e-4 is the small-task rate; the finetune blocks of the other task files carry their own value, so it is
+# stated here, not inherited.
 finetune:
   pooling: mean_atoms
   head: mlp

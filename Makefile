@@ -118,6 +118,7 @@ RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
 # train/val/test, failures with ids, manifest, final completeness check. DEST_PREFIX must be
 # new (an interrupted run with identical settings resumes). Check later with
 # python -m data_loading.build_coconut --verify-only --dest-prefix <prefix>
+# Runs detached; the log is <LOG_MONTH_DIR>/build_coconut_<date>_<time>.log.
 #   make build-coconut INPUT=<coconut.sdf|coconut.zip> DEST_PREFIX=<new prefix> WORKERS=32
 #   Optional: BUILD_ARGS="--chunk-size 5000 --max-records 20000"
 # ===================================================================
@@ -245,7 +246,6 @@ build-coconut:
 	$(CONDA_RUN) setsid nohup python -u -m data_loading.build_coconut \
 		--input "$(INPUT)" --dest-prefix "$(DEST_PREFIX)" --workers $(WORKERS) $(BUILD_ARGS) \
 		> $(LOG_MONTH_DIR)/build_coconut_$(_LOG_DATETIME).log 2>&1 < /dev/null &
-	@echo "Follow: tail -f $(LOG_MONTH_DIR)/build_coconut_$(_LOG_DATETIME).log"
 
 # Offline evaluation of a frozen checkpoint (GPU workload, user-started). Masks and the batch
 # plan depend only on the data selection, split and seed, so checkpoints evaluated with the same
