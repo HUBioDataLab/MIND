@@ -48,7 +48,7 @@ multi_domain:
         test: {chunk_dir: "${MIND_DATA_ROOT}/small_molecules/unimol/universal_unimol", chunk_range: [199, 199]}
     metabolite:
       enabled: false  # off in the 3-domain reference; the four-domain config is pretraining_config_multidomain_1m_coconut.yaml
-      chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed"
+      chunk_dir: "${MIND_DATA_ROOT}/metabolites/coconut_full_train"
       chunk_range: null
   # Budgeted virtual epochs: a fixed atom budget split by domain weights and a fixed
   # batch count (constant plan length, so Lightning consumes every planned batch).

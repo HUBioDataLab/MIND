@@ -20,7 +20,7 @@ multi_domain:
       max_graph_atoms: 12000
     metabolite:
       enabled: false  # off in the fast 3-domain check; the four-domain check is pretraining_config_fast_1m_coconut.yaml
-      chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed"
+      chunk_dir: "${MIND_DATA_ROOT}/metabolites/coconut_full_train"
       chunk_range: [0, 0]
     unimol:
       enabled: true

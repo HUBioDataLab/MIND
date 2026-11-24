@@ -32,7 +32,7 @@ multi_domain:
     
     metabolite:
       enabled: false  # off in this 3-domain config; the four-domain config is pretraining_config_multidomain_1m_coconut.yaml
-      chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed"
+      chunk_dir: "${MIND_DATA_ROOT}/metabolites/coconut_full_train"
       chunk_range: null
 
     unimol:

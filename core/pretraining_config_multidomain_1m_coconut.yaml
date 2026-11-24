@@ -3,8 +3,8 @@
 # ===================================================================
 # pretraining_config_multidomain_1m.yaml with the COCONUT metabolite domain enabled:
 # 1M proteins (edge-free), full RNA corpus (<= 6,000 atoms per graph), all 200 UniMol
-# chunks and the 497 COCONUT chunks (2.76 M graphs). COCONUT has fixed splits: name-sorted
-# chunk indices 0-494 train, 495 val, 496 test. Atom share per epoch is protein 55 /
+# chunks and the full COCONUT build (`make build-coconut`: 1,119 chunks, 5.56 M graphs, molecule-level
+# train/val/test split, validation and test limited to one chunk each). Atom share per epoch is protein 55 /
 # RNA 15 / UniMol 20 / COCONUT 10 (pretraining_config_multidomain_1m.yaml, without COCONUT,
 # uses 65/15/20). Epochs are budgeted virtual epochs (multi_domain.atom_sampling),
 # not full passes over the corpus.
@@ -51,12 +51,12 @@ multi_domain:
         test: {chunk_dir: "${MIND_DATA_ROOT}/small_molecules/unimol/universal_unimol", chunk_range: [199, 199]}
     metabolite:
       enabled: true
-      # 497 sibling processed_chunk_* directories (name-sorted; the 4 gaps in the numbering
-      # are real). Largest graph has 87 atoms, so no max_graph_atoms is needed.
+      # Sibling coconut_full_{train,val,test}_chunk_* directories written by `make build-coconut`
+      # (the split is by molecule, so all conformers of a molecule share a split).
       splits:
-        train: {chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed", chunk_range: [0, 494]}
-        val: {chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed", chunk_range: [495, 495]}
-        test: {chunk_dir: "${MIND_DATA_ROOT}/metabolites/processed", chunk_range: [496, 496]}
+        train: {chunk_dir: "${MIND_DATA_ROOT}/metabolites/coconut_full_train", chunk_range: null}
+        val: {chunk_dir: "${MIND_DATA_ROOT}/metabolites/coconut_full_val", chunk_range: [0, 0]}
+        test: {chunk_dir: "${MIND_DATA_ROOT}/metabolites/coconut_full_test", chunk_range: [0, 0]}
   # Budgeted virtual epochs: a fixed atom budget split by domain weights and a fixed
   # batch count (constant plan length, so Lightning consumes every planned batch).
   atom_sampling:

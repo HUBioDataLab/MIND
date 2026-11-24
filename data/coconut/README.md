@@ -22,11 +22,9 @@ The raw SDF has 5,656,564 molecule records and 329,335,057 atoms (measured with 
 `coconut_sdf_3d-09-2025.zip` is the release downloaded by `data/download_coconut.py`; the
 adapter expects the extracted file as `<data_path>/COCONUT/coconut.sdf` (rename it by hand).
 
-## Provenance limitation (chunks built before `build_coconut.py`)
+## Production chunk set
 
-The production chunk set (`<DATA_ROOT>/metabolites/processed_chunk_*`) holds 2,755,135 graphs
-(about 5,549 per chunk, roughly 500 chunks of a ~2.8 M-molecule SDF). Neither
-`coconut_min10atoms.sdf` (5,599,574 records) nor the 600,000-molecule subset of step 3 has
-that size, and the exact input SDF, any subsetting and the chunk count are not recorded by
-these scripts. When you prepare a new chunk set, record the input file, its record count and
-the subset seed next to the chunks.
+`make build-coconut` (`data_loading/build_coconut.py`) builds the production chunks from the raw SDF or the official zip:
+`<DATA_ROOT>/metabolites/coconut_full_{train,val,test}_chunk_NNN`, each conformer a graph, the split assigned per molecule
+(all conformers of a molecule share a split), with a build manifest (input checksum, filter counts, chunk counts) and a
+completeness check (`--verify-only` repeats it from the files). The four-domain configs read this layout.
