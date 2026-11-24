@@ -77,9 +77,16 @@ without it a 15,000-node budget packs hundreds of molecules into one step). Mole
 `finetune_overrides` of its task.yaml (PCBA: 20 epochs; the others keep 50). Validation and test scoring use
 deterministic CUDA kernels, training does not. `run.log` gives the train and validation seconds of every epoch and
 notes when the best epoch is the last one (the arm may still have been improving). `--lr-encoder`, `--lr-head`,
-`--weight-decay`, `--mlp-dropout`, `--pooling` (one of the task's `embedding.poolings`), `--epochs` and `--patience`
-override the file and are recorded in `config.json`; ds-run reports seeds trained with overrides as other settings, so
+`--weight-decay`, `--mlp-dropout`, `--pooling` (one of the task's `embedding.poolings`), `--epochs`, `--patience`,
+`--lr-schedule {constant,cosine,plateau}` and `--warmup-ratio` override the file and are recorded in `config.json`
+(the schedule keys only when they differ from the default constant lr without warmup, so older records still match); ds-run reports seeds trained with overrides as other settings, so
 use a separate `OUTPUTS_ROOT` for such trial runs.
+Learning-rate schedules (`downstream/lr_schedule.py`, off by default) scale the encoder and head rates together:
+`--warmup-ratio r` ramps linearly from 0 to the peak over `r` of the planned optimizer steps; `cosine` then decays the rate
+to 0.1x of the peak at the last planned step; `plateau` halves it (factor 0.5, patience 3 epochs, minimum 1e-6) when the
+validation score that selects the best epoch has not improved, stepped once per epoch after validation (not combinable
+with warmup). Planned steps = `epochs` x steps per epoch, counted before training with the epoch-0 batching; an early stop
+does not shorten the plan. `run.log` prints the rates each epoch starts with.
 All requested seeds are checked before training, and `metrics.json` is written last and atomically (it marks a
 finished seed). One process uses one GPU; there is no multi-GPU path. `make ds-finetune TASK=<task> MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1] [SEEDS="0 1 2"]
 [OUTPUTS_ROOT=<dir>] [FT_ARGS="--epochs 2"]` runs one task detached; `make ds-run ... HEADS=linear,mlp,finetune` (or

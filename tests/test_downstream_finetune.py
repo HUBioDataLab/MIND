@@ -572,3 +572,69 @@ def test_molnet_finetune_overrides_and_costs_come_from_task_yaml(tmp_path):
     bad.write_text(yaml.safe_dump(values))
     with pytest.raises(ValueError, match="unknown finetune keys"):
         molnet.with_finetune_entries(molnet.load_task_config(bad, dataset="pcba"), bad)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Learning-rate schedules (downstream.lr_schedule) inside the fine-tune loop
+# ---------------------------------------------------------------------------------------------------------
+
+def _lr_columns(out):
+    rows = [line.split() for line in (out / "run.log").read_text().splitlines() if line.startswith("epoch ")]
+    return [(float(r[r.index("lr_encoder") + 1]), float(r[r.index("lr_head") + 1])) for r in rows]
+
+
+def test_planned_steps_equal_the_optimizer_steps_of_a_real_epoch(tmp_path, encoder_calls):
+    split = _esol_split(tmp_path)
+    for cap, max_atoms in ((4, 15000), (None, 15000), (None, 7)):
+        settings = {**SETTINGS, "max_samples_per_batch": cap, "max_atoms_per_batch": max_atoms}
+        model, head = _initial_stand_in(), nn.Linear(8, 1)
+        steps = []
+        finetune.train_epoch(model, head, split, finetune.build_optimizer(model, head, settings), "cpu", epoch_seed=5,
+                             settings=settings, loss_fn=probe.build_loss("multitarget_regression", settings),
+                             kind="multitarget_regression", targets=torch.zeros(len(split), 1),
+                             on_step=lambda: steps.append(1))
+        assert finetune.count_epoch_steps(split, model.config, settings, epoch_seed=5) == len(steps) > 0
+
+
+def test_default_run_keeps_the_task_lrs_and_records_no_schedule(tmp_path, outputs, encoder_calls):
+    data_root = _molnet_data(tmp_path, "esol", lambda i: (-0.4 * i - 1.0,))
+    out, = finetune.run(finetune_args("mn_esol", outputs, data_root=data_root, epochs=3))
+    saved = json.loads((out / "config.json").read_text())["finetune"]
+    assert "lr_schedule" not in saved and "warmup_ratio" not in saved
+    assert len(set(_lr_columns(out))) == 1  # the lr never changes without a schedule
+
+
+def test_cosine_schedule_with_warmup_runs_and_is_recorded(tmp_path, outputs, encoder_calls):
+    data_root = _molnet_data(tmp_path, "esol", lambda i: (-0.4 * i - 1.0,))
+    out, = finetune.run(finetune_args("mn_esol", outputs, data_root=data_root, epochs=6, lr_schedule="cosine",
+                                      warmup_ratio=0.5))
+    saved = json.loads((out / "config.json").read_text())["finetune"]
+    assert (saved["lr_schedule"], saved["warmup_ratio"]) == ("cosine", 0.5)
+    lrs = [encoder for encoder, _ in _lr_columns(out)]
+    peak = saved["lr_encoder"]
+    assert lrs[0] < peak  # epoch 0 starts at the first warmup step
+    assert max(lrs) == pytest.approx(peak, rel=1e-3) and lrs == sorted(lrs[:4]) + sorted(lrs[4:], reverse=True)
+    assert lrs[-1] < peak and "lr_schedule cosine, warmup_ratio 0.5" in (out / "run.log").read_text()
+
+
+def test_plateau_schedule_reduces_the_lr_after_validation_stalls(tmp_path, outputs, encoder_calls, monkeypatch):
+    data_root = _molnet_data(tmp_path, "esol", lambda i: (-0.4 * i - 1.0,))
+    scores = iter([0.9] + [0.1] * 8)  # best at epoch 0, never improved again
+    monkeypatch.setattr(finetune, "validation_score", lambda *a, **k: next(scores))
+    out, = finetune.run(finetune_args("mn_esol", outputs, data_root=data_root, epochs=9, lr_schedule="plateau"))
+    lrs = _lr_columns(out)
+    assert lrs[:4] == [lrs[0]] * 4 and lrs[5][0] == pytest.approx(lrs[0][0] / 2) and lrs[5][1] == pytest.approx(lrs[0][1] / 2)
+
+
+def test_schedule_cli_refusals(capsys):
+    parser = finetune.build_parser()
+    for argv, text in ((["--warmup-ratio", "1"], "--warmup-ratio must be in [0, 1)"),
+                       (["--warmup-ratio", "-0.1"], "--warmup-ratio must be in [0, 1)"),
+                       (["--lr-schedule", "plateau", "--warmup-ratio", "0.1"], "cannot be combined")):
+        args = parser.parse_args(["--task", "ec", "--model", "x", *argv])
+        with pytest.raises(SystemExit):
+            finetune.check_args(parser, args)
+        assert text in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--task", "ec", "--model", "x", "--lr-schedule", "linear"])
+    assert "--lr-schedule" in capsys.readouterr().err

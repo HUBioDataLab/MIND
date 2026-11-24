@@ -23,7 +23,9 @@ config.json): AdamW with ``lr_encoder`` for the encoder and ``lr_head`` for the 
 features standardized with the train mean / std; here the statistics come from the initial encoder (before any update)
 and are fixed buffers of the head. ``--random-init`` builds the same architecture with untrained weights (seeded with
 the run seed) and trains it from scratch with ``lr_encoder_random_init``: a learning rate that suits a pretrained
-encoder is far too small for an untrained one, so each arm uses its own. Training runs ``epochs`` epochs
+encoder is far too small for an untrained one, so each arm uses its own. An optional learning-rate schedule
+(``--lr-schedule constant|cosine|plateau``, ``--warmup-ratio``; ``downstream.lr_schedule``) scales both groups; it is
+off by default. Training runs ``epochs`` epochs
 (``patience: null``) or stops after ``patience`` epochs without validation improvement; the epoch with the best
 validation score, computed on the valid split only, is restored and evaluated on the test split(s). A run whose best
 epoch is its last one says so in run.log (that arm may still have been improving).
@@ -65,7 +67,8 @@ from downstream.common.registry import (
     write_text_atomic,
 )
 from downstream.embed import embed_split_mind
-from downstream.finetune_settings import OVERRIDES, resolve_settings
+from downstream.finetune_settings import LR_SCHEDULES, OVERRIDES, resolve_settings, schedule_of
+from downstream.lr_schedule import build_schedule, count_batches, current_lrs
 from downstream.probe import (
     MASKED_KINDS, SCALED_KINDS, SINGLE_VALUE_KINDS, build_loss, evaluate_task, output_dim, output_scores,
     save_predictions, target_scale, validation_label, validation_score,
@@ -133,9 +136,24 @@ def deterministic_scoring(device: torch.device):
         torch.use_deterministic_algorithms(previous)
 
 
+def epoch_order(split, epoch_seed: int) -> list:
+    """The seeded training order of one epoch."""
+    return torch.randperm(len(split), generator=torch.Generator().manual_seed(epoch_seed)).tolist()
+
+
+def count_epoch_steps(split, model_config, settings: dict, *, epoch_seed: int) -> int:
+    """Optimizer steps ``train_epoch`` takes for ``epoch_seed`` (builds each sample once to read its node count)."""
+    nodes = [split.runtime(index, model_config, seed=epoch_seed).num_nodes for index in epoch_order(split, epoch_seed)]
+    max_samples = settings["max_samples_per_batch"]
+    return count_batches(nodes, max_atoms=int(settings["max_atoms_per_batch"]),
+                         max_samples=None if max_samples is None else int(max_samples))
+
+
 def train_epoch(model, head, split, optimizer, device, *, epoch_seed: int, settings: dict, loss_fn: nn.Module,
-                kind: str, targets: torch.Tensor) -> float:
-    """One pass over the training samples in a seeded order, in batches within the node and sample caps."""
+                kind: str, targets: torch.Tensor, on_step: Optional[Callable[[], None]] = None) -> float:
+    """One pass over the training samples in a seeded order, in batches within the node and sample caps.
+
+    ``on_step`` (the learning-rate schedule) is called after every optimizer step."""
     model.train()
     head.train()
     pooling, max_atoms = settings["pooling"], int(settings["max_atoms_per_batch"])
@@ -144,7 +162,7 @@ def train_epoch(model, head, split, optimizer, device, *, epoch_seed: int, setti
     sample_chain = torch.as_tensor(split.sample_chain).long()
     if len(sample_chain) != len(split):
         raise ValueError(f"split has {len(split)} samples but sample_chain has {len(sample_chain)} entries")
-    order = torch.randperm(len(split), generator=torch.Generator().manual_seed(epoch_seed)).tolist()
+    order = epoch_order(split, epoch_seed)
     indices, samples, atoms, total, seen = [], [], 0, 0.0, 0
 
     def step():
@@ -157,6 +175,8 @@ def train_epoch(model, head, split, optimizer, device, *, epoch_seed: int, setti
         if clip is not None:
             torch.nn.utils.clip_grad_norm_(parameters, float(clip))
         optimizer.step()
+        if on_step is not None:
+            on_step()
         return float(loss) * len(indices)
 
     for index in order:
@@ -198,6 +218,8 @@ def fit(model, head, splits: dict, *, train_split: str, val_split: str, device, 
         val_groups=None) -> dict:
     """Train encoder + head and restore the epoch with the best validation score; returns that epoch's record."""
     optimizer = build_optimizer(model, head, settings)
+    schedule = build_schedule(optimizer, settings, steps_per_epoch=lambda: count_epoch_steps(
+        splits[train_split], model.config, settings, epoch_seed=seed * 100003))  # epoch 0 order
     loss_fn = build_loss(kind, settings)
     targets = training_targets(splits[train_split].labels, kind, scale)
     val_labels = np.asarray(splits[val_split].labels)
@@ -205,14 +227,19 @@ def fit(model, head, splits: dict, *, train_split: str, val_split: str, device, 
     best = {"score": -float("inf"), "epoch": -1}
     for epoch in range(epochs):
         started = time.monotonic()
+        lr_encoder, lr_head = current_lrs(optimizer)  # the rates this epoch starts with
         loss = train_epoch(model, head, splits[train_split], optimizer, device, epoch_seed=seed * 100003 + epoch,
-                           settings=settings, loss_fn=loss_fn, kind=kind, targets=targets)
+                           settings=settings, loss_fn=loss_fn, kind=kind, targets=targets,
+                           on_step=None if schedule is None else schedule.step_batch)
         trained = time.monotonic()
         scores = split_scores(model, head, splits[val_split], device, seed=eval_seed, settings=settings, kind=kind,
                               scale=scale)
         score = validation_score(kind, val_labels, scores, metric, groups=val_groups)
         label, shown = validation_label(kind, score, metric)
-        log(f"epoch {epoch} train_loss {loss:.5f} {label} {shown:.4f} (train {trained - started:.1f} s, "
+        if schedule is not None:
+            schedule.step_epoch(score)
+        log(f"epoch {epoch} train_loss {loss:.5f} {label} {shown:.4f} lr_encoder {lr_encoder:.3g} lr_head "
+            f"{lr_head:.3g} (train {trained - started:.1f} s, "
             f"validation {time.monotonic() - trained:.1f} s)")
         if score > best["score"]:
             best = {"score": score, "epoch": epoch, "encoder": copy.deepcopy(model.state_dict()),
@@ -250,6 +277,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="override finetune.pooling (the task's embedding.poolings limit the choice)")
     parser.add_argument("--epochs", type=int, default=None, help="override finetune.epochs")
     parser.add_argument("--patience", type=int, default=None, help="override finetune.patience (task.yaml: null)")
+    parser.add_argument("--lr-schedule", default=None, choices=LR_SCHEDULES,
+                        help="learning-rate schedule (default constant): cosine = warmup then decay to 0.1x of the "
+                             "peak; plateau = halve after 3 epochs without validation improvement")
+    parser.add_argument("--warmup-ratio", type=float, default=None,
+                        help="fraction of the planned optimizer steps of a linear warmup from 0 to the peak lr, "
+                             "in [0, 1) (default 0; not with --lr-schedule plateau)")
     return parser
 
 
@@ -264,6 +297,10 @@ def check_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Non
         parser.error("--weight-decay must be >= 0")
     if args.mlp_dropout is not None and not 0 <= args.mlp_dropout < 1:
         parser.error("--mlp-dropout must be in [0, 1)")
+    if args.warmup_ratio is not None and not 0 <= args.warmup_ratio < 1:
+        parser.error("--warmup-ratio must be in [0, 1)")
+    if args.lr_schedule == "plateau" and args.warmup_ratio:
+        parser.error("--warmup-ratio cannot be combined with --lr-schedule plateau")
     if args.task != "lba" and args.split_tag:
         parser.error("--split-tag applies to the lba task only")
     if args.seeds is not None and len(set(args.seeds)) != len(args.seeds):
@@ -336,6 +373,7 @@ def run(args: argparse.Namespace) -> list:
                                     mean, std).to(device)
             log(f"{args.task} {protocol} {model_id} seed {seed}: encoder {settings['encoder_init']}, lr_encoder "
                 f"{settings['lr_encoder']}, lr_head {settings['lr_head']}, grad_clip_norm {settings['grad_clip_norm']}, "
+                f"lr_schedule {schedule_of(settings)[0]}, warmup_ratio {schedule_of(settings)[1]}, "
                 f"epochs {settings['epochs']}, patience {settings['patience']}, batch <= "
                 f"{settings['max_atoms_per_batch']} nodes / {settings['max_samples_per_batch']} samples")
             best = fit(model, head, splits, train_split=train_split, val_split=val_split, device=device,

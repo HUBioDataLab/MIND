@@ -11,7 +11,10 @@ REQUIRED_SETTINGS = ("pooling", "head", "seeds", "epochs", "patience", "max_atom
                      "lr_encoder", "lr_encoder_random_init", "lr_head", "weight_decay", "grad_clip_norm", "mlp_hidden",
                      "mlp_dropout")
 POOLINGS = ("mean_atoms", "ca", "mean_residues", "mean_pocket", "mean_ligand", "concat_pocket_ligand")  # downstream.common.encoder.ALL_POOLINGS
-OVERRIDES = ("lr_encoder", "lr_head", "weight_decay", "mlp_dropout", "pooling", "epochs", "patience")
+OVERRIDES = ("lr_encoder", "lr_head", "weight_decay", "mlp_dropout", "pooling", "epochs", "patience",
+             "lr_schedule", "warmup_ratio")
+LR_SCHEDULES = ("constant", "cosine", "plateau")  # semantics: downstream.lr_schedule
+DEFAULT_SCHEDULE = ("constant", 0.0)  # (lr_schedule, warmup_ratio); recorded in the settings only when changed
 
 
 def _positive_or_null(settings: dict, name: str) -> None:
@@ -34,6 +37,27 @@ def _check_ranges(settings: dict, allowed_poolings: Optional[Sequence[str]]) -> 
     if allowed_poolings is not None and settings["pooling"] not in allowed_poolings:
         raise ValueError(f"finetune.pooling {settings['pooling']!r} is not available for this task; "
                          f"its embedding poolings are {tuple(allowed_poolings)}")
+
+
+def schedule_of(settings: dict) -> tuple:
+    """``(lr_schedule, warmup_ratio)`` of resolved settings; the defaults when the settings do not record them."""
+    return settings.get("lr_schedule", DEFAULT_SCHEDULE[0]), float(settings.get("warmup_ratio", DEFAULT_SCHEDULE[1]))
+
+
+def _check_schedule(settings: dict) -> None:
+    """Validate the schedule keys; keep them in the settings only when they differ from the default, so runs without
+    a schedule record exactly the settings they always did (``same_settings`` compares them)."""
+    schedule = settings.pop("lr_schedule", DEFAULT_SCHEDULE[0])
+    ratio = settings.pop("warmup_ratio", DEFAULT_SCHEDULE[1])
+    if schedule not in LR_SCHEDULES:
+        raise ValueError(f"finetune.lr_schedule must be one of {LR_SCHEDULES}, got {schedule!r}")
+    if not (isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and 0 <= ratio < 1):
+        raise ValueError(f"finetune.warmup_ratio must be in [0, 1), got {ratio!r}")
+    if schedule == "plateau" and ratio > 0:
+        raise ValueError("finetune.warmup_ratio > 0 cannot be combined with lr_schedule 'plateau' "
+                         "(warmup and the plateau scheduler would both write the learning rate)")
+    if (schedule, float(ratio)) != DEFAULT_SCHEDULE:
+        settings["lr_schedule"], settings["warmup_ratio"] = schedule, float(ratio)
 
 
 def resolve_settings(block: dict, *, random_init: bool, overrides: Optional[Dict[str, Any]] = None,
@@ -60,6 +84,7 @@ def resolve_settings(block: dict, *, random_init: bool, overrides: Optional[Dict
     for name in ("patience", "max_samples_per_batch", "grad_clip_norm"):
         _positive_or_null(settings, name)
     _check_ranges(settings, allowed_poolings)
+    _check_schedule(settings)
     return settings
 
 
