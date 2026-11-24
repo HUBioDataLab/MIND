@@ -1,0 +1,95 @@
+# Protein secondary structure (per residue): TAPE / PEER release of the NetSurfP-2.0 data (Klausen et al. 2019).
+# Tasks ss_q3 (helix / strand / coil) and ss_q8 (DSSP 8 classes) share this file, one processed directory and one download.
+# Train 8,678 / valid 2,170 chains (25 % identity filtered against the test sets); test sets CB513 (513, the headline set),
+# TS115 (115) and CASP12 (21). Metric: per-residue accuracy (Q3 / Q8) and macro-F1 over the evaluated residues of each test set.
+# Labels are the dataset's own, never recomputed. The literature records have no coordinates: each chain is aligned to its
+# RCSB structure (downstream/tasks/ss/mapping.py) and only residues with a structure and an identical amino acid are evaluated,
+# so every test number carries its coverage (qc_<split>.json, metrics.json: residue_coverage).
+
+task: ss
+modality: protein
+processed_revision: v1
+data_root: ${MIND_DATA_ROOT}/downstream/ss/protein   # raw/{records,structures}, splits/, processed/, provenance.json
+# Disk (GiB). Estimates, not measured with du: extracted = LMDB tree plus the
+# RCSB mmCIF files (about 10,000 entries, roughly 100-150 KB each), processed = one processed directory (EC measured 5.2 GiB for 17,000 chains).
+disk_estimate_gib: {extracted: 2.0, processed: 3.5}
+
+source: tape_netsurfp2
+sources:
+  tape_netsurfp2:
+    url: http://s3.amazonaws.com/songlabdata/proteindata/data_pytorch/secondary_structure.tar.gz
+    bytes: 251794897                    # Content-Length of the S3 object (read 2026-11-24)
+    md5: 2f61e8e09c215c032ef5bc8b910c8e97   # as pinned by TorchDrug SecondaryStructure (the S3 ETag is a multipart hash, not an md5)
+    archive_name: secondary_structure.tar.gz
+    extract_dir: secondary_structure
+    lmdb_pattern: secondary_structure/secondary_structure_{split}.lmdb
+  structures:
+    url_template: https://files.rcsb.org/download/{pdb_id}.cif.gz
+    rate_per_second: 4                  # requests per second over all workers
+    workers: 4
+    retries: 3
+
+splits: [train, valid, cb513, ts115, casp12]
+train_split: train
+valid_split: valid
+test_splits: [cb513, ts115, casp12]     # cb513 first: the headline test set
+expected_chain_counts: {train: 8678, valid: 2170, cb513: 513, ts115: 115, casp12: 21}   # TAPE (Rao et al. 2019) Table S1
+metric: accuracy
+
+structure:
+  mse_to_met: true      # selenomethionine -> MET; the dataset writes X there, so such a residue is a counted sequence_mismatch
+
+alignment:             # our rules, not the literature's: a chain failing either is dropped and counted with both numbers
+  min_identity: 0.9            # identical / aligned residue pairs
+  min_aligned_fraction: 0.5    # aligned pairs / the shorter of structure and dataset sequence (a CB513 region of a longer chain aligns fully)
+
+# Same policy as EC: residues missing a backbone atom are dropped (their label is lost and counted), an incomplete
+# sidechain keeps the backbone and its whole block is masked like a pretraining MLM block.
+missing_atoms:
+  policy: drop_residue_missing_backbone
+  incomplete_sidechain: mask
+
+max_residues: 1024
+length_policy: crop_windows   # per-residue labels: a longer chain becomes contiguous windows, never a skipped chain
+min_residues: 2
+
+qc:
+  max_failed_chain_fraction: 0.25   # per split; above it the processed file is not written, exit 1 (--max-failed-fraction accepts a larger loss)
+
+graph:
+  sequence_neighbors_k: 3
+
+embedding:
+  seed: 0
+  poolings: [ca]                 # residue vector: the CA node state (downstream.common.encoder.RESIDUE_MODES)
+  max_atoms_per_batch: 30000
+
+probe:
+  pooling: ca
+  seeds: [0, 1, 2]
+  epochs: 60
+  patience: 8
+  batch_size: 2048               # rows are residues (about 2 million in train)
+  lr: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+finetune:
+  pooling: ca
+  head: mlp
+  seeds: [0, 1, 2]
+  epochs: 20
+  patience: null
+  max_atoms_per_batch: 15000
+  max_samples_per_batch: null
+  lr_encoder: 0.0001
+  lr_encoder_random_init: 0.0003
+  lr_head: 0.001
+  weight_decay: 0.0001
+  grad_clip_norm: 0.5
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+# Estimate (unmeasured): about 8,700 chains per epoch, half of EC's measured 900 s; ds-run uses it only to order jobs.
+finetune_seconds_per_epoch: 500

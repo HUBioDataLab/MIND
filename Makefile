@@ -316,6 +316,9 @@ eval-counterfactual:
 #   make ds-validate TASK=fold          ds-process TASK=fold WORKERS=16     (probe: one accuracy per test split)
 #   make ds-download TASK=reaction      (size not published; IEConv ProtFunct Google Drive archive: the first
 #   make ds-validate TASK=reaction       download stops until archive_sha256/archive_bytes are pinned in task.yaml)
+#   make ds-download TASK=ss_q3 [SS_ARGS=--records-only]   (CB513 Q3/Q8, shared by ss_q3 and ss_q8: 0.23 GiB archive, then one RCSB
+#   make ds-validate TASK=ss_q3         mmCIF per PDB entry, rate limited, resumable; --records-only stops before them)
+#   make ds-process TASK=ss_q3 WORKERS=16 [SS_ARGS="--max-failed-fraction 0.4"]   (one processed directory for ss_q3 and ss_q8)
 #   make ds-fetch-models BASELINES="esm2_t33_650M_UR50D saprot_650m_pdb"   (baseline weights into MIND_MODELS_ROOT;
 #                                        about 0.03 GiB for esm2_t6_8M up to about 11 GiB for the 3B model, see
 #                                        downstream/baselines/registry.yaml; revisions and md5 are pinned)
@@ -398,10 +401,12 @@ DS_LBA_ARGS := $(DS_SPLIT_TAG_ARGS) $(if $(strip $(REPRESENTATION)),--representa
 # GO branches (go_mf, go_bp, go_cc) share one prepare module.
 # MoleculeNet tasks (mn_*) share the molnet prepare module, which takes --task and reads the LMDB files serially.
 # NPASS tasks (npass_*, or npass for all eight) share the npass prepare module, which takes --task too.
-DS_PREPARE_MODULE = $(if $(filter go_%,$(TASK)),go,$(if $(filter mn_%,$(TASK)),molnet,$(if $(filter npass npass_%,$(TASK)),npass,$(TASK))))
+# Secondary structure (ss_q3, ss_q8) shares the ss prepare module; SS_ARGS passes --records-only (download) or
+# --max-failed-fraction F (process).
+DS_PREPARE_MODULE = $(if $(filter go_%,$(TASK)),go,$(if $(filter mn_%,$(TASK)),molnet,$(if $(filter npass npass_%,$(TASK)),npass,$(if $(filter ss_%,$(TASK)),ss,$(TASK)))))
 DS_MOLNET_ARGS = $(if $(filter mn_% npass npass_%,$(TASK)),--task $(TASK),)
-DS_PROCESS_ARGS = $(if $(filter mn_% npass npass_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS)))
-DS_DOWNLOAD_ARGS = $(if $(filter mn_% npass_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),))
+DS_PROCESS_ARGS = $(if $(filter mn_% npass npass_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS) $(if $(filter ss_%,$(TASK)),$(SS_ARGS),)))
+DS_DOWNLOAD_ARGS = $(if $(filter mn_% npass_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),$(if $(filter ss_%,$(TASK)),$(SS_ARGS),)))
 
 .PHONY: ds-snapshot ds-prepare ds-fetch-models ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
 	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify ds-ledger-recompute \
@@ -642,6 +647,7 @@ help:
 	@echo "         make ds-embed TASK=lba MODEL=<snapshot> GPU=<id> [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
 	@echo "         make ds-probe TASK=lba MODEL_ID=<id> HEAD=mlp [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
 	@echo "    RSR: make ds-download|ds-validate|ds-process TASK=rsr WORKERS=8   (RNA; then ds-embed/ds-probe/ds-finetune TASK=rsr)"
+	@echo "    SS:  make ds-download TASK=ss_q3 [SS_ARGS=--records-only] / ds-process TASK=ss_q3 (ss_q8 shares the data; CB513 Q3/Q8)"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"
 	@echo "    make logs                            List recent log files"

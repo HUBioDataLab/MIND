@@ -218,7 +218,7 @@ def test_embedding_of_another_processed_revision_is_an_error_never_already_compl
 
 def test_real_task_configs_describe_every_unit_of_all():
     units, explicit = run_all.expand_tasks("all", ledger.load_catalog())
-    assert not explicit and len(units) == 30  # ec, 3 GO, fold, 2 LBA split tags, rsr, 14 MoleculeNet, 8 NPASS
+    assert not explicit and len(units) == 32  # ec, 3 GO, fold, 2 LBA split tags, rsr, ss_q3, ss_q8, 14 MoleculeNet, 8 NPASS
     assert [u.key for u in units if u.task == "lba"] == ["lba.identity30.joint", "lba.identity60.joint"]
     for unit in units:
         info = run_all.describe_task(unit)

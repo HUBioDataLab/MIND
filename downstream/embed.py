@@ -62,6 +62,32 @@ def embed_split_mind(model, split, device, *, seed: int, poolings: Sequence[str]
     return {mode: split.chain_embeddings(np.stack(rows)) for mode, rows in per_sample.items()}
 
 
+def embed_split_residues(model, split, device, *, seed: int, modes: Sequence[str], max_atoms: int):
+    """Residue vectors of the labelled residues of a per-residue split.
+
+    Returns ``({mode: [num_labelled_residues, D]}, labelled_rows_in_masked_blocks)`` in the row order of
+    ``split.labels`` / ``split.row_chains`` (sample order, residue order). Unlabelled residues are graph context only.
+    """
+    rows = {mode: [] for mode in modes}
+    masked_rows = 0
+    for indices, samples in batches_by_atoms(split, model.config, seed=seed, max_atoms=max_atoms):
+        states, _, masked = mind_encoder.embed_residues(model, samples, device, modes)
+        counts = [int(split.sample_residues[i]) for i in indices]
+        if sum(counts) != len(masked):
+            raise ValueError(f"{split.path}: batch has {len(masked)} residues, the processed split lists {sum(counts)}")
+        start = 0
+        for index, count in zip(indices, counts):
+            labelled = (split.sample_labels[index] >= 0).numpy()
+            for mode in modes:
+                rows[mode].append(states[mode][start:start + count].numpy()[labelled])
+            masked_rows += int(masked[start:start + count].numpy()[labelled].sum())
+            start += count
+    out = {mode: np.concatenate(parts) for mode, parts in rows.items()}
+    if any(len(v) != len(split.labels) for v in out.values()):
+        raise ValueError(f"{split.path}: embedded {len(next(iter(out.values())))} residues, expected {len(split.labels)}")
+    return out, masked_rows
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--task", required=True, choices=sorted(TASKS))
@@ -91,6 +117,9 @@ def main(argv=None) -> int:
     if args.task != "lba" and (args.split_tag or args.representation):
         parser.error("--split-tag and --representation apply to the lba task only")
     config = task.load_task_config(task.TASK_YAML, data_root=args.data_root)
+    per_residue = bool(getattr(task, "PER_RESIDUE", False))
+    if per_residue and (args.model in saprot.SAPROT_MODELS or args.model in esm2.ESM2_MODELS):
+        parser.error("per-residue tasks (ss_q3, ss_q8) embed MIND snapshots only")
     ProcessedSplit = task.ProcessedSplit
     split_kwargs, embedding_prefix = {}, ""
     if args.task == "lba":
@@ -179,11 +208,16 @@ def main(argv=None) -> int:
         elif is_esm:
             arrays = {esm2.POOLING: esm2.embed_sequences(tokenizer, model, split.sequences, device,
                                                        batch_size=args.esm_batch_size)}
+        elif per_residue:
+            arrays, masked_rows = embed_split_residues(model, split, device, seed=seed, modes=poolings,
+                                                       max_atoms=int(config["embedding"]["max_atoms_per_batch"]))
+            split_provenance = {"coverage": split.coverage, "labelled_rows_in_masked_blocks": masked_rows,
+                                "label_set": split.label_set, "rows": len(split.labels)}
         else:
             arrays = embed_split_mind(model, split, device, seed=seed, poolings=poolings,
                                       max_atoms=int(config["embedding"]["max_atoms_per_batch"]))
         out.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(out, chains=np.array(split.chains), labels=np.asarray(split.labels),
+        np.savez(out, chains=split.row_chains if per_residue else np.array(split.chains), labels=np.asarray(split.labels),
                  **{f"emb_{mode}": value for mode, value in arrays.items()})
         record = dict(provenance, **split_provenance, split=split_name, split_tag=split_tag,
                       representation=representation, model_id=model_id, processed=str(source),

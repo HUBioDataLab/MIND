@@ -9,6 +9,7 @@ for MIND encoders.
 | `go_mf` / `go_bp` / `go_cc` | multi-label, 489 / 1,943 / 320 GO terms | DeepFRI nrPDB-GO split as packaged by TorchDrug (Zenodo 6622158 GeneOntology.zip), test cutoffs 30/40/50/70/95 % | Fmax (higher) |
 | `fold` | multi-class, 1,195 SCOPe 1.75 folds | GearNet Fold3D (Zenodo 7593591, fold3d.zip, CC BY 4.0), 12,312 / 736 / 718 / 1,272 / 1,254 (train / valid / test_fold / test_family / test_superfamily) | accuracy, one per test split |
 | `reaction` | multi-class, 384 EC numbers | IEConv ProtFunct (github.com/phermosilla/IEConv_proteins, Google Drive archive), 29,215 / 2,562 / 5,651 | accuracy |
+| `ss_q3` / `ss_q8` | per-residue multi-class, 3 (helix / strand / coil) / 8 (DSSP) classes | TAPE / PEER release of the NetSurfP-2.0 data (S3 `secondary_structure.tar.gz`), train 8,678 / valid 2,170, test CB513 513 / TS115 115 / CASP12 21 chains, mapped to RCSB structures | per-residue accuracy (Q3 / Q8) on CB513, macro-F1, coverage |
 | `lba` | regression, pK | ATOM3D LBA (PDBbind 2019 refined, 4,463 complexes), 30 % split 3507/466/490, 60 % split 3563/448/452 | RMSE (lower) |
 | `rsr` | ranking regression, RMSD of 3D RNA models | ATOM3D RNA Structure Ranking (Zenodo 4961085, candidates split by time): FARFAR2-Puzzles models of 21 RNA-Puzzles, 12,479 / 4,000 / 4,000 models (train / val / test; 13 / 4 / 4 puzzles) | mean per-puzzle Spearman (higher) |
 | `mn_bbbp` ... `mn_qm8` (14 MoleculeNet tasks, QM9 excluded) | `multilabel_masked` (BBBP, BACE, ClinTox, Tox21, ToxCast, SIDER, HIV, PCBA, MUV) or `multitarget_regression` (ESOL, FreeSolv, Lipo, QM7, QM8) | Uni-Mol LMDB release, scaffold split as shipped; first conformer, hydrogens dropped, no cropping | ROC-AUC + PRC-AUC (classification); RMSE + MAE (regression; primary: RMSE for ESOL/FreeSolv/Lipo, MAE for QM7/QM8) |
@@ -328,6 +329,41 @@ selection), `seen_test` (pretraining hold-out), `unseen`, `unmapped`. PDB ids ag
 refused unless a `pdb_chain -> uniprot` map is given; it never reports "0 leaked" for incomparable namespaces.
 Id matching does not detect homologs. `make ds-leakage ...` (see the Makefile header).
 
+
+## Secondary structure (ss_q3, ss_q8)
+
+`downstream/tasks/ss/` (`task.yaml`, `dataset.py`, `mapping.py`, `tape_lmdb.py`, `structures.py`, `prepare.py`); one data directory,
+one download and one processed directory serve both tasks.
+
+- Protocol (the TAPE / PEER one): train and valid from Klausen et al. (NetSurfP-2.0), 25 % identity filtered against the test sets;
+  tests CB513, TS115, CASP12; per-residue accuracy. Labels are the release's own: `ss8` index 0..7 is DSSP `GHIBESTL`, `ss3` is
+  helix {G,H,I} / strand {B,E} / coil {S,T,L}; the code checks `ss3 == collapse(ss8)` for every chain and never recomputes DSSP.
+  The TAPE LMDB values are pickles of numpy arrays: `tape_lmdb.py` unpickles with an allow-list of four numpy globals.
+- Structure mapping (`mapping.py`): each chain id `<pdb>-<chain>` is fetched from RCSB (`files.rcsb.org/download/<ID>.cif.gz`,
+  current coordinates, author chain id), its standard residues are aligned to the dataset sequence (global, end gaps free, `X` neutral)
+  and the dataset label is put on every structure residue with an identical amino acid. A chain with identity below
+  `alignment.min_identity` or aligned fraction below `alignment.min_aligned_fraction` is dropped and counted. Every dataset residue
+  ends in exactly one bucket (`evaluated`, `not_in_structure_flagged_unresolved`, `not_in_structure_unflagged`,
+  `sequence_mismatch`, `dropped_missing_backbone`, `chain_not_processed`); the sum is checked. Unlabelled structure residues stay in
+  the graph as context. Residues with a missing backbone atom are dropped and incomplete sidechains masked as in EC; a chain longer
+  than 1024 residues becomes contiguous windows.
+- Coverage is part of every result: `qc_<split>.json` and `<seed dir>/coverage.json`, and each test block of `metrics.json` holds
+  `residue_coverage`, `chain_coverage`, `literature_residues`, `literature_chains`. Accuracy and macro-F1 are over the evaluated
+  residues only, so a coverage below 1 is a SUBSET of the literature set (the log line says so).
+  `accuracy_all_residues_coil_fallback` has the literature's denominator and counts every residue that could not be evaluated as
+  predicted coil: the release labels unresolved residues coil (`ss8` 7, `valid_mask` 1.0), whereas NetSurfP-2.0 treats them as
+  unlabelled and does not score them.
+- Residue vector (`downstream.common.encoder.residue_states`): the CA node state after ESA. Geometry-neutral encoding keeps N, CA, C
+  of every residue as real ESA nodes even when its sidechain block is masked, so every residue has one; `mean_backbone` (mean of N,
+  CA, C) is the alternative. A residue of a masked block carries a state computed from mask-token backbone nodes; those labelled rows
+  are counted in the embedding record (`labelled_rows_in_masked_blocks`).
+- Probe: embeddings hold one row per labelled residue (`downstream.embed`, MIND snapshots only); the probe is the Fold one (cross
+  entropy, validation accuracy, train-standardized features) with residues as rows. Fine-tuning (`downstream.finetune`): cross
+  entropy over the labelled residues of each batch, the head reads every residue's CA state, encoder LR 1e-4, epoch chosen by
+  validation accuracy. Both tasks embed separately (two embedding sets of the same residues).
+- Commands: `make ds-download TASK=ss_q3 SS_ARGS=--records-only` (archive + id census, no structures), then `make ds-download TASK=ss_q3`
+  (structures, resumable, 4 requests per second), `make ds-validate TASK=ss_q3`, `make ds-process TASK=ss_q3 WORKERS=16`.
+  A split with more than `qc.max_failed_chain_fraction` unusable chains is not written (`SS_ARGS="--max-failed-fraction 0.4"` accepts more).
 
 ## Fold and Reaction (multiclass)
 

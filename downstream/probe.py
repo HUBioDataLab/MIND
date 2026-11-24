@@ -17,6 +17,8 @@ the epoch with the best validation metric is kept (early stopping on
 ``rsr`` ranking regression (ATOM3D RNA Structure Ranking): one RMSD per model, MSE (or Huber) loss on RMSD standardized
         with train statistics, validation = mean per-puzzle Spearman maximized, test = mean per-puzzle and global
         Spearman / Pearson (+ mean top-1 loss, RMSE); the puzzle of a model is read from its id.
+``ss_q3`` / ``ss_q8`` per-residue multi-class (rows = labelled residues, embeddings of ``downstream.embed``), same loss and
+        validation accuracy as ``fold``; each test block also carries the coverage of its literature set.
 ``mn_*`` MoleculeNet. ``multilabel_masked`` (classification, NaN = missing label): masked BCE loss, validation
         mean ROC-AUC maximized, test ROC-AUC + PRC-AUC. ``multitarget_regression``: masked MSE on targets
         standardized with train statistics, validation = the task's primary error (RMSE or MAE, original units)
@@ -49,6 +51,7 @@ from downstream.common.metrics import (
 from downstream.common.registry import embeddings_path, new_results_dir, run_record, write_text_atomic
 from downstream.tasks import KINDS, TASKS, load_task
 from downstream.tasks.multiclass import split_roles
+from downstream.tasks.ss.dataset import coverage_text as task_coverage_text
 
 
 def load_embeddings(task: str, model_id: str, split: str, pooling: str, root=None, *, kind: str = "multilabel"):
@@ -429,6 +432,11 @@ def main(argv=None) -> int:
             kind, config, train_labels=data[train_split][1], val_labels=data[val_split][1], val_scores=val_scores,
             test_labels=test_labels, test_scores=test_scores, subsets=subsets, val_groups=groups.get(val_split),
             test_groups={name: groups[name] for name in test_splits} if groups else None)
+        if hasattr(task, "augment_test_metrics"):  # per-residue tasks: attach each test set's coverage (subset marker)
+            coverage = {name: provenance[name]["coverage"] for name in test_splits}
+            task.augment_test_metrics(metrics_test, coverage)
+            headline += " | " + task_coverage_text(coverage)
+            (out / "coverage.json").write_text(json.dumps(coverage, indent=1))
         metrics = {
             "task": args.task, "kind": kind, "model_id": args.model_id, "protocol": protocol,
             "pooling": pooling, "seed": seed, "best_epoch": best["epoch"],

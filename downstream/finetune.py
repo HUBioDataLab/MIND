@@ -10,6 +10,8 @@ of one task carry the same metrics, computed the same way:
 ``multilabel`` (EC, GO)  BCE; validation Fmax; test per identity cutoff (GO also IC-binned macro AUPR).
 ``multiclass`` (Fold, Reaction)  cross-entropy; validation accuracy; one metric block per test split.
 ``regression`` (LBA)  MSE (or Huber); validation RMSE minimized; test RMSE / Pearson / Spearman.
+``multiclass`` per residue (ss_q3, ss_q8)  cross-entropy over the labelled residues (unlabelled residues stay graph context);
+    the head reads the CA node state of every residue; validation accuracy; one block per test set with its coverage.
 ``multilabel_masked`` (MoleculeNet classification)  BCE over labelled cells only (NaN = missing); validation mean
     ROC-AUC; test ROC-AUC / PRC-AUC averaged over tasks, plus the QC-flagged test subsets.
 ``multitarget_regression`` (MoleculeNet regression)  masked MSE on targets standardized with train statistics;
@@ -66,7 +68,7 @@ from downstream.common.registry import (
     RANDOM_INIT_SUFFIX, git_commit, new_results_dir, resolve_model, results_dir, run_record, sha256_file,
     write_text_atomic,
 )
-from downstream.embed import embed_split_mind
+from downstream.embed import batches_by_atoms, embed_split_mind
 from downstream.finetune_settings import LR_SCHEDULES, OVERRIDES, resolve_settings, schedule_of
 from downstream.lr_schedule import build_schedule, count_batches, current_lrs
 from downstream.probe import (
@@ -75,6 +77,7 @@ from downstream.probe import (
 )
 from downstream.tasks import TASKS, load_task
 from downstream.tasks.multiclass import split_roles
+from downstream.tasks.ss.dataset import coverage_text as task_coverage_text
 
 
 class StandardizedHead(nn.Module):
@@ -213,27 +216,128 @@ def split_scores(model, head, split, device, *, seed: int, settings: dict, kind:
     return output_scores(output, kind=kind, scale=scale)
 
 
+def train_epoch_residue(model, head, split, optimizer, device, *, epoch_seed: int, settings: dict,
+                        on_step: Optional[Callable[[], None]] = None) -> float:
+    """One pass of a per-residue task: cross-entropy over the labelled residues of each batch (-1 = no label, ignored).
+
+    The head reads the state of every residue (``downstream.common.encoder.residue_states``, mode ``settings["pooling"]``),
+    labelled or not, so unlabelled residues stay graph context; only labelled residues enter the loss.
+    ``on_step`` (the learning-rate schedule) is called after every optimizer step.
+    """
+    model.train()
+    head.train()
+    mode, max_atoms = settings["pooling"], int(settings["max_atoms_per_batch"])
+    max_samples, clip = settings["max_samples_per_batch"], settings["grad_clip_norm"]
+    parameters = list(model.parameters()) + list(head.parameters())
+    loss_fn = nn.CrossEntropyLoss(ignore_index=-1)
+    order = epoch_order(split, epoch_seed)
+    indices, samples, atoms, total, seen = [], [], 0, 0.0, 0
+
+    def step():
+        graph = mind_encoder.collate(samples).to(device)
+        node_embeddings, _ = mind_encoder.encode(model, graph)
+        states, _, _ = mind_encoder.residue_states(node_embeddings, graph, mode)
+        labels = torch.cat([split.sample_labels[i] for i in indices]).to(device)
+        if labels.numel() != states.size(0):
+            raise ValueError(f"batch has {states.size(0)} residues but {labels.numel()} labels")
+        loss = loss_fn(head(states), labels)
+        optimizer.zero_grad()
+        loss.backward()
+        if clip is not None:
+            torch.nn.utils.clip_grad_norm_(parameters, float(clip))
+        optimizer.step()
+        if on_step is not None:
+            on_step()
+        count = int((labels >= 0).sum())
+        return float(loss) * count, count
+
+    def flush():
+        nonlocal total, seen
+        batch_loss, count = step()
+        total += batch_loss
+        seen += count
+
+    for index in order:
+        sample = split.runtime(index, model.config, seed=epoch_seed)
+        full = max_samples is not None and len(samples) >= int(max_samples)
+        if samples and (full or atoms + sample.num_nodes > max_atoms):
+            flush()
+            indices, samples, atoms = [], [], 0
+        indices.append(index)
+        samples.append(sample)
+        atoms += sample.num_nodes
+    if samples:
+        flush()
+    return total / max(seen, 1)
+
+
+@torch.no_grad()
+def residue_feature_statistics(model, split, device, *, seed: int, settings: dict) -> tuple:
+    """Train mean / std per feature over the labelled residues (streamed in float64; std clipped at 1e-6, the probe's rule)."""
+    model.eval()
+    total, square, count = 0.0, 0.0, 0
+    with deterministic_scoring(torch.device(device)):
+        for indices, samples in batches_by_atoms(split, model.config, seed=seed, max_atoms=int(settings["max_atoms_per_batch"])):
+            states, _, _ = mind_encoder.embed_residues(model, samples, device, [settings["pooling"]])
+            counts = [int(split.sample_residues[i]) for i in indices]
+            start = 0
+            for index, n in zip(indices, counts):
+                rows = states[settings["pooling"]][start:start + n][(split.sample_labels[index] >= 0)].double()
+                total, square, count = total + rows.sum(0), square + (rows ** 2).sum(0), count + rows.size(0)
+                start += n
+    mean = total / count
+    std = (square / count - mean ** 2).clamp_min(0).sqrt()
+    return mean.float().numpy(), std.float().numpy().clip(min=1e-6)
+
+
+@torch.no_grad()
+def split_scores_residue(model, head, split, device, *, seed: int, settings: dict) -> np.ndarray:
+    """Softmax scores of the labelled residues of a split, rows in the order of ``split.labels``."""
+    model.eval()
+    head.eval()
+    rows = []
+    with deterministic_scoring(torch.device(device)):
+        for indices, samples in batches_by_atoms(split, model.config, seed=seed, max_atoms=int(settings["max_atoms_per_batch"])):
+            states, _, _ = mind_encoder.embed_residues(model, samples, device, [settings["pooling"]])
+            logits = head(states[settings["pooling"]].to(device)).float().cpu()
+            start = 0
+            for index in indices:
+                n = int(split.sample_residues[index])
+                rows.append(torch.softmax(logits[start:start + n][(split.sample_labels[index] >= 0)], dim=-1))
+                start += n
+    scores = torch.cat(rows).numpy()
+    if len(scores) != len(split.labels):
+        raise ValueError(f"{split.path}: scored {len(scores)} residues, expected {len(split.labels)}")
+    return scores
+
+
 def fit(model, head, splits: dict, *, train_split: str, val_split: str, device, settings: dict, seed: int,
         eval_seed: int, kind: str, scale, metric: Optional[str], log: Callable[[str], None],
-        val_groups=None) -> dict:
+        val_groups=None, per_residue: bool = False) -> dict:
     """Train encoder + head and restore the epoch with the best validation score; returns that epoch's record."""
     optimizer = build_optimizer(model, head, settings)
     schedule = build_schedule(optimizer, settings, steps_per_epoch=lambda: count_epoch_steps(
         splits[train_split], model.config, settings, epoch_seed=seed * 100003))  # epoch 0 order
-    loss_fn = build_loss(kind, settings)
-    targets = training_targets(splits[train_split].labels, kind, scale)
+    loss_fn = None if per_residue else build_loss(kind, settings)
+    targets = None if per_residue else training_targets(splits[train_split].labels, kind, scale)
     val_labels = np.asarray(splits[val_split].labels)
     epochs, patience = int(settings["epochs"]), settings["patience"]
     best = {"score": -float("inf"), "epoch": -1}
     for epoch in range(epochs):
         started = time.monotonic()
         lr_encoder, lr_head = current_lrs(optimizer)  # the rates this epoch starts with
-        loss = train_epoch(model, head, splits[train_split], optimizer, device, epoch_seed=seed * 100003 + epoch,
-                           settings=settings, loss_fn=loss_fn, kind=kind, targets=targets,
-                           on_step=None if schedule is None else schedule.step_batch)
+        on_step = None if schedule is None else schedule.step_batch
+        if per_residue:
+            loss = train_epoch_residue(model, head, splits[train_split], optimizer, device,
+                                       epoch_seed=seed * 100003 + epoch, settings=settings, on_step=on_step)
+        else:
+            loss = train_epoch(model, head, splits[train_split], optimizer, device, epoch_seed=seed * 100003 + epoch,
+                               settings=settings, loss_fn=loss_fn, kind=kind, targets=targets, on_step=on_step)
         trained = time.monotonic()
-        scores = split_scores(model, head, splits[val_split], device, seed=eval_seed, settings=settings, kind=kind,
-                              scale=scale)
+        scores = (split_scores_residue(model, head, splits[val_split], device, seed=eval_seed, settings=settings)
+                  if per_residue else
+                  split_scores(model, head, splits[val_split], device, seed=eval_seed, settings=settings, kind=kind,
+                               scale=scale))
         score = validation_score(kind, val_labels, scores, metric, groups=val_groups)
         label, shown = validation_label(kind, score, metric)
         if schedule is not None:
@@ -312,6 +416,7 @@ def run(args: argparse.Namespace) -> list:
     record = run_record()
     task = load_task(args.task)
     kind = task.KIND
+    per_residue = bool(getattr(task, "PER_RESIDUE", False))
     config = task.load_task_config(task.TASK_YAML, data_root=args.data_root)
     settings = resolve_settings(config["finetune"], random_init=args.random_init,
                                 overrides={name: getattr(args, name) for name in OVERRIDES},
@@ -366,8 +471,10 @@ def run(args: argparse.Namespace) -> list:
             model = mind_encoder.load_mind_encoder(str(resolved.ckpt_path), device,
                                                    random_init=args.random_init, init_seed=seed,
                                                    domains=mind_encoder.geometry_domains(config.get("modality")))
-            mean, std = feature_statistics(split_features(model, splits[train_split], device, seed=eval_seed,
-                                                          settings=settings))
+            mean, std = (residue_feature_statistics(model, splits[train_split], device, seed=eval_seed, settings=settings)
+                         if per_residue else
+                         feature_statistics(split_features(model, splits[train_split], device, seed=eval_seed,
+                                                           settings=settings)))
             head = StandardizedHead(build_head(settings["head"], int(mean.shape[0]), out_dim,
                                                hidden_dim=settings["mlp_hidden"], dropout=settings["mlp_dropout"]),
                                     mean, std).to(device)
@@ -378,9 +485,11 @@ def run(args: argparse.Namespace) -> list:
                 f"{settings['max_atoms_per_batch']} nodes / {settings['max_samples_per_batch']} samples")
             best = fit(model, head, splits, train_split=train_split, val_split=val_split, device=device,
                        settings=settings, seed=seed, eval_seed=eval_seed, kind=kind, scale=scale, metric=metric,
-                       log=log, val_groups=groups.get(val_split))
-            scores = {name: split_scores(model, head, splits[name], device, seed=eval_seed, settings=settings,
-                                         kind=kind, scale=scale)
+                       log=log, val_groups=groups.get(val_split), per_residue=per_residue)
+            scores = {name: (split_scores_residue(model, head, splits[name], device, seed=eval_seed, settings=settings)
+                             if per_residue else
+                             split_scores(model, head, splits[name], device, seed=eval_seed, settings=settings,
+                                          kind=kind, scale=scale))
                       for name in (val_split, *test_splits)}
             test_labels = {name: np.asarray(splits[name].labels) for name in test_splits}
             test_scores = {name: scores[name] for name in test_splits}
@@ -397,7 +506,13 @@ def run(args: argparse.Namespace) -> list:
             if scale is not None:
                 metrics["target_standardization"] = {"mean": scale[0].tolist(), "std": scale[1].tolist(),
                                                      "primary_metric": metric}
-            save_predictions(out / "predictions.npz", kind, test_chains={n: splits[n].chains for n in test_splits},
+            if hasattr(task, "augment_test_metrics"):  # per-residue tasks: coverage of every test set (subset marker)
+                coverage = {n: splits[n].coverage for n in test_splits}
+                task.augment_test_metrics(metrics_test, coverage)
+                headline += " | " + task_coverage_text(coverage)
+                (out / "coverage.json").write_text(json.dumps(coverage, indent=1))
+            save_predictions(out / "predictions.npz", kind,
+                             test_chains={n: (splits[n].row_chains if per_residue else splits[n].chains) for n in test_splits},
                              test_labels=test_labels, test_scores=test_scores, val_scores=scores[val_split])
             torch.save({"state_dict": best["head"], "head": settings["head"], "in_dim": int(mean.shape[0]),
                         "feature_mean": mean, "feature_std": std,

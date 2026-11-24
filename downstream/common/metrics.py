@@ -403,6 +403,23 @@ def weighted_f1(targets: np.ndarray, scores: np.ndarray) -> float:
     return float((support * f1).sum() / support.sum())
 
 
+def macro_f1(targets: np.ndarray, scores: np.ndarray) -> float:
+    """Unweighted mean of the per-class F1 over the classes that occur in the targets or the predictions.
+
+    Same as scikit-learn ``f1_score(average="macro")`` with its default labels (the union of true and predicted classes);
+    a class that never occurs in either does not enter the mean.
+    """
+    targets, scores = _check_multiclass(targets, scores)
+    predicted = scores.argmax(axis=1)
+    num_classes = scores.shape[1]
+    support = np.bincount(targets, minlength=num_classes).astype(np.float64)
+    predicted_count = np.bincount(predicted, minlength=num_classes).astype(np.float64)
+    true_positive = np.bincount(targets[predicted == targets], minlength=num_classes).astype(np.float64)
+    present = (support + predicted_count) > 0
+    f1 = 2 * true_positive[present] / (support[present] + predicted_count[present])
+    return float(f1.mean())
+
+
 def evaluate_multiclass(targets: np.ndarray, scores: np.ndarray) -> Dict[str, float]:
     targets, scores = _check_multiclass(targets, scores)
     top5 = np.argsort(-scores, axis=1)[:, :min(5, scores.shape[1])]
@@ -413,6 +430,7 @@ def evaluate_multiclass(targets: np.ndarray, scores: np.ndarray) -> Dict[str, fl
         "num_classes_present": int(len(np.unique(targets))),
         "balanced_accuracy": balanced_accuracy(targets, scores),
         "weighted_f1": weighted_f1(targets, scores),
+        "macro_f1": macro_f1(targets, scores),
     }
 
 

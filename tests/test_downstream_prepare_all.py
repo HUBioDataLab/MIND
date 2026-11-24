@@ -351,9 +351,11 @@ def test_real_registry_every_task_has_a_spec_and_shares_the_expected_archives(da
     plan = prepare_all.build_plan(infos, [], [], free_bytes=lambda p: 10 ** 15)
     downloads = {s.tasks: s for s in plan.downloads}
     assert ("go_mf", "go_bp", "go_cc") in downloads and tuple(MOLNET_TASKS) in downloads
-    assert len(plan.downloads) == 8 and len(plan.processes) == 4 + 1 + len(MOLNET_TASKS) + len(NPASS_TASKS) + 1  # ec lba go fold reaction + mn + npass + rsr
+    assert len(plan.downloads) == 9 and len(plan.processes) == 4 + 1 + len(MOLNET_TASKS) + len(NPASS_TASKS) + 1 + 1
+    # downloads: ec lba go fold reaction + mn + npass + rsr + ss; processes: those five + mn + npass + rsr + one shared by ss_q3 and ss_q8
+    assert ("ss_q3", "ss_q8") in downloads and any(s.tasks == ("ss_q3", "ss_q8") for s in plan.processes)
     pinned = sum(a.bytes for s in plan.downloads for a in s.spec.archives if a.bytes)
-    assert 8.5 * GIB < pinned < 9.5 * GIB
+    assert 9.0 * GIB < pinned < 9.3 * GIB
     assert downloads[("reaction",)].state == "unavailable" and plan.errors == []
     assert all(s.state in ("todo", "unavailable", "blocked") for s in plan.steps)
     # named: refused loudly, nothing written

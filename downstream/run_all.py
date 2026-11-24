@@ -70,7 +70,7 @@ from downstream.tasks import MOLNET_TASKS, NPASS_TASKS, TASKS, load_task
 HEADS = ("linear", "mlp")  # downstream.common.heads.HEADS (not imported: it pulls torch into the plan step)
 FINETUNE = "finetune"  # the --heads entry that selects end-to-end fine-tuning
 PROTOCOL_CHOICES = HEADS + (FINETUNE,)
-ALL_TASKS = ("ec", "go_mf", "go_bp", "go_cc", "fold", "lba", "rsr") + MOLNET_TASKS + NPASS_TASKS
+ALL_TASKS = ("ec", "go_mf", "go_bp", "go_cc", "fold", "lba", "rsr", "ss_q3", "ss_q8") + MOLNET_TASKS + NPASS_TASKS
 # Pretraining domains (card "domains", the enabled multi_domain datasets) a task's input needs. The LBA joint graph
 # is a protein graph (ligand atoms with pos_code sm).
 MODALITY_DOMAINS = {"protein": ("pdb",), "complex": ("pdb",), "small_molecule": ("unimol",), "rna": ("rna",)}

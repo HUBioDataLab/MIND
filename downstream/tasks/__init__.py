@@ -3,10 +3,10 @@
 Every task module exposes the same surface used by the ``downstream.*`` CLIs:
 
 ``TASK_YAML``      path of the checked-in task config
-``KIND``           ``multilabel`` (EC, GO-MF/BP/CC), ``multiclass`` (Fold, Reaction), ``regression`` (LBA),
-                   ``multilabel_masked`` (MoleculeNet classification), ``multitarget_regression`` (MoleculeNet regression, NPASS) or
-                   ``ranking_regression`` (RSR: one RMSD per model, scored by per-puzzle correlations; the module also
-                   exposes ``group_labels(chains)``)
+``KIND``           ``multilabel`` (EC, GO-MF/BP/CC), ``multiclass`` (Fold, Reaction; secondary structure ss_q3 / ss_q8, one row
+                   per residue), ``regression`` (LBA), ``multilabel_masked`` (MoleculeNet classification),
+                   ``multitarget_regression`` (MoleculeNet regression, NPASS) or ``ranking_regression`` (RSR: one RMSD per
+                   model, scored by per-puzzle correlations; the module also exposes ``group_labels(chains)``)
 ``load_task_config(path, *, data_root)``
 ``processed_dir(config, ...)``
 ``ProcessedSplit``  processed split loader
@@ -26,12 +26,15 @@ NPASS_TASKS = (
 )
 # Tasks whose input is a SMILES string with a generated conformer (the fingerprint baselines cover exactly these).
 SMILES_TASKS = MOLNET_TASKS + NPASS_TASKS
-TASKS = ("ec", "lba", "go_mf", "go_bp", "go_cc", "fold", "reaction") + SMILES_TASKS + ("rsr",)
-# Tasks whose module is not ``downstream.tasks.<name>.dataset``: the three GO branches share one family.
+TASKS = ("ec", "lba", "go_mf", "go_bp", "go_cc", "fold", "reaction") + SMILES_TASKS + ("rsr", "ss_q3", "ss_q8")
+# Tasks whose module is not ``downstream.tasks.<name>.dataset``: the three GO branches and the two secondary-structure
+# label sets share a family.
 TASK_MODULES = {
     "go_mf": "downstream.tasks.go.mf",
     "go_bp": "downstream.tasks.go.bp",
     "go_cc": "downstream.tasks.go.cc",
+    "ss_q3": "downstream.tasks.ss.q3",
+    "ss_q8": "downstream.tasks.ss.q8",
 }
 KINDS = ("multilabel", "multiclass", "regression", "multilabel_masked", "multitarget_regression", "ranking_regression")
 

@@ -31,6 +31,8 @@ POOLINGS = ("mean_atoms", "ca", "mean_residues")
 COMPLEX_POOLINGS = ("mean_pocket", "mean_ligand", "concat_pocket_ligand")
 ALL_POOLINGS = POOLINGS + COMPLEX_POOLINGS
 CA_ANCHOR_ORDER = 1  # attach_runtime_template_metadata: N=0, CA=1, C=2
+RESIDUE_MODES = ("ca", "mean_backbone")  # per-residue vectors (secondary structure); see residue_states
+BACKBONE_ANCHOR_ORDERS = (0, 1, 2)       # N, CA, C
 PROTEIN_ENTITY = 0
 LIGAND_ENTITY = 1
 
@@ -164,6 +166,51 @@ def pool(node_embeddings: torch.Tensor, batch: Batch, pool_mask: torch.Tensor, m
             raise ValueError(f"pooling {mode!r}: graphs {empty} have no unmasked real atom")
         out[mode] = pooled
     return out
+
+
+def residue_states(node_embeddings: torch.Tensor, batch: Batch, mode: str = "ca"):
+    """One vector per residue of the batch: ``(states [R, D], residue_graph [R], residue_masked [R])``.
+
+    Residues are in batch order (graph, then position in the chain). The geometry-neutral encoding keeps the three
+    template anchors N, CA, C of every residue as real ESA nodes even when the residue's sidechain block is masked
+    (only sidechain slots are removed and read out as latent slots), so every residue has a state:
+
+    ``ca``             the CA node state (default).
+    ``mean_backbone``  the mean of the N, CA and C node states.
+
+    ``pool`` excludes the residues of a masked block (their atom types are the mask token); a per-residue task must label
+    every residue, so those are kept here and flagged in ``residue_masked`` (incomplete sidechain, ``mask`` policy): their
+    state was computed from backbone nodes that carried the mask token instead of the atom type. A residue without exactly
+    one active node of each requested anchor raises.
+    """
+    if mode not in RESIDUE_MODES:
+        raise ValueError(f"unknown residue mode {mode!r}; choose from {RESIDUE_MODES}")
+    residue = _residue_ids(batch)
+    num_residues = int(residue.max()) + 1
+    orders = (1,) if mode == "ca" else BACKBONE_ANCHOR_ORDERS
+    anchor = batch.active_node_mask & torch.isin(batch.template_anchor_order.long(),
+                                                 torch.tensor(orders, device=residue.device))
+    states, counts = _masked_mean(node_embeddings, residue, anchor, num_residues)
+    if bool((counts != len(orders)).any()):
+        bad = torch.where(counts != len(orders))[0].tolist()[:10]
+        raise ValueError(f"residues {bad}: expected {len(orders)} active anchor node(s) for mode {mode!r}")
+    graph = torch.zeros(num_residues, dtype=torch.long, device=residue.device)
+    graph[residue] = batch.batch.long()
+    masked = torch.zeros(num_residues, dtype=torch.bool, device=residue.device)
+    masked[residue[anchor]] = batch.downstream_masked_block.bool()[anchor]
+    return states, graph, masked
+
+
+@torch.no_grad()
+def embed_residues(model: PretrainingESAModel, samples: List[Data], device, modes=("ca",)):
+    """Frozen-encoder residue vectors of runtime samples: ``({mode: [R, D] float32 CPU}, residue_graph, masked)``."""
+    batch = collate(samples).to(device)
+    node_embeddings, _ = encode(model, batch)
+    out, graph, masked = {}, None, None
+    for mode in modes:
+        states, graph, masked = residue_states(node_embeddings, batch, mode)
+        out[mode] = states.cpu()
+    return out, graph.cpu(), masked.cpu()
 
 
 @torch.no_grad()

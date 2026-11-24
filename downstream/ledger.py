@@ -52,8 +52,9 @@ _TOP_KEYS = {"task", "kind", "model_id", "protocol", "pooling", "seed", "best_ep
 # Count / operating-point fields: kept as row context, never as metric rows.
 _CONTEXT_KEYS = {"num_proteins", "num_samples", "molecules", "num_classes_present", "macro_aupr_num_terms",
                  "macro_aupr_num_terms_skipped", "target_mean", "target_std", "num_tasks", "num_tasks_evaluated",
-                 "num_tasks_skipped", "num_targets", "fmax_threshold", "num_puzzles"}
-_SAMPLE_KEYS = ("num_proteins", "num_samples", "molecules")
+                 "num_tasks_skipped", "num_targets", "fmax_threshold", "num_puzzles", "num_residues", "literature_residues",
+                 "literature_chains", "evaluated_chains"}
+_SAMPLE_KEYS = ("num_proteins", "num_samples", "molecules", "num_residues")
 _LIST_KEYS = {"per_task", "per_task_prc_auc", "skipped_task_indices", "rmse_per_target", "mae_per_target",
               "num_labeled_per_target", "puzzles", "per_puzzle_num_samples", "per_puzzle_spearman_rho",
               "per_puzzle_pearson_r", "per_puzzle_top1_loss"}

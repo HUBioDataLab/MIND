@@ -26,6 +26,11 @@ metrics:
   coverage: {direction: higher, unit: fraction}
   ic_binned_macro_aupr: {direction: higher, unit: fraction}
   weighted_f1: {direction: higher, unit: fraction}
+  macro_f1: {direction: higher, unit: fraction}
+  # secondary structure: the test sets are evaluated on the residues that have a structure (coverage < 1 = a subset)
+  residue_coverage: {direction: higher, unit: fraction}
+  chain_coverage: {direction: higher, unit: fraction}
+  accuracy_all_residues_coil_fallback: {direction: higher, unit: fraction}
   # offline pretraining evaluation (core/evaluate_pretrain.py); internal, no literature
   top1_acc_real: {direction: higher, unit: fraction}
   top3_acc_real: {direction: higher, unit: fraction}
@@ -102,6 +107,42 @@ tasks:
       - {eval_split: test_family, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
       - {eval_split: test_avg, subset: all, metric: balanced_accuracy, source: "GearNet 'mean accuracy' (ambiguous)"}
       - {eval_split: test_fold, subset: all, metric: weighted_f1, source: "PEER T5"}
+  ss_q3:
+    family: protein_structure
+    kind: multiclass
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: cb513, subset: all, metric: accuracy}
+    # Per residue, over the residues of each test set that have a structure; see residue_coverage (below 1 = a subset of
+    # the literature set). Literature Q3 on CB513: PEER ESM-1b* 83.14 (frozen, 2-layer MLP), ProtTrans, Ankh; macro-F1 is
+    # listed by another group's sheet, no paper row is attached to it here.
+    required:
+      - {eval_split: cb513, subset: all, metric: accuracy, source: "TAPE T2 / Table S2; PEER T3; ProtTrans SOM T9; Ankh T13"}
+      - {eval_split: ts115, subset: all, metric: accuracy, source: "TAPE Table S2; ProtTrans SOM T9"}
+      - {eval_split: casp12, subset: all, metric: accuracy, source: "TAPE Table S2"}
+      - {eval_split: cb513, subset: all, metric: macro_f1, source: "other group's sheet"}
+      - {eval_split: ts115, subset: all, metric: macro_f1, source: "other group's sheet"}
+      - {eval_split: casp12, subset: all, metric: macro_f1, source: "other group's sheet"}
+      - {eval_split: cb513, subset: all, metric: residue_coverage, source: "mapping to RCSB structures (this repository)"}
+      - {eval_split: ts115, subset: all, metric: residue_coverage, source: "mapping to RCSB structures (this repository)"}
+      - {eval_split: casp12, subset: all, metric: residue_coverage, source: "mapping to RCSB structures (this repository)"}
+  ss_q8:
+    family: protein_structure
+    kind: multiclass
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: cb513, subset: all, metric: accuracy}
+    # Literature Q8 on CB513: ESM-1b paper T4 71.6 (BiLSTM head), ProtTrans SOM T8, Ankh T13, TAPE Table S2 (PEER reports Q3 only).
+    required:
+      - {eval_split: cb513, subset: all, metric: accuracy, source: "TAPE Table S2; ESM-1b T4; ProtTrans SOM T8; Ankh T13"}
+      - {eval_split: ts115, subset: all, metric: accuracy, source: "TAPE Table S2; ProtTrans SOM T8"}
+      - {eval_split: casp12, subset: all, metric: accuracy, source: "TAPE Table S2; ProtTrans SOM T8"}
+      - {eval_split: cb513, subset: all, metric: macro_f1, source: "other group's sheet"}
+      - {eval_split: ts115, subset: all, metric: macro_f1, source: "other group's sheet"}
+      - {eval_split: casp12, subset: all, metric: macro_f1, source: "other group's sheet"}
+      - {eval_split: cb513, subset: all, metric: residue_coverage, source: "mapping to RCSB structures (this repository)"}
+      - {eval_split: ts115, subset: all, metric: residue_coverage, source: "mapping to RCSB structures (this repository)"}
+      - {eval_split: casp12, subset: all, metric: residue_coverage, source: "mapping to RCSB structures (this repository)"}
   reaction:
     family: protein_function
     kind: multiclass
