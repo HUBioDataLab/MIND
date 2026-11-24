@@ -300,6 +300,10 @@ eval-counterfactual:
 # are user-started. Snapshots, embeddings and results go under outputs/ (MIND_OUTPUTS_ROOT
 # overrides it). Download sizes are approximate (GiB).
 #   make ds-snapshot CKPT=<ckpt> NAME=<snapshot> [ALIAS=current_best]
+#   make ds-prepare [TASKS=all|molnet|ec,go_mf,..] [EXCLUDE="reaction mn_pcba"] [WORKERS=N] [PLAN=1] [FOREGROUND=1]
+#        all downloads, then all processing, of the selected tasks in one detached run (see the commands below for one
+#        task); archives shared by several tasks are fetched once, finished steps are re-verified and skipped, an
+#        unavailable source is listed (an error only when named). PLAN=1 prints sizes, disk need and problems and exits.
 #   make ds-download TASK=ec            (0.96 GiB; TorchDrug EnzymeCommission.zip, md5 pinned)
 #   make ds-process TASK=ec WORKERS=16
 #   make ds-download TASK=lba           (1.05 GiB for both split tags, 0.53 GiB each; md5 and size pinned)
@@ -392,7 +396,7 @@ DS_MOLNET_ARGS = $(if $(filter mn_%,$(TASK)),--task $(TASK),)
 DS_PROCESS_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS)))
 DS_DOWNLOAD_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),))
 
-.PHONY: ds-snapshot ds-fetch-models ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
+.PHONY: ds-snapshot ds-prepare ds-fetch-models ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
 	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify ds-ledger-recompute \
 	ds-run ds-ecfp ds-status
 
@@ -402,6 +406,21 @@ ds-snapshot:
 	$(if $(strip $(ALIAS)),$(CONDA_RUN) python -m downstream.common.registry alias "$(ALIAS)" "$(NAME)" --repoint,)
 
 # `set -o pipefail`: without it the pipeline exit status is tee's (always 0) and a failed prepare/probe looks like success.
+# The plan runs in the terminal first (a problem stops make); the run itself is detached like ds-run.
+DS_PREPARE_CMD = python -u -m downstream.prepare_all --tasks "$(or $(strip $(TASKS)),all)" --exclude "$(EXCLUDE)" \
+	--workers $(WORKERS) --threads $(DS_THREADS)
+
+ds-prepare:
+	$(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" $(DS_PREPARE_CMD) --plan
+ifeq ($(filter 1,$(PLAN)),)
+	@mkdir -p $(LOG_MONTH_DIR)
+ifeq ($(FOREGROUND),1)
+	set -o pipefail; $(CONDA_RUN) $(DS_ENV) $(DS_PREPARE_CMD) 2>&1 | tee $(LOG_MONTH_DIR)/ds_prepare_$(_LOG_DATETIME).log
+else
+	$(call DS_DETACH,$(LOG_MONTH_DIR)/ds_prepare_$(_LOG_DATETIME)_$$$$.log,$(CONDA_RUN) $(DS_ENV) $(DS_PREPARE_CMD))
+endif
+endif
+
 ds-download ds-process:
 	@mkdir -p $(LOG_MONTH_DIR)
 	set -o pipefail; $(CONDA_RUN) $(DS_ENV) CUDA_VISIBLE_DEVICES="" python -u -m downstream.tasks.$(DS_PREPARE_MODULE).prepare $(patsubst ds-%,%,$@) \
@@ -587,6 +606,8 @@ help:
 	@echo "    make eval-counterfactual CKPT=<ckpt> SPLIT=test GPU=<id> OUT_ROOT=<new dir>  UniMol counterfactual sweep (GPU)"
 	@echo ""
 	@echo "  Downstream (see downstream/README.md):"
+	@echo "    make ds-prepare [TASKS=all|molnet|ec,..] [EXCLUDE=\"reaction mn_pcba\"] [WORKERS=N] [PLAN=1]"
+	@echo "                                         Download + process the data of the selected tasks (CPU, network, detached)"
 	@echo "    make ds-run MODEL=<snapshot|ckpt> [NAME=<name>] GPU=<ids> [TASKS=all|molnet|ec,go_mf,..] [PLAN=1]"
 	@echo "                                         Embed + probe + ledger for one model (GPU, detached)"
 	@echo "                                         HEADS=linear,mlp,finetune adds fine-tuning; HEADS=finetune alone skips the probes"

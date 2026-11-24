@@ -40,6 +40,9 @@ processed_revision: v1
 plausible_median_nn_angstrom: [1.0, 2.0]
 source_name: unimol_molnet
 source_root: ${MIND_DATA_ROOT}/downstream/unimol_molnet      # task data_root = <source_root>/<task>
+# Disk (GiB, measured with du on a completed build): extracted = the extracted tree, processed = one processed directory (typical; PCBA is about 0.5).
+# `make ds-prepare` uses them for its disk estimate only; archive sizes come from the pins.
+disk_estimate_gib: {extracted: 5.8, processed: 0.1}
 raw_subdir: raw/extracted/molecular_property_prediction
 
 # The release archive (about 3.5 GiB). `download` places it at <source_root>/raw/<name> and extracts it to

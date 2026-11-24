@@ -15,6 +15,7 @@ import json
 import sys
 from typing import Optional
 
+from downstream.common.prepare_spec import Archive, DownloadSpec, disk_estimate
 from downstream.tasks import multiclass
 from downstream.tasks.ec.prepare import _fetch
 from downstream.tasks.fold import dataset
@@ -53,6 +54,19 @@ def download(config: dict) -> dict:
         index_path.write_text(json.dumps(index, indent=0))
     return {"archive": record, "md5": md5, "archive_root": str(root),
             "proteins": {s: len(n) for s, n in split_names.items()}, "classes": len(classes)}
+
+
+def download_spec(config: dict) -> DownloadSpec:
+    """Archive and outputs of ``download`` (``ds-prepare``)."""
+    paths, source = multiclass.task_paths(config), config["sources"][config["source"]]
+    archive = Archive(paths["raw"] / source["archive_name"], source["url"], int(source["bytes"]), md5=source["md5"])
+    outputs = (paths["raw"] / source["extract_dir"], multiclass.file_index_path(config),
+               *(paths["splits"] / f"{s}.txt" for s in config["splits"]))
+    return DownloadSpec((archive,), outputs, extracted_gib=disk_estimate(config, "extracted"))
+
+
+def cli_args(step: str, *, task: str, workers: int, threads: int) -> list:
+    return ["--workers", str(workers)] if step == "process" else []
 
 
 def main(argv: Optional[list] = None) -> int:

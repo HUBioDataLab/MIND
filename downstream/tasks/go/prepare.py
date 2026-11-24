@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from downstream.common.provenance import append_run as _append_run, record_process_run
+from downstream.common.prepare_spec import Archive, DownloadSpec, disk_estimate
 from downstream.common.registry import git_commit, sha256_file
 from downstream.tasks.ec.dataset import read_split, read_test_cutoffs, split_chain_id
 from downstream.tasks.ec.prepare import _copy_once, _fetch, _safe_extract
@@ -106,6 +107,19 @@ def validate(config: dict) -> dict:
     result["test_cutoff_counts"] = {c: len(s) for c, s in subsets.items()}
     result["terms"] = {b: len(terms[b]) for b in BRANCH_ORDER}
     return result
+
+
+def download_spec(config: dict) -> DownloadSpec:
+    """Archive and outputs of ``download`` (``ds-prepare``); one archive serves go_mf, go_bp and go_cc."""
+    paths, source = task_paths(config), config["sources"][config["source"]]
+    archive = Archive(paths["raw"] / Path(source["url"]).name, source["url"], int(source["bytes"]), md5=source["md5"])
+    outputs = (paths["raw"] / source["extract_dir"], common.file_index_path(config), paths["splits"] / "test_cutoffs.csv",
+               *(paths["splits"] / f"{s}.txt" for s in config["splits"]))
+    return DownloadSpec((archive,), outputs, extracted_gib=disk_estimate(config, "extracted"))
+
+
+def cli_args(step: str, *, task: str, workers: int, threads: int) -> list:
+    return ["--workers", str(workers)] if step == "process" else []
 
 
 def main(argv: Optional[list] = None) -> int:

@@ -20,6 +20,7 @@ from typing import Optional
 
 import requests
 
+from downstream.common.prepare_spec import Archive, DownloadSpec, disk_estimate
 from downstream.common.registry import sha256_file
 from downstream.tasks import multiclass
 from downstream.tasks.ec.prepare import _fetch
@@ -79,6 +80,29 @@ def download(config: dict) -> dict:
         index_path.write_text(json.dumps(index, indent=0))
     return {"lists": list_records, "archive": record,
             "proteins": {s: len(n) for s, n in split_names.items()}, "classes": len(classes)}
+
+
+def download_spec(config: dict) -> DownloadSpec:
+    """Archive and outputs of ``download`` (``ds-prepare``).
+
+    Unavailable while task.yaml carries ``download_unavailable`` (a reason) or the archive is unpinned: the download
+    refuses to continue on an unpinned archive, so ``ds-prepare`` does not start it.
+    """
+    paths, source = multiclass.task_paths(config), config["sources"][config["source"]]
+    pinned = source["archive_sha256"] is not None and source["archive_bytes"] is not None
+    archive = Archive(paths["raw"] / source["archive_name"], source["archive_url"],
+                      int(source["archive_bytes"]) if pinned else None, sha256=source["archive_sha256"])
+    reason = config.get("download_unavailable")
+    if reason is None and not pinned:
+        reason = (f"the archive is unpinned (archive_sha256 / archive_bytes are null in task.yaml); place a reviewed "
+                  f"copy at {archive.path}, pin it, then rerun")
+    outputs = (paths["raw"] / source["extract_dir"], multiclass.file_index_path(config),
+               *(paths["splits"] / f"{s}.txt" for s in config["splits"]))
+    return DownloadSpec((archive,), outputs, unavailable=reason, extracted_gib=disk_estimate(config, "extracted"))
+
+
+def cli_args(step: str, *, task: str, workers: int, threads: int) -> list:
+    return ["--workers", str(workers)] if step == "process" else []
 
 
 def main(argv: Optional[list] = None) -> int:

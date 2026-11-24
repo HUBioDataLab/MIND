@@ -10,6 +10,9 @@ modality: protein
 # source.block_index). ds-embed/ds-probe read the directory of this revision.
 processed_revision: v3
 data_root: ${MIND_DATA_ROOT}/downstream/ec/protein   # raw/, processed/, splits/, provenance.json
+# Disk (GiB, measured with du on a completed build): extracted = the extracted tree, processed = one processed directory.
+# `make ds-prepare` uses them for its disk estimate only; archive sizes come from the pins.
+disk_estimate_gib: {extracted: 5.0, processed: 5.2}
 
 # deepfri_rcsb: DeepFRI metadata (pinned commit, sha256 checked) + RCSB mmCIF per PDB entry.
 # torchdrug_zip: the per-chain PDB files packaged by TorchDrug/GearNet (Zenodo, md5 checked).
@@ -28,7 +31,8 @@ sources:
     download_workers: 8
   torchdrug_zip:
     url: https://zenodo.org/records/6622158/files/EnzymeCommission.zip
-    md5: 33f799065f8ad75f87b709a87293bc65   # 1,034,145,814 bytes
+    md5: 33f799065f8ad75f87b709a87293bc65
+    bytes: 1034145814
 
 splits: [train, valid, test]
 label_count: 538

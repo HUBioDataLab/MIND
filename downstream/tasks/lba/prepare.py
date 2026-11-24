@@ -28,6 +28,7 @@ from typing import Optional
 
 import requests
 
+from downstream.common.prepare_spec import Archive, DownloadSpec, disk_estimate
 from downstream.common.registry import git_commit, sha256_file
 from downstream.tasks.lba.dataset import (
     TASK_YAML, build_processed, lmdb_dir, lmdb_length, load_task_config, task_paths,
@@ -114,6 +115,23 @@ def _append_provenance(path: Path, record: dict) -> None:
     partial = path.with_name(path.name + ".partial")
     partial.write_text(json.dumps({"runs": runs}, indent=1))
     os.replace(partial, path)
+
+
+def download_spec(config: dict) -> DownloadSpec:
+    """Archives (one per split tag, plus the README) and extracted trees of ``download`` (``ds-prepare``)."""
+    source, paths = config["sources"][config["source"]], task_paths(config)
+    archives, outputs = [], []
+    for key in [*config["split_tags"], "readme"]:
+        entry = source["files"][key]
+        archives.append(Archive(paths["raw"] / entry["name"], source["base_url"].format(name=entry["name"]),
+                                int(entry["bytes"]), md5=entry["md5"]))
+        if key != "readme":
+            outputs.append(paths["extracted"] / entry["name"][len("LBA-"):-len(".tar.gz")])
+    return DownloadSpec(tuple(archives), tuple(outputs), extracted_gib=disk_estimate(config, "extracted"))
+
+
+def cli_args(step: str, *, task: str, workers: int, threads: int) -> list:
+    return ["--threads", str(threads)]
 
 
 def main(argv: Optional[list] = None) -> int:

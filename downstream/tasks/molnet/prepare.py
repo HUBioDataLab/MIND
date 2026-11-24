@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 from downstream.common.provenance import append_run
+from downstream.common.prepare_spec import Archive, DownloadSpec, disk_estimate
 from downstream.common.registry import git_commit, sha256_file
 from downstream.tasks import multiclass
 from downstream.tasks.ec.prepare import _fetch
@@ -71,6 +72,18 @@ def download(config: dict) -> dict:
         raise FileNotFoundError(f"the extracted archive lacks {len(missing)} LMDB file(s): {missing}")
     return {"archive": fetched, "bytes": size, "md5": md5, "extracted": extracted, "lmdb_dir": str(paths["raw"]),
             "datasets": sorted(common.TASK_OF_DATASET)}
+
+
+def download_spec(config: dict) -> DownloadSpec:
+    """The shared archive and its extracted LMDB tree (``ds-prepare``); every ``mn_*`` task has the same spec."""
+    spec, paths = config["archive"], common.task_paths(config)
+    archive = Archive(paths["source_root"] / "raw" / spec["name"], spec["url"], int(spec["bytes"]),
+                      md5=spec["md5"], sha256=spec["sha256"])
+    return DownloadSpec((archive,), (paths["raw"],), extracted_gib=disk_estimate(config, "extracted"))
+
+
+def cli_args(step: str, *, task: str, workers: int, threads: int) -> list:
+    return ["--task", task]
 
 
 def main(argv: Optional[list] = None) -> int:

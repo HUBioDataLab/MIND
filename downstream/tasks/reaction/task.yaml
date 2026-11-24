@@ -25,6 +25,9 @@ processed_revision: v2
 source_name: ieconv
 source_root: ${MIND_DATA_ROOT}/downstream/ieconv
 data_root: ${MIND_DATA_ROOT}/downstream/ieconv/reaction     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)
+# Set while the source cannot be fetched; `make ds-prepare` lists the task as unavailable and fails only when it is named.
+# Remove the key once the archive is reachable again (or a reviewed copy is pinned and placed under raw/).
+download_unavailable: "the Google Drive source link of the README returns HTTP 404"
 
 source: ieconv_protfunct
 sources:

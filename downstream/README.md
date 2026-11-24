@@ -20,8 +20,9 @@ them as environment variables or as Make variables, or keep them in an untracked
 Baseline weights (ESM-2, SaProt) are fetched with `make ds-fetch-models BASELINES="<name> ..."` into `MIND_MODELS_ROOT`.
 
 ```bash
-make ds-download TASK=<task>                 # fetch and verify the source data (CPU, network)
-make ds-process TASK=<task>                  # build the processed files (CPU)
+make ds-prepare [TASKS=all|molnet|ec,go_mf,...] [EXCLUDE="reaction mn_pcba"] [PLAN=1]   # all data steps in one run
+make ds-download TASK=<task>                 # one task: fetch and verify the source data (CPU, network)
+make ds-process TASK=<task>                  # one task: build the processed files (CPU)
 make ds-run MODEL=<snapshot | path/to.ckpt> NAME=<snapshot> GPU=0 PLAN=1   # print the plan, write nothing
 make ds-run MODEL=<snapshot | path/to.ckpt> NAME=<snapshot> GPU=0 TASKS=mn_bbbp,mn_bace
 make ds-status                               # state of this month's ds_* logs
@@ -318,6 +319,40 @@ Std: ledger reports and comparisons use the sample std over run seeds (ddof=1, u
   writes nothing unless the metrics files are unchanged since ingestion, fmax and pair AUPR are reproduced exactly,
   the CONTROL model's recorded macro AUPR is reproduced by the same formula, and no macro AUPR row exists yet. New
   rows name their source in `recomputed_from` and stay in the "Setting" section of the file they come from.
+
+## One command for the data (`make ds-prepare`)
+
+```bash
+make ds-prepare PLAN=1                                  # plan, sizes, disk check; writes nothing
+make ds-prepare                                         # every registered task, detached
+make ds-prepare TASKS=molnet EXCLUDE="mn_pcba" WORKERS=16
+make ds-prepare TASKS=ec,go_mf,fold FOREGROUND=1        # in the terminal
+```
+
+`TASKS` takes `all`, a family (`molnet`, `go`, ...) or task names; `EXCLUDE` removes names or families again (an unknown
+name is refused). The tasks come from `downstream.tasks.TASKS`, so a task registered the same way (module
+`downstream.tasks.<family>.*` plus a `prepare` CLI with `download` and `process`) is included without a change to the
+command. A prepare module declares its pinned archives and outputs in `download_spec(config)` and its extra CLI
+arguments in `cli_args(...)` (`downstream/common/prepare_spec.py`); `disk_estimate_gib` in task.yaml feeds the disk
+estimate.
+
+* Plan: tasks that use the same archive share one `download` step (the 14 MoleculeNet tasks, the three GO
+  branches), tasks that write the same processed directory share one `process` step; all downloads run before any
+  processing. `make` prints the plan (steps, states, archive size in GiB, estimated disk need, free space) in the
+  terminal first and stops on a problem; the run itself is detached and writes one log under `logs/<MonthYear>/`
+  (`ds_prepare_*.log`) that ends with `EXIT_CODE=<n>` (`make ds-status`).
+* Idempotent: a finished step is re-verified, not redone. Archives are checked against their pinned size and
+  checksums; processed split files against the sha256 recorded in `provenance.json` (without a record only their
+  existence is checked, and the log says so). Re-running on a finished tree writes nothing. If every processed
+  directory of a task exists, its raw download is reported as not needed and is not fetched again.
+* Never overwritten: a `<archive>.partial` file, an archive of the wrong size, or a processed directory with only some
+  of its split files is a plan error that names the path; nothing runs until you remove or move it.
+* Unavailable sources: a task whose download cannot be fetched (today `reaction`: the Google Drive link returns
+  HTTP 404; task.yaml `download_unavailable`) is listed as `unavailable` and skipped under `all`/a family, and is an
+  error (exit 2, nothing runs) when named in `TASKS`.
+* Failure: a failing step is reported and the steps that do not depend on it go on; the exit code is 1 and the
+  summary lists what failed or was skipped. Exit code 0 without the expected outputs also counts as a failure.
+* `ds-run` stops with `no processed data ... make ds-prepare TASKS=<task>` for a task without processed files.
 
 ## One command per model (`make ds-run`)
 

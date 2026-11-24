@@ -29,6 +29,7 @@ from typing import Optional
 import requests
 
 from downstream.common.provenance import append_run as _append_provenance, record_process_run
+from downstream.common.prepare_spec import Archive, DownloadSpec, disk_estimate
 from downstream.common.registry import git_commit, sha256_file
 from downstream.tasks.ec.dataset import (
     TASK_YAML, build_processed, load_task_config, processed_dir, read_annotations, read_split, read_test_cutoffs,
@@ -174,6 +175,23 @@ def validate_metadata(config: dict, paths: dict) -> dict:
         raise RuntimeError(f"{len(unlabeled)} split chains lack annotations, first {unlabeled[:5]}")
     subsets = read_test_cutoffs(paths["splits"] / "test_cutoffs.csv", config["test_cutoffs"])
     return {"terms": len(terms), "split_counts": counts, "test_cutoff_counts": {c: len(s) for c, s in subsets.items()}}
+
+
+def download_spec(config: dict) -> DownloadSpec:
+    """Archive and outputs of ``download`` (``ds-prepare``). Only the pinned ``torchdrug_zip`` source is one archive."""
+    if config["source"] != "torchdrug_zip":
+        raise ValueError(f"source {config['source']!r} fetches thousands of files and has no download spec; "
+                         "use the torchdrug_zip source or run `download` directly")
+    paths, source = task_paths(config), config["sources"]["torchdrug_zip"]
+    directory = paths["raw"] / "torchdrug"
+    archive = Archive(directory / "EnzymeCommission.zip", source["url"], int(source["bytes"]), md5=source["md5"])
+    outputs = (directory / "EnzymeCommission", directory / "file_index.json", paths["raw"] / "annotations.tsv",
+               paths["splits"] / "test_cutoffs.csv", *(paths["splits"] / f"{s}.txt" for s in config["splits"]))
+    return DownloadSpec((archive,), outputs, extracted_gib=disk_estimate(config, "extracted"))
+
+
+def cli_args(step: str, *, task: str, workers: int, threads: int) -> list:
+    return ["--workers", str(workers)] if step == "process" else []
 
 
 def main(argv: Optional[list] = None) -> int:

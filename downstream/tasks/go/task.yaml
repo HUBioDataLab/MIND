@@ -19,6 +19,9 @@ processed_revision: v3
 source_name: deepfri
 source_root: ${MIND_DATA_ROOT}/downstream/deepfri
 data_root: ${MIND_DATA_ROOT}/downstream/deepfri/go     # splits/, processed/, provenance.json (raw/ is <source_root>/raw)
+# Disk (GiB, measured with du on a completed build): extracted = the extracted tree, processed = one processed directory.
+# `make ds-prepare` uses them for its disk estimate only; archive sizes come from the pins.
+disk_estimate_gib: {extracted: 8.0, processed: 8.3}
 
 source: torchprotein_go_zip
 sources:

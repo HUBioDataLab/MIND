@@ -294,7 +294,8 @@ def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, se
             plan["failed"].append((f"embed {unit.key}", f"{stale}, but the task reads "
                                    f"{info['processed'][info['splits'][0]].parent.name!r}; use a new OUTPUTS_ROOT"))
         elif no_data:
-            plan["failed"].append((f"embed {unit.key}", f"no processed data: {no_data}"))
+            plan["failed"].append((f"embed {unit.key}", f"no processed data: {no_data}; build it with "
+                                  f"`make ds-prepare TASKS={unit.task}`"))
         elif missing:
             plan["embed"].append((unit, missing))
             plan["timings"][unit] = _known_timings(unit, missing, outputs_root, model.model_id)
@@ -321,7 +322,7 @@ def _plan_finetune(plan: dict, unit: Unit, info: dict, model: ModelPlan, *, seed
         plan["failed"].append((label, "fine-tuning supports the joint LBA representation only"))
         return
     if no_data:
-        plan["failed"].append((label, f"no processed data: {no_data}"))
+        plan["failed"].append((label, f"no processed data: {no_data}; build it with `make ds-prepare TASKS={unit.task}`"))
         return
     expected = sorted({Path(path).parent.name for path in info["processed"].values()})
     settings = resolve_settings(info["finetune"], random_init=model.model_id.endswith(registry.RANDOM_INIT_SUFFIX))

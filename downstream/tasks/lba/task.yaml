@@ -9,6 +9,9 @@
 task: lba
 modality: complex
 data_root: ${MIND_DATA_ROOT}/downstream/lba/complex   # raw/, processed/, provenance.json
+# Disk (GiB, measured with du on a completed build): extracted = the extracted tree, processed = one processed directory.
+# `make ds-prepare` uses them for its disk estimate only; archive sizes come from the pins.
+disk_estimate_gib: {extracted: 1.2, processed: 0.05}
 kind: regression
 
 source: zenodo_4914718

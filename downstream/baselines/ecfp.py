@@ -329,7 +329,7 @@ def main(argv=None) -> int:
     text = plan_text(plans, spec, root, results, args.jobs, args.threads)
     print(text, flush=True)
     if any(plan["no_data"] for plan in plans):
-        print("ERROR: processed data is missing for the tasks above (make ds-process TASK=<task>)", file=sys.stderr)
+        print("ERROR: processed data is missing for the tasks above (make ds-prepare TASKS=<task>)", file=sys.stderr)
         return 2
     if args.plan:
         print("PLAN: nothing was run, no file was written.")
