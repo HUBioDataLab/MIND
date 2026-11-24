@@ -117,7 +117,7 @@ RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
 WORKERS ?= 32
 SPLIT_GROUP ?= id
 
-.PHONY: train test-unit stop status logs help build-edge-free check-epoch-plan eval-pretrain eval-counterfactual
+.PHONY: train test-unit stop status logs help build-edge-free rna-prepare check-epoch-plan eval-pretrain eval-counterfactual
 
 PLAN_EPOCHS ?= 5
 
@@ -217,6 +217,19 @@ build-edge-free:
 		--split-group $(SPLIT_GROUP) $(BUILD_ARGS) \
 		> $(LOG_MONTH_DIR)/build_$(DOMAIN)_$(_LOG_DATETIME).log 2>&1 < /dev/null &
 	@echo "Follow: tail -f $(LOG_MONTH_DIR)/build_$(DOMAIN)_$(_LOG_DATETIME).log"
+
+# RNA3DB release -> <DEST>/raw_structures + manifest_rna.csv (download, extract, manifest; CPU, detached).
+# DEST must be new; RESUME=1 continues an interrupted run of the same RELEASE and re-verifies a finished one
+# (exit 0, nothing overwritten; a manifest that does not match the inputs fails). The log ends with EXIT_CODE.
+#   make rna-prepare RELEASE=2025-10 DEST=<new dir> [WORKERS=24] [RESUME=1]
+# Then chunk it (not chained):
+#   make build-edge-free DOMAIN=rna MANIFEST=<DEST>/manifest_rna.csv RAW_DIR=<DEST>/raw_structures \
+#        DEST_PREFIX=<new prefix> CHUNK_SIZE=200 SPLIT_GROUP=pdb-entry WORKERS=24
+rna-prepare:
+	@test -n "$(RELEASE)" -a -n "$(DEST)" || { echo "ERROR: set RELEASE (2024-01|2024-04|2024-12|2025-10|2026-01) and DEST (new directory)"; exit 1; }
+	@test "$(RESUME)" = 1 -o ! -e "$(DEST)" || { echo "ERROR: $(DEST) exists; use a new DEST, or RESUME=1 to continue an earlier run"; exit 1; }
+	@mkdir -p $(LOG_MONTH_DIR)
+	$(call DS_DETACH,$(LOG_MONTH_DIR)/rna_prepare_$(_LOG_DATETIME).log,$(CONDA_RUN) python -u data/rna/download_rna3db.py --release $(RELEASE) --out-dir "$(DEST)" $(if $(filter 1,$(RESUME)),--resume,) && python -u data/rna/create_rna_manifest.py --prepared-dir "$(DEST)" --workers $(WORKERS) $(if $(filter 1,$(RESUME)),--verify-existing,))
 
 # Offline evaluation of a frozen checkpoint (GPU workload, user-started). Masks and the batch
 # plan depend only on the data selection, split and seed, so checkpoints evaluated with the same
@@ -588,5 +601,7 @@ help:
 	@echo "  Data Processing:"
 	@echo "    make build-edge-free DOMAIN=protein MANIFEST=.. RAW_DIR=.. DEST_PREFIX=.. CHUNK_SIZE=4000"
 	@echo "                                         Raw -> edge-free chunks (detached, no defaults)"
+	@echo "    make rna-prepare RELEASE=2025-10 DEST=<new dir> [WORKERS=24] [RESUME=1]"
+	@echo "                                         RNA3DB release -> raw_structures + manifest (detached, CPU)"
 	@echo ""
 	@echo "  CONFIG shortcuts: m=multidomain_1m_coconut, f=fast"

@@ -29,6 +29,73 @@ train/val/test by SHA-256 of the structure ID (or PDB entry), shuffles within ea
 writes resumable chunks `<prefix>_<split>_chunk_NNN` and records failures in the metadata.
 The loader is described in [`data_loading/pt_schema.py`](../../data_loading/pt_schema.py).
 
+### RNA: from the public RNA3DB release to chunks
+
+The RNA source is [RNA3DB](https://github.com/marcellszi/rna3db), which publishes one mmCIF
+per chain for each release. Three commands take a release to chunks; none asks for input.
+
+```bash
+make rna-prepare RELEASE=2026-01 DEST=<new dir> WORKERS=24      # download, extract, manifest (detached, CPU)
+make build-edge-free DOMAIN=rna MANIFEST=<DEST>/manifest_rna.csv RAW_DIR=<DEST>/raw_structures \
+     DEST_PREFIX=<new prefix> CHUNK_SIZE=200 SPLIT_GROUP=pdb-entry WORKERS=24
+```
+
+`rna-prepare` runs [`data/rna/download_rna3db.py`](../../data/rna/download_rna3db.py) and then
+[`data/rna/create_rna_manifest.py`](../../data/rna/create_rna_manifest.py); its log ends with
+`EXIT_CODE=<n>`. `DEST` must not exist (`RESUME=1` continues an interrupted run of the same release).
+Nothing is overwritten. `RESUME=1` on a finished destination re-verifies it and exits 0: the download is
+re-checked against `split.json`, and the manifest is checked against the current inputs (release, `split.json`
+digest, raw file count, thresholds, manifest digest, chain set). A manifest that does not match fails.
+
+| `RELEASE` | upstream tag | chains in `split.json` |
+|---|---|---|
+| `2024-01` | `full-release` | 11,176 |
+| `2024-04` | `incremental-update` | 11,622 |
+| `2024-12` | `2024-12-04-full-release` | 12,892 |
+| `2025-10` | `2025-10-01-incremental-release` | 14,774 |
+| `2026-01` | `2026-01-05-full-release` | 15,441 |
+
+The release is a required argument, because releases differ in size and content and the choice
+must be explicit. Releases are almost cumulative: each one contains nearly all chains of the previous one (a few chains are dropped between releases).
+
+- **Download and integrity.** The tarball sizes are pinned for every release. SHA-256 is pinned for
+  `2025-10` and `2026-01` (the digests the release host publishes); for the others the digest is
+  computed on the first download and stored in `download_provenance.json`, and a later run that sees a
+  different digest is refused. `--expected-sha256` supplies a known digest. Extraction never uses archive
+  paths: a member name with `..`, an absolute path, a link or an unexpected file type is an error.
+- **Lowercase chain ids.** The tarball writes a lowercase run in a chain id between dashes
+  (`7taw_-m-.cif` is chain `m`) to survive case-insensitive file systems. The tool writes the decoded
+  name `7taw_m.cif`, which is what `split.json` and the builder use. Chains that differ only by case
+  (`1abc_A`, `1abc_a`) are distinct files, so the destination must be on a case-sensitive file system
+  (checked before extraction). Skipping the decoding loses every lowercase chain (11.6 % to 13.0 % of the chains, depending on the release).
+- **Completeness check.** The decoded file names must equal the chain set of the release `split.json`
+  and the pinned chain count; any difference fails the run. The record of archives, digests and counts is
+  `download_provenance.json`.
+- **Manifest.** Columns: `name` (`<pdb>_<chain>`, read by the builder), `pdb_id`, `chain`,
+  `rna3db_set`, `release_date`, `structure_method`, `resolution`, `length`. Rows are sorted by name, so
+  one release and one set of thresholds give one file. Two stages select chains. First, the RNA3DB
+  filters with the release defaults: length >= 32 nt, resolution <= 9.0 A (NMR counts as infinite),
+  at most 80 % of one nucleotide, at most 30 % `N`; the RNA3DB chain selection itself (every
+  polyribonucleotide chain, DNA/RNA hybrids included, no pure DNA) happens upstream. A published
+  `split.json` passes these filters unchanged, so they reject nothing unless the thresholds are
+  tightened. Second, every remaining chain goes through the builder's own worker, and chains it rejects
+  (a P-only phosphate trace is the known case) are dropped with the reason, because every builder
+  failure counts against the per-chunk failure limit. Any other conversion error stops the run. Third,
+mirror-image (left-handed) chains are dropped with the criterion of
+[`audit_rna_anchor_selection.py`](../../data_loading/audit_rna_anchor_selection.py): in blocks with an exact
+12-atom backbone, O2' lies on the non-positive side of the frame built from C2', C3', C4', and a molecule is a
+mirror image when more than half of those blocks do. Blocks with degenerate anchors are not counted.
+  `manifest_rna_provenance.json` holds the thresholds, input digests, counts per rejection reason (including
+  `mirror_image_chains`) and the rejected chains.
+- **Not applied.** The manifest applies no size limit; training-time atom limits are set in the training configs.
+- **Resources.** The mmCIF tarball is about 2 GB (xz) and extracts to text files of roughly 1.3 MB per
+  chain on average, so plan for a few tens of GB. The manifest check converts every chain once, which
+  takes about as long as the chunk build itself; it parallelizes over `WORKERS`.
+
+Also in `data/rna/`: `filter_rna_manifest.py` (an optional atom-count filter for an existing
+manifest) and `filter_dataset.py` (a legacy length filter with hard-coded paths, unused) are not part of this
+workflow.
+
 UniMol and COCONUT still use the two-stage pipeline orchestrated by
 [`data_loading/process_chunked_dataset.py`](../../data_loading/process_chunked_dataset.py).
 It creates a universal cache with
