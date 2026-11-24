@@ -96,7 +96,8 @@ Also in `data/rna/`: `filter_rna_manifest.py` (an optional atom-count filter for
 manifest) and `filter_dataset.py` (a legacy length filter with hard-coded paths, unused) are not part of this
 workflow.
 
-UniMol and COCONUT still use the two-stage pipeline orchestrated by
+COCONUT is built from the raw 3D SDF by one recorded command, `make build-coconut` (see
+[COCONUT build](#coconut-build)). UniMol still uses the two-stage pipeline orchestrated by
 [`data_loading/process_chunked_dataset.py`](../../data_loading/process_chunked_dataset.py).
 It creates a universal cache with
 [`data_loading/cache_universal_datasets.py`](../../data_loading/cache_universal_datasets.py)
@@ -105,6 +106,55 @@ and converts it with [`data_loading/cache_to_pyg.py`](../../data_loading/cache_t
 Data processing is separate from training: the scripts above run on their own
 (`make build-edge-free` for protein and RNA) and never start a training run.
 Generated caches remain outside Git.
+
+## COCONUT build
+
+```bash
+make build-coconut INPUT=<coconut.sdf|coconut.zip> DEST_PREFIX=<new prefix> WORKERS=32
+python -m data_loading.build_coconut --verify-only --dest-prefix <prefix>
+```
+
+[`data_loading/build_coconut.py`](../../data_loading/build_coconut.py) goes from the raw SDF (or
+the official zip, extracted next to the destination and removed on success) to chunks in
+one run. It never overwrites; an interrupted run resumes only when its recorded plan and
+parameters are identical.
+
+- A record is one conformer; a molecule has several. A record is rejected, in this order,
+  when it has fewer than 10 heavy atoms, an element outside H, C, O, N, S, Cl, Br, P, I, Na,
+  F, or only z = 0 heavy atoms (a 2D depiction). Each reason is counted. A record that cannot
+  be parsed aborts the build with its byte offset.
+- Splits are assigned per molecule (SHA-256 of salt and SMILES), so all conformers of a
+  molecule share one split; the SDF is ordered by molecule size, so the split never depends
+  on the record position. Records are shuffled within a split and cut into balanced chunks.
+  Related stereoisomers or tautomers with different SMILES strings can still fall in
+  different splits.
+- A record that passes the filters but fails the adapter (PS_300 tokenizer: for example any
+  sodium-containing molecule, or an invalid valence) is dropped and recorded with its id
+  and reason in the chunk metadata and `<prefix>_failures.csv`. Failures are not
+  uniform in size (they grow with heavy-atom count), so the built set slightly
+  under-represents large molecules.
+- The books must close exactly: raw records = rejected + failed + built, planned chunks =
+  built chunks, and every chunk holds exactly its planned records minus its recorded
+  failures. The run exits non-zero otherwise (`status: failed_verification`).
+- Output: `<prefix>_{train,val,test}_chunk_NNN/processed/` in the stored-edge layout of
+  `cache_to_pyg.py` (radius edges at 5 A with 64 neighbours, `bond_edge_index`) plus the
+  metadata sidecar (with `mol_id = coconut_<record index in the SDF>`), and next to them
+  `<prefix>_plan.csv.gz` (record, split, chunk, molecule, conformer), `_rejected.csv`,
+  `_failures.csv` and `_build_manifest.json` (input and SDF SHA-256, filter version,
+  parameters, tokenizer vocabulary hash, counts per stage and split, git revision).
+
+A config reads the result with fixed splits and no chunk ranges:
+
+```yaml
+metabolite:
+  enabled: true
+  splits:
+    train: {chunk_dir: <prefix>_train, chunk_range: null}
+    val:   {chunk_dir: <prefix>_val,   chunk_range: null}
+    test:  {chunk_dir: <prefix>_test,  chunk_range: null}
+```
+
+Covered by [`tests/test_build_coconut.py`](../../tests/test_build_coconut.py).
 
 ## Representation contracts
 
@@ -249,7 +299,7 @@ finite coordinates, molecule IDs, and domain labels. For a requested adapter
 or pipeline change, the focused checks are:
 
 ```bash
-pytest -v tests/test_adapters.py tests/test_build_edge_free_chunks.py tests/test_rna_baseline_subset.py
+pytest -v tests/test_adapters.py tests/test_build_edge_free_chunks.py tests/test_build_coconut.py tests/test_rna_baseline_subset.py
 ```
 
 Then inspect one generated graph with `torch.load` and confirm `pos` has shape

@@ -20,8 +20,8 @@ from typing import List, Any, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 
 
-from adapters.base_adapter import BaseAdapter
-from data_types import UniversalAtom, UniversalBlock, UniversalMolecule
+from data_loading.adapters.base_adapter import BaseAdapter
+from data_loading.data_types import UniversalAtom, UniversalBlock, UniversalMolecule
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -78,6 +78,8 @@ class COCONUTAdapter(BaseAdapter):
         super().__init__("coconut")
         self.remove_hydrogens = remove_hydrogens
         self.stats = ProcessingStatistics()
+        # Reason of the most recent create_blocks failure (None after a success).
+        self.last_failure_reason: Optional[str] = None
         self._initialize_get_components()
 
     def _initialize_get_components(self):
@@ -222,6 +224,7 @@ class COCONUTAdapter(BaseAdapter):
             Returns ([], []) if processing fails.
         """
         self.stats.total_molecules += 1
+        self.last_failure_reason = None
         
         mol = raw_item['mol']
         mol_id = raw_item.get('id', 'unknown')
@@ -233,6 +236,7 @@ class COCONUTAdapter(BaseAdapter):
         except ValueError as e:
             # No conformer or other extraction error
             logger.debug(f"Skipping molecule {mol_id}: {e}")
+            self.last_failure_reason = f"no conformer: {e}"
             self.stats.skipped_no_conformer += 1
             self.stats.failed_molecules += 1
             return [], []
@@ -240,6 +244,7 @@ class COCONUTAdapter(BaseAdapter):
         # Check if we have any atoms after hydrogen filtering
         if len(atoms) == 0:
             logger.debug(f"Skipping molecule {mol_id}: No atoms after hydrogen filtering")
+            self.last_failure_reason = "no atoms after hydrogen filtering"
             self.stats.skipped_empty_after_h_filter += 1
             self.stats.failed_molecules += 1
             return [], []
@@ -256,6 +261,7 @@ class COCONUTAdapter(BaseAdapter):
             # Skip molecules with invalid valences or other RDKit issues
             # This is common in natural products with complex ring systems
             logger.debug(f"Tokenization failed for {mol_id}: {e}")
+            self.last_failure_reason = f"tokenization error: {type(e).__name__}: {e}"[:200]
             self.stats.skipped_tokenization_error += 1
             self.stats.failed_molecules += 1
             return [], []
@@ -317,6 +323,7 @@ class COCONUTAdapter(BaseAdapter):
         if blocks:
             self.stats.successful_molecules += 1
         else:
+            self.last_failure_reason = "tokenizer returned no fragment with atoms"
             self.stats.failed_molecules += 1
             
         return blocks, bond_edges

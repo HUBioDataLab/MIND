@@ -10,8 +10,10 @@ Orchestrates the full pipeline for processing large datasets:
 3. All chunks are automatically detected and used by train_pretrain.py via LazyUniversalDataset
 
 Protein and RNA chunks are built directly from raw structures by
-`make build-edge-free` (data_loading/build_edge_free_chunks.py); this pipeline is the
-route for UniMol and COCONUT (and the QM9/LBA datasets).
+`make build-edge-free` (data_loading/build_edge_free_chunks.py) and COCONUT by
+`make build-coconut` (data_loading/build_coconut.py: filters, molecule-level splits,
+failure records, completeness check); this pipeline is the route for UniMol (and the
+QM9/LBA datasets).
 
 Usage:
     # COCONUT dataset (no manifest needed, reads from SDF)

@@ -111,13 +111,21 @@ RESOLVED_GPU = $(shell if [ "$(GPU)" = "auto" ]; then \
 #   make build-edge-free DOMAIN=protein MANIFEST=<csv> RAW_DIR=<dir> \
 #        DEST_PREFIX=<new prefix> CHUNK_SIZE=4000 WORKERS=32
 #   Optional: SPLIT_GROUP=pdb-entry (RNA), BUILD_ARGS="--no-split --chunks 0"
-# UniMol and COCONUT still use data_loading/process_chunked_dataset.py.
+# UniMol still uses data_loading/process_chunked_dataset.py.
+#
+# Raw COCONUT 3D SDF (or the official zip) -> recorded, resumable stored-edge chunks
+# (data_loading/build_coconut.py): filters with per-reason counts, molecule-level
+# train/val/test, failures with ids, manifest, final completeness check. DEST_PREFIX must be
+# new (an interrupted run with identical settings resumes). Check later with
+# python -m data_loading.build_coconut --verify-only --dest-prefix <prefix>
+#   make build-coconut INPUT=<coconut.sdf|coconut.zip> DEST_PREFIX=<new prefix> WORKERS=32
+#   Optional: BUILD_ARGS="--chunk-size 5000 --max-records 20000"
 # ===================================================================
 
 WORKERS ?= 32
 SPLIT_GROUP ?= id
 
-.PHONY: train test-unit stop status logs help build-edge-free rna-prepare check-epoch-plan eval-pretrain eval-counterfactual
+.PHONY: train test-unit stop status logs help build-edge-free rna-prepare build-coconut check-epoch-plan eval-pretrain eval-counterfactual
 
 PLAN_EPOCHS ?= 5
 
@@ -230,6 +238,14 @@ rna-prepare:
 	@test "$(RESUME)" = 1 -o ! -e "$(DEST)" || { echo "ERROR: $(DEST) exists; use a new DEST, or RESUME=1 to continue an earlier run"; exit 1; }
 	@mkdir -p $(LOG_MONTH_DIR)
 	$(call DS_DETACH,$(LOG_MONTH_DIR)/rna_prepare_$(_LOG_DATETIME).log,$(CONDA_RUN) python -u data/rna/download_rna3db.py --release $(RELEASE) --out-dir "$(DEST)" $(if $(filter 1,$(RESUME)),--resume,) && python -u data/rna/create_rna_manifest.py --prepared-dir "$(DEST)" --workers $(WORKERS) $(if $(filter 1,$(RESUME)),--verify-existing,))
+
+build-coconut:
+	@test -n "$(INPUT)" -a -n "$(DEST_PREFIX)" || { echo "ERROR: set INPUT (SDF or zip) and DEST_PREFIX"; exit 1; }
+	@mkdir -p $(LOG_MONTH_DIR)
+	$(CONDA_RUN) setsid nohup python -u -m data_loading.build_coconut \
+		--input "$(INPUT)" --dest-prefix "$(DEST_PREFIX)" --workers $(WORKERS) $(BUILD_ARGS) \
+		> $(LOG_MONTH_DIR)/build_coconut_$(_LOG_DATETIME).log 2>&1 < /dev/null &
+	@echo "Follow: tail -f $(LOG_MONTH_DIR)/build_coconut_$(_LOG_DATETIME).log"
 
 # Offline evaluation of a frozen checkpoint (GPU workload, user-started). Masks and the batch
 # plan depend only on the data selection, split and seed, so checkpoints evaluated with the same
@@ -603,5 +619,7 @@ help:
 	@echo "                                         Raw -> edge-free chunks (detached, no defaults)"
 	@echo "    make rna-prepare RELEASE=2025-10 DEST=<new dir> [WORKERS=24] [RESUME=1]"
 	@echo "                                         RNA3DB release -> raw_structures + manifest (detached, CPU)"
+	@echo "    make build-coconut INPUT=<sdf|zip> DEST_PREFIX=.. WORKERS=32"
+	@echo "                                         Raw COCONUT SDF -> recorded chunks (detached, no overwrite)"
 	@echo ""
 	@echo "  CONFIG shortcuts: m=multidomain_1m_coconut, f=fast"

@@ -12,7 +12,7 @@ Pipeline for the production set (order matters):
 | 1 | `filter_less_10_atoms.py` | `coconut.sdf` → `coconut_min10atoms.sdf` (keep molecules with at least 10 heavy atoms; `heavy_only=True` by default) |
 | 2 | `filter_allowed_elements.py` | `coconut_min10atoms.sdf` → `coconut_min10atoms_allowed_elements.sdf` (keep only H, C, O, N, S, Cl, Br, P, I, Na, F) |
 | 3 (optional) | `select_random_sdf_entries.py` | random subset of an SDF (`-n`, `--seed`); produced the 600,000-molecule file |
-| 4 | `process_chunked_dataset.py --dataset coconut` | SDF → chunks (see [DATA_PIPELINE.md](../../Docs/data/DATA_PIPELINE.md)) |
+| 4 | `data_loading/build_coconut.py` (`make build-coconut`) | raw SDF or zip → recorded chunks; applies the same two filters itself, so steps 1-2 are only needed to reproduce the intermediate SDFs (see [DATA_PIPELINE.md](../../Docs/data/DATA_PIPELINE.md#coconut-build)) |
 
 Helpers: `count_atoms_sdf.py` (element statistics), `mean_atoms_per_molecule.py`,
 `find_problematic_chunks.py` (finds SDF entries whose conversion fails per chunk),
@@ -22,7 +22,7 @@ The raw SDF has 5,656,564 molecule records and 329,335,057 atoms (measured with 
 `coconut_sdf_3d-09-2025.zip` is the release downloaded by `data/download_coconut.py`; the
 adapter expects the extracted file as `<data_path>/COCONUT/coconut.sdf` (rename it by hand).
 
-## Provenance limitation
+## Provenance limitation (chunks built before `build_coconut.py`)
 
 The production chunk set (`<DATA_ROOT>/metabolites/processed_chunk_*`) holds 2,755,135 graphs
 (about 5,549 per chunk, roughly 500 chunks of a ~2.8 M-molecule SDF). Neither
