@@ -2,6 +2,7 @@
 
     python -m downstream.embed --task ec --model current_best --device cuda:0
     python -m downstream.embed --task lba --model current_best --device cuda:0 [--representation joint]
+    python -m downstream.embed --task npass_ptp1b --model current_best --device cuda:0 --split-tag seed0
     python -m downstream.embed --task ec --model current_best --random-init --device cuda:0
     python -m downstream.embed --task ec --model esm2_t12_35M_UR50D --hf-cache-dir DIR --device cuda:0
     python -m downstream.embed --task ec --model saprot_650m_pdb --hf-cache-dir DIR --device cuda:0
@@ -12,7 +13,8 @@ the cache must describe the same processed split (sha256 and chain list).
 
 Writes ``outputs/downstream/<task>/<model_id>/embeddings/<split>.npz`` (chains,
 labels, one ``emb_<pooling>`` array per pooling) plus a ``.json`` provenance
-record; existing files are never overwritten.
+record; existing files are never overwritten. A task with one split per seed (NPASS) needs ``--split-tag seed<k>``
+and writes ``<tag>.<split>.npz``; LBA writes ``<split tag>.<representation>.<split>.npz``.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import torch
 from core.deterministic import enable_deterministic_algorithms
 from downstream.baselines import esm2, foldseek_3di, saprot
 from downstream.common import encoder as mind_encoder
+from downstream.common import split_replicates
 from downstream.common.registry import (
     RANDOM_INIT_SUFFIX, embeddings_path, git_commit, resolve_model, sha256_file,
 )
@@ -104,7 +107,8 @@ def main(argv=None) -> int:
     parser.add_argument("--hf-local-files-only", action="store_true")
     parser.add_argument("--esm-batch-size", type=int, default=8)
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
-    parser.add_argument("--split-tag", default=None, help="LBA only: identity30 (default) | identity60")
+    parser.add_argument("--split-tag", default=None,
+                        help="LBA: identity30 (default) | identity60; NPASS: seed<k> (required)")
     parser.add_argument("--representation", default=None, help="LBA only: joint (default) | separate")
     args = parser.parse_args(argv)
     if args.threads < 1:
@@ -114,15 +118,24 @@ def main(argv=None) -> int:
     task = load_task(args.task)
     if args.model in saprot.SAPROT_MODELS and args.task != "ec":
         parser.error("SaProt needs a Foldseek 3Di cache, which exists for the ec task only")
-    if args.task != "lba" and (args.split_tag or args.representation):
-        parser.error("--split-tag and --representation apply to the lba task only")
     config = task.load_task_config(task.TASK_YAML, data_root=args.data_root)
     per_residue = bool(getattr(task, "PER_RESIDUE", False))
     if per_residue and (args.model in saprot.SAPROT_MODELS or args.model in esm2.ESM2_MODELS):
         parser.error("per-residue tasks (ss_q3, ss_q8) embed MIND snapshots only")
+    replicated = split_replicates.is_replicated(config)
+    if args.representation and args.task != "lba":
+        parser.error("--representation applies to the lba task only")
+    if args.split_tag and args.task != "lba" and not replicated:
+        parser.error("--split-tag applies to the lba task and to tasks with one split per seed only")
     ProcessedSplit = task.ProcessedSplit
     split_kwargs, embedding_prefix = {}, ""
-    if args.task == "lba":
+    if replicated:
+        split_tag, representation = args.split_tag, None
+        if split_tag not in config["split_tags"]:
+            parser.error(f"--split-tag must be one of {config['split_tags']} (the split of run seed k is seed<k>)")
+        embedding_prefix = f"{split_tag}."
+        processed_dir = lambda cfg: task.processed_dir(cfg, split_tag)  # noqa: E731
+    elif args.task == "lba":
         split_tag = args.split_tag or config["primary_split_tag"]
         representation = args.representation or config["representation"]
         if representation not in config["representations"]:

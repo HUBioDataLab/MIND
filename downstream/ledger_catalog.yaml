@@ -5,7 +5,8 @@
 # metrics:  name -> direction (higher | lower) and unit. `unit: task` takes the task's `target_unit`.
 # tasks:    kind (metrics.json `kind`), required protocols (protocol ids as in the results path, e.g.
 #           mlp_probe or mlp_probe.identity30.joint), summary protocol (the summary page), primary cell,
-#           required cells (eval_split, subset, metric, source) and optional derived averages.
+#           required cells (eval_split, subset, metric, source), optional derived averages and optional
+#           `split_replicates: true` (one split per run seed, tag seed<k>; see npass below).
 schema_version: 1
 
 metrics:
@@ -217,10 +218,13 @@ tasks:
       - {eval_split: test, subset: all, metric: rmse, source: "MoleculeNet T3"}
   mn_qm8: *mn_reg_mae
   # NPASS (NaFM Table 2): RMSE is the paper's metric; MAE is an extra. The unit of activity_value is not documented.
+  # split_replicates: the random split is redrawn per run seed (tag seed<k> = the split of seed k); the seeds of one
+  # cell are the runs of the different tags, so reports group the tags into one setting.
   npass_ptp1b: &npass
     family: molecule_property
     kind: multitarget_regression
     target_unit: native
+    split_replicates: true
     required_protocols: [mlp_probe]
     summary_protocol: mlp_probe
     primary: {eval_split: test, subset: all, metric: rmse}

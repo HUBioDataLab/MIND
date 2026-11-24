@@ -217,14 +217,18 @@ def test_embedding_of_another_processed_revision_is_an_error_never_already_compl
 
 
 def test_real_task_configs_describe_every_unit_of_all():
-    units, explicit = run_all.expand_tasks("all", ledger.load_catalog())
-    assert not explicit and len(units) == 32  # ec, 3 GO, fold, 2 LBA split tags, rsr, ss_q3, ss_q8, 14 MoleculeNet, 8 NPASS
+    units, explicit = run_all.expand_tasks("all", ledger.load_catalog(), [0, 1, 2])
+    # ec, 3 GO, fold, 2 LBA split tags, rsr, ss_q3, ss_q8, 14 MoleculeNet, 8 NPASS tasks x 3 seed splits
+    assert not explicit and len(units) == 10 + 14 + 8 * 3
     assert [u.key for u in units if u.task == "lba"] == ["lba.identity30.joint", "lba.identity60.joint"]
     for unit in units:
         info = run_all.describe_task(unit)
         assert info["modality"] in run_all.MODALITY_DOMAINS and info["splits"] and info["finetune_pooling"]
         assert info["finetune_seconds"] > 0 and resolve_settings(info["finetune"], random_init=True)
         assert set(info["processed"]) == set(info["splits"])
+        assert info["replicated"] == unit.task.startswith("npass_")
+    npass = [u for u in units if u.task == "npass_cox1"]
+    assert [run_all.describe_task(u)["processed"]["test"].parent.parent.name for u in npass] == ["seed0", "seed1", "seed2"]
     with pytest.raises(run_all.PlanError, match="unknown task"):
         run_all.expand_tasks("ec,nope", ledger.load_catalog())
 

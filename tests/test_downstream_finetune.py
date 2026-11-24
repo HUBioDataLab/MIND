@@ -366,6 +366,54 @@ def test_molnet_kinds_fine_tune_on_processed_data(tmp_path, outputs, encoder_cal
 
 
 # ---------------------------------------------------------------------------------------------------------
+# NPASS: one processed split per seed, trained and scored per seed on its own tag
+# ---------------------------------------------------------------------------------------------------------
+
+def test_npass_fine_tunes_every_seed_on_the_split_of_its_own_tag(tmp_path, outputs, encoder_calls):
+    from downstream.tasks.npass import common as npass
+    from test_downstream_npass import fixture_rows, tiny_config, write_csv
+
+    config = tiny_config(tmp_path)
+    write_csv(npass.csv_path(config), fixture_rows())
+    assert npass.build_processed(config, splits=list(config["splits"]), config_path=npass.TASK_YAML) == 0
+    args = finetune_args("npass_ptp1b", outputs, data_root=config["data_root"], seeds=(0, 1, 2), epochs=1)
+    outs = finetune.run(args)
+    assert [o.name for o in outs] == ["seed0", "seed1", "seed2"] and {o.parent.name for o in outs} == {"finetune.mean_atoms"}
+    assert [c["init_seed"] for c in encoder_calls] == [0, 1, 2]
+    tests = []
+    for seed, out in enumerate(outs):
+        tag = f"seed{seed}"
+        metrics = json.loads((out / "metrics.json").read_text())
+        assert metrics["split_tag"] == tag and metrics["protocol"] == "finetune" and metrics["seed"] == seed
+        saved = json.loads((out / "config.json").read_text())
+        assert {Path(entry["path"]).parent.parent.name for entry in saved["processed"].values()} == {tag}
+        expected = npass.NpassProcessedSplit(npass.processed_dir(config, tag) / "test.pt").chains
+        with np.load(out / "predictions.npz") as data:
+            assert data["test_chains"].tolist() == expected
+        tests.append(expected)
+        rows, _ = ledger.flatten_run(out / "metrics.json", ledger.load_catalog(), outputs)
+        assert {r["split_tag"] for r in rows} == {tag} and {r["expected_seeds"][-1] for r in rows} == {2}
+    assert len({tuple(t) for t in tests}) == 3                        # three seeds, three different test sets
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        finetune.run(finetune_args("npass_ptp1b", outputs, data_root=config["data_root"], seeds=(1,), epochs=1))
+
+
+def test_npass_fine_tuning_refuses_a_seed_without_a_split_and_another_seeds_tag(tmp_path, outputs, encoder_calls, capsys):
+    from downstream.tasks.npass import common as npass
+    from test_downstream_npass import fixture_rows, tiny_config, write_csv
+
+    config = tiny_config(tmp_path)
+    write_csv(npass.csv_path(config), fixture_rows())
+    assert npass.build_processed(config, splits=list(config["splits"]), config_path=npass.TASK_YAML) == 0
+    with pytest.raises(ValueError, match="seed 3 has no split"):
+        finetune.run(finetune_args("npass_ptp1b", outputs, data_root=config["data_root"], seeds=(3,)))
+    with pytest.raises(ValueError, match="share the seed"):
+        finetune.run(finetune_args("npass_ptp1b", outputs, data_root=config["data_root"], seeds=(1,),
+                                   split_tag="seed0"))
+    assert encoder_calls == []                                         # refused before any model was built
+
+
+# ---------------------------------------------------------------------------------------------------------
 # Settings and CLI
 # ---------------------------------------------------------------------------------------------------------
 

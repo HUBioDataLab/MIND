@@ -36,6 +36,8 @@ from typing import Iterable, Optional
 
 import yaml
 
+from downstream.common import split_replicates
+
 SCHEMA_VERSION = 1
 ENV_VAR = "MIND_RESULTS_ROOT"
 CATALOG_PATH = Path(__file__).with_name("ledger_catalog.yaml")
@@ -126,6 +128,11 @@ def load_catalog(path: Path = CATALOG_PATH) -> dict:
         for key in ("family", "kind", "required_protocols", "required"):
             if key not in spec:
                 raise ValueError(f"{path}: task {task!r} lacks {key!r}")
+        if not isinstance(spec.get("split_replicates", False), bool):
+            raise ValueError(f"{path}: task {task!r}: split_replicates must be true or false")
+        if spec.get("split_replicates") and any("." in protocol for protocol in spec["required_protocols"]):
+            raise ValueError(f"{path}: task {task!r} has per-seed splits; its protocols carry no split tag "
+                             "(the tag follows from the seed)")
         cells = list(spec["required"]) + ([spec["primary"]] if spec.get("primary") else [])
         for cell in cells:
             if cell["metric"] not in metrics:
@@ -572,6 +579,19 @@ def flatten_run(metrics_path: Path, catalog: dict, outputs_root: Optional[Path])
         raise ValueError(f"{where}: splits come from different processed directories {sorted(revisions)}")
     split_tag = metrics.get("split_tag") or (qualifiers[0] if qualifiers else None)
     representation = metrics.get("representation") or (qualifiers[1] if len(qualifiers) > 1 else None)
+    if spec.get("split_replicates"):
+        # One split per run seed: the tag is a function of the seed, the protocol carries no tag, and the repeats of a
+        # cell are the runs of the different tags, so the expected seeds are those of the protocol settings.
+        wanted = split_replicates.tag_for_seed(int(metrics["seed"]))
+        if split_tag != wanted or qualifiers or representation is not None:
+            raise ValueError(f"{where}: task {task!r} draws one split per seed; seed {metrics['seed']} must carry "
+                             f"split_tag {wanted!r} and a protocol without qualifiers, got split_tag {split_tag!r}, "
+                             f"protocol {metrics['protocol']!r}")
+        settings_seeds = (prov["settings"] or {}).get("seeds")
+        if not settings_seeds or int(metrics["seed"]) not in settings_seeds:
+            raise ValueError(f"{where}: the protocol settings list seeds {settings_seeds!r}, which must contain seed "
+                             f"{metrics['seed']} of this per-seed-split task")
+        prov = {**prov, "expected_seeds": list(settings_seeds)}
     base = {
         "schema_version": SCHEMA_VERSION, "model_key": metrics["model_id"], "model_kind": prov["model_kind"],
         "model_sha256": prov["model_sha256"], "hf_revision": prov["hf_revision"], "hf_model": prov["hf_model"],

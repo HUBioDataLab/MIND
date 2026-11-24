@@ -83,10 +83,11 @@ MOLNET_NOTE = (
     "Subset rows (flat conformers, rare elements, ...) are reported in addition to, never instead of, the full test set."
 )
 NPASS_NOTE = (
-    "NPASS (NaFM benchmark; random 80/10/10 split of the NaFM reference code, seed 0, one split for every training "
-    "seed; RDKit ETKDGv3 + MMFF94 conformer, H dropped). The reference paper's Table 2 reports RMSE mean +- std over "
-    "three runs of fine-tuned models whose split is most likely redrawn per seed and whose activity unit is not "
-    "documented; its numbers are not entered here and are not strictly comparable. Errors in the units of the "
+    "NPASS (NaFM benchmark; random 80/10/10 split of the NaFM reference code, redrawn for every seed, and the model "
+    "initialization uses the same seed, so the spread over seeds includes the split-to-split variance; RDKit "
+    "ETKDGv3 + MMFF94 conformer, H dropped). The reference paper's Table 2 reports RMSE mean +- std over three runs "
+    "of fine-tuned models, with an unstated seed list and an activity unit that is not documented; its numbers are "
+    "not entered here and are not strictly comparable. Errors in the units of the "
     "activity_value column, which the data release does not define. Subset rows (embedding-failed molecules with flat "
     "2-D coordinates, rare elements, ...) are reported in addition to, never instead of, the full test set."
 )

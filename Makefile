@@ -331,7 +331,7 @@ eval-counterfactual:
 #   make ds-download TASK=npass_ptp1b   (0.46 MiB CSV of the NaFM Figshare release, shared by the 8 NPASS tasks; size,
 #                                        md5 and sha256 pinned in npass/task.yaml; a file already in place is checked)
 #   make ds-process TASK=npass_ptp1b    (NPASS npass_ptp1b|ache|cox2|hivrt|tyrosinase|cyp3a4|mrp4|cox1, or TASK=npass for all 8;
-#   make ds-validate TASK=npass          RDKit conformers on the CPU; validate checks without writing)
+#   make ds-validate TASK=npass          RDKit conformers on the CPU, one split per seed 0 1 2; validate checks without writing)
 #   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D|saprot_650m_pdb> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
 #   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1] [SEEDS="0 1 2"] [OUTPUTS_ROOT=<dir>]
@@ -339,6 +339,8 @@ eval-counterfactual:
 #   make ds-report TASK=ec
 # LBA adds SPLIT_TAG=identity30|identity60 and REPRESENTATION=joint|separate to
 # ds-embed and ds-probe (ds-finetune takes SPLIT_TAG only; it is joint-only).
+# NPASS has one split per seed (SPLIT_TAG=seed<k> is the split of run seed k): ds-embed needs SPLIT_TAG; ds-probe and
+# ds-finetune derive it from SEEDS; ds-run and ds-ecfp run every tag of SEEDS.
 # Results ledger (append-only JSONL + generated reports under MIND_RESULTS_ROOT, outside Git; CPU only;
 # reads outputs, never writes them; ds-report is separate and unchanged):
 #   make ds-ledger-add OUTPUTS_ROOT=<outputs root> [EVAL_DIRS="<eval dir> ..."]   (re-running adds nothing new)
@@ -632,7 +634,8 @@ help:
 	@echo "    MoleculeNet: make ds-download TASK=mn_bbbp (one archive for all mn_* tasks)"
 	@echo "         make ds-process TASK=mn_<bbbp|bace|clintox|tox21|toxcast|sider|hiv|pcba|muv|esol|freesolv|lipo|qm7|qm8>"
 	@echo "    NPASS: make ds-download TASK=npass_ptp1b (one CSV for all npass_* tasks)"
-	@echo "         make ds-process TASK=npass_<ptp1b|ache|cox2|hivrt|tyrosinase|cyp3a4|mrp4|cox1> (or TASK=npass for all 8)"
+	@echo "         make ds-process TASK=npass_<ptp1b|ache|cox2|hivrt|tyrosinase|cyp3a4|mrp4|cox1> (or TASK=npass for all 8; one split per seed)"
+	@echo "         make ds-embed TASK=npass_ptp1b MODEL=<snapshot> GPU=<id> SPLIT_TAG=seed0   (per-seed split; probe and finetune use SEEDS)"
 	@echo "    make ds-embed TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]   (GPU)"
 	@echo "    make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp"
 	@echo "    make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]   (one GPU, long; every task)"

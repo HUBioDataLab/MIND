@@ -7,7 +7,8 @@
 Reports go to ``$MIND_RESULTS_ROOT/reports/``. A column only ever holds one comparable setting: rows are
 grouped by (task, protocol family, protocol id, pooling, data revision, split tag, representation,
 protocol-settings hash, per-run data fingerprint over the evaluated processed files); a different value of
-any of these starts a new "Setting" section. Superseded / invalid / smoke rows leave the task tables and stay in
+any of these starts a new "Setting" section (a task with one split per seed, catalog ``split_replicates``, groups the runs
+of its split tags ``seed<k>`` into one setting: they are the repeats of a cell). Superseded / invalid / smoke rows leave the task tables and stay in
 the timeline. No cell is left empty: a missing cell names its category (MISSING:..., UNDEFINED:..., NO-CODE,
 OLD-REVISION-ONLY). Literature numbers (``<root>/literature/literature.csv``) are shown in a
 separate column in their own unit and protocol; they are never mixed into model columns.
@@ -73,6 +74,32 @@ def load_literature(root: Path, catalog: dict) -> Optional[list]:
     return rows
 
 
+REPLICATE_SPLIT_TAG = "per-seed splits"
+
+
+def _group_split_replicates(rows: list, catalog: dict) -> None:
+    """Make the runs of a task with one split per seed one setting.
+
+    The runs of the tags ``seed0``, ``seed1`` ... are the repeats of one cell, so their split tag and data fingerprint
+    (both differ by construction) are replaced by constants in the report state (``run_split_tag`` keeps the real
+    tag). What the fingerprint would guard stays guarded: all valid rows of one task, data revision, split tag and
+    evaluated split must come from one processed file, otherwise this raises.
+    """
+    replicated = {task for task, spec in catalog["tasks"].items() if spec.get("split_replicates")}
+    files = {}
+    for row in rows:
+        if row["task"] not in replicated:
+            continue
+        if row["status"] == "valid" and row["eval_processed_sha256"] is not None:
+            key = (row["task"], row["data_revision"], row["split_tag"], row["eval_split"])
+            if files.setdefault(key, row["eval_processed_sha256"]) != row["eval_processed_sha256"]:
+                raise ValueError(f"{key}: valid rows were evaluated on two different processed files; mark the "
+                                 "superseded rows with `ledger annotate` or use another processed revision")
+        row["run_split_tag"] = row["split_tag"]
+        row["split_tag"] = REPLICATE_SPLIT_TAG
+        row["data_fingerprint"] = ledger.sha256_json([REPLICATE_SPLIT_TAG, row["task"], row["data_revision"]])
+
+
 def load_state(root: Optional[Path] = None, *, catalog: Optional[dict] = None) -> dict:
     """Verified ledger with annotations applied, plus the header every report prints."""
     root = ledger.results_root(root)
@@ -96,6 +123,7 @@ def load_state(root: Optional[Path] = None, *, catalog: Optional[dict] = None) -
     for row in rows:
         row["data_fingerprint"] = ledger.sha256_json(
             sorted(fingerprints[row["source_metrics_path"], row["source_metrics_sha256"]], key=str))
+    _group_split_replicates(rows, catalog)
     header = {"generated_utc": ledger.now_utc(), "n_rows": len(rows), "measurements_sha256": summary["measurements_sha256"],
               "catalog_sha256": catalog["sha256"], "code_git": ledger._code_git(),
               "n_annotations": len(records["annotations"])}
@@ -325,11 +353,18 @@ def summary_tasks(catalog: dict) -> list:
     return [task for task, spec in catalog["tasks"].items() if spec["family"] not in NON_SUMMARY_FAMILIES]
 
 
-def _hint(task: str, model: str, protocol: str, category: str, baseline_command: Optional[str] = None) -> str:
+def _hint(task: str, model: str, protocol: str, category: str, baseline_command: Optional[str] = None,
+          replicated: bool = False) -> str:
     head, *qualifiers = protocol.split(".")
     lba = f" SPLIT_TAG={qualifiers[0]} REPRESENTATION={qualifiers[1]}" if len(qualifiers) == 2 else ""
     probe = (f"make ds-probe TASK={task} MODEL_ID={model} HEAD={ledger.PROBE_HEADS.get(head, head)}{lba}"
              if head in ledger.PROBE_HEADS else f"make ds-finetune TASK={task} MODEL={model} GPU=<id>")
+    if replicated and not baseline_command and category.startswith(("MISSING:not-run", "MISSING:model-not-in-ledger",
+                                                                     "MISSING:embedding-only", "MISSING:seeds",
+                                                                     "OLD-REVISION-ONLY")):
+        # one embedding set per split tag: ds-run schedules a job per tag and skips what exists
+        return (f"make ds-run MODEL={model} TASKS={task} GPU=<ids> (one embed / probe job per seed-specific split; "
+                "finished seeds are skipped)")
     if category == "NO-CODE":
         return "no metric code: add it to downstream/common/metrics.py (separate task)"
     if baseline_command and category.startswith(("MISSING:not-run", "MISSING:model-not-in-ledger",
@@ -424,7 +459,8 @@ def missing_cells(state: dict, models: list, tasks: Optional[list] = None) -> li
                         out.append({"task": task, "model_key": model, "protocol_id": protocol,
                                     "eval_split": cell["eval_split"], "subset": cell["subset"], "metric": cell["metric"],
                                     "category": found["category"], "source": cell.get("source", ""),
-                                    "hint": _hint(task, model, protocol, found["category"], baseline_command)})
+                                    "hint": _hint(task, model, protocol, found["category"], baseline_command,
+                                                      bool(spec.get("split_replicates")))})
     return out
 
 

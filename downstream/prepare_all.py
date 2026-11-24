@@ -410,7 +410,7 @@ def verify_processed(directories: Sequence[Path], provenance: Path) -> List[str]
     for directory in directories:
         records = [r for r in runs if (r.get("kind") == "process" or r.get("step") == "process")
                    and r.get("exit_code") == 0 and r.get("outputs_sha256")
-                   and Path(str(r.get("processed_dir", ""))).name == directory.name]
+                   and Path(str(r.get("processed_dir", ""))).absolute() == directory.absolute()]
         if not records:
             lines.append(f"{directory}: split files present; no recorded checksums in {provenance.name}, existence only")
             continue

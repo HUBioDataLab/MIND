@@ -63,7 +63,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from downstream import ledger, ledger_report
-from downstream.common import registry
+from downstream.common import registry, split_replicates
 from downstream.finetune_settings import resolve_settings, same_settings
 from downstream.tasks import MOLNET_TASKS, NPASS_TASKS, TASKS, load_task
 
@@ -83,7 +83,11 @@ class PlanError(RuntimeError):
 
 @dataclass(frozen=True)
 class Unit:
-    """One embedding set: a task, plus LBA's split tag and representation."""
+    """One embedding set: a task, plus LBA's split tag and representation, or the split tag of a per-seed-split task.
+
+    A task with one split per seed (NPASS) has a unit per split tag and no representation: its protocols carry no tag
+    (the cells aggregate over the tags), and the unit's own seed is the one of its tag.
+    """
 
     task: str
     split_tag: Optional[str] = None
@@ -95,23 +99,27 @@ class Unit:
 
     @property
     def prefix(self) -> str:
-        return f"{self.split_tag}.{self.representation}." if self.split_tag else ""
+        return "".join(f"{part}." for part in (self.split_tag, self.representation) if part)
 
     def protocol(self, head: str) -> str:
         """Results protocol of a probe head or of ``finetune`` (fine-tuning of LBA is joint-only)."""
         base = FINETUNE if head == FINETUNE else f"{head}_probe"
-        return base + (f".{self.split_tag}.{self.representation}" if self.split_tag else "")
+        return base + (f".{self.split_tag}.{self.representation}" if self.representation else "")
 
     def cli(self) -> list:
-        return ["--split-tag", self.split_tag, "--representation", self.representation] if self.split_tag else []
+        return (["--split-tag", self.split_tag] if self.split_tag else []) + (
+            ["--representation", self.representation] if self.representation else [])
 
 
 # ---------------------------------------------------------------------------------------------------------
 # Plan
 # ---------------------------------------------------------------------------------------------------------
 
-def expand_tasks(text: str, catalog: dict) -> tuple[list, bool]:
-    """Units for ``all`` or a comma list, and whether the tasks were named explicitly."""
+def expand_tasks(text: str, catalog: dict, seeds: Optional[list] = None) -> tuple[list, bool]:
+    """Units for ``all`` or a comma list, and whether the tasks were named explicitly.
+
+    A task with one split per seed (catalog ``split_replicates``) gets one unit per tag of ``seeds``.
+    """
     explicit = text.strip() != "all"
     names = list(ALL_TASKS) if not explicit else [t.strip() for t in text.split(",") if t.strip()]
     unknown = [t for t in names if t not in TASKS]
@@ -123,6 +131,10 @@ def expand_tasks(text: str, catalog: dict) -> tuple[list, bool]:
             for protocol in catalog["tasks"]["lba"]["required_protocols"]:
                 _, split_tag, representation = protocol.split(".")
                 units.append(Unit("lba", split_tag, representation))
+        elif catalog["tasks"].get(name, {}).get("split_replicates"):
+            if not seeds:
+                raise PlanError(f"{name} has one split per seed; give the seeds whose splits to run (--seeds)")
+            units += [Unit(name, split_replicates.tag_for_seed(seed)) for seed in dict.fromkeys(seeds)]
         else:
             units.append(Unit(name))
     return units, explicit
@@ -132,11 +144,16 @@ def describe_task(unit: Unit) -> dict:
     """Modality, split names, probe and fine-tune pooling and processed split files of one unit (reads task.yaml)."""
     task = load_task(unit.task)
     config = task.load_task_config(task.TASK_YAML)
-    directory = task.processed_dir(config, unit.split_tag) if unit.task == "lba" else task.processed_dir(config)
+    replicated = split_replicates.is_replicated(config)
+    if replicated and unit.split_tag not in config["split_tags"]:
+        raise ValueError(f"split tag {unit.split_tag!r} has no split: {unit.task} draws splits for seeds "
+                         f"{config['split_seeds']} (task.yaml split.seeds)")
+    directory = task.processed_dir(config, unit.split_tag) if unit.split_tag else task.processed_dir(config)
     splits = list(config["splits"])
     cost = config["finetune_seconds_per_epoch"]
     cost = cost[unit.task] if isinstance(cost, dict) else cost
-    return {"modality": config["modality"], "splits": splits, "pooling": config["probe"]["pooling"],
+    return {"modality": config["modality"], "splits": splits, "replicated": replicated,
+            "pooling": config["probe"]["pooling"],
             "finetune_pooling": config["finetune"]["pooling"], "finetune": config["finetune"],
             "finetune_seconds": float(cost) * int(config["finetune"]["epochs"]),
             "processed": {split: Path(directory) / f"{split}.pt" for split in splits}}
@@ -241,6 +258,11 @@ def _known_timings(unit: Unit, splits: list, outputs_root: Path, model_id: str) 
     return found[:2]
 
 
+def unit_seeds(unit: Unit, info: dict, seeds: list) -> list:
+    """Seeds a unit trains: all of them, or (one split per seed) the seed whose split is the unit's tag."""
+    return split_replicates.seeds_of_tag(unit.split_tag, seeds) if info.get("replicated") else list(seeds)
+
+
 def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, seeds: list, outputs_root: Path,
                describe: Callable[[Unit], dict] = None) -> dict:
     """What runs, what is skipped and what already cannot run, per unit and head (``finetune`` included)."""
@@ -269,8 +291,9 @@ def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, se
         if info["modality"] == "complex" and not {"unimol", "metabolite"} & set(model.domains):
             plan["notes"].append(f"{unit.key}: ligand atoms, but {model.name} saw no small-molecule domain")
         plan["units"].append(unit)
+        seeds_here = unit_seeds(unit, info, seeds)
         if FINETUNE in heads:
-            _plan_finetune(plan, unit, info, model, seeds=seeds, outputs_root=outputs_root)
+            _plan_finetune(plan, unit, info, model, seeds=seeds_here, outputs_root=outputs_root)
         if not probe_heads:
             continue
         missing, broken, stale = [], [], []
@@ -302,10 +325,10 @@ def plan_units(units: list, explicit: bool, model: ModelPlan, *, heads: list, se
         else:
             plan["embed_done"].append(unit)
         for head in probe_heads:
-            done = [s for s in seeds if (registry.results_dir(unit.task, model.model_id, unit.protocol(head), s,
-                                                              pooling=info["pooling"], root=outputs_root)
-                                         / "metrics.json").is_file()]
-            todo = [s for s in seeds if s not in done]
+            done = [s for s in seeds_here if (registry.results_dir(unit.task, model.model_id, unit.protocol(head), s,
+                                                                   pooling=info["pooling"], root=outputs_root)
+                                              / "metrics.json").is_file()]
+            todo = [s for s in seeds_here if s not in done]
             if todo:
                 plan["probe"].append((unit, head, todo))
             else:
@@ -585,19 +608,22 @@ def summary(results_root: Path, model: ModelPlan, plan: dict, heads: list, failu
              "seeds.", "", f"Primary metric only; all catalog metrics of a task are in "
              f"{results_root / 'reports' / 'tasks'}/<task>.md (written by the ledger report at the end of the run).", "",
              "| task | protocol | primary metric | value |", "|---|---|---|---|"]
+    shown = {}  # (task, protocol) -> its units: the tags of a per-seed-split task share one row
     for unit in plan["units"]:
-        spec = catalog["tasks"][unit.task]
-        primary = spec["primary"]
         for head in heads:
-            protocol = unit.protocol(head)
-            found = ledger_report.lookup(state, unit.task, model.model_id, protocol, primary)
-            text = found["text"]
-            kinds = (FINETUNE,) if head == FINETUNE else ("embed", f"probe_{head}")
-            problems = [text for kind, text in failed_units.get(unit.key, []) if kind in kinds]
-            if problems and not found["filled"]:
-                text = "ERROR: " + " | ".join(problems)
-            lines.append(f"| {unit.key} | {protocol} | {primary['metric']} ({primary['eval_split']}/{primary['subset']}) "
-                         f"| {text} |")
+            shown.setdefault((unit.task, unit.protocol(head), head), []).append(unit)
+    for (task, protocol, head), group in shown.items():
+        spec = catalog["tasks"][task]
+        primary = spec["primary"]
+        found = ledger_report.lookup(state, task, model.model_id, protocol, primary)
+        text = found["text"]
+        kinds = (FINETUNE,) if head == FINETUNE else ("embed", f"probe_{head}")
+        problems = [text for unit in group for kind, text in failed_units.get(unit.key, []) if kind in kinds]
+        if problems and not found["filled"]:
+            text = "ERROR: " + " | ".join(problems)
+        label = group[0].key if len(group) == 1 else task
+        lines.append(f"| {label} | {protocol} | {primary['metric']} ({primary['eval_split']}/{primary['subset']}) "
+                     f"| {text} |")
     for unit, reason in plan["domain_skips"]:
         lines.append(f"| {unit.key} | - | - | SKIPPED: {reason} |")
     tasks = sorted({unit.task for unit in plan["units"]})
@@ -733,7 +759,7 @@ def main(argv=None, *, commands: Optional[dict] = None, describe: Optional[Calla
         outputs_root = registry.outputs_root(args.outputs_root).resolve()
         results_root = ledger.results_root(args.results_root)
         catalog = ledger.load_catalog()
-        units, explicit = expand_tasks(args.tasks, catalog)
+        units, explicit = expand_tasks(args.tasks, catalog, args.seeds)
         model = resolve_model(args.model, args.name, random_init=args.random_init, outputs_root=outputs_root,
                               results_root=results_root)
         others = resolve_compare_to(args.compare_to, model, outputs_root=outputs_root, results_root=results_root)

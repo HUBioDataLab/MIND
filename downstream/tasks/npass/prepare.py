@@ -1,19 +1,22 @@
 """Download and process the NPASS tasks (NaFM data release; data-processing CLI, run only on explicit request).
 
     python -m downstream.tasks.npass.prepare download --task npass_ptp1b [--data-root DIR]
-    python -m downstream.tasks.npass.prepare process  --task npass_ptp1b|npass [--data-root DIR] [--splits train valid test]
-    python -m downstream.tasks.npass.prepare validate --task npass_ptp1b|npass [--data-root DIR] [--splits ...]
+    python -m downstream.tasks.npass.prepare process  --task npass_ptp1b|npass [--data-root DIR] [--tags seed0 ...]
+                                                      [--splits train valid test]
+    python -m downstream.tasks.npass.prepare validate --task npass_ptp1b|npass [--data-root DIR] [--tags ...] [--splits ...]
 
 ``download`` fetches ``regression_data.csv`` of the NaFM Figshare release (url, size, md5 and sha256 pinned under
 ``source_file`` in task.yaml) into the SHARED ``<source_root>/raw`` (one copy for all eight tasks; a file already there
 is checked and never fetched again), refuses any size or checksum difference and appends a ``download`` record to
 ``<source_root>/provenance.json``. ``--task`` only selects the config; the download is the same for every task.
 
-``process`` reads that CSV (read-only), builds the conformers (RDKit, CPU), splits and writes
-``<data_root>/processed/<revision>/{split}.pt`` plus ``qc_<split>.json/.tsv`` and a ``process`` record in
+``process`` reads that CSV (read-only), builds the conformers once (RDKit, CPU), draws the split of every seed of
+``split.seeds`` (tag ``seed<k>``, ``--tags`` selects some) and writes
+``<data_root>/processed/<tag>/<revision>/{split}.pt`` plus ``qc_<split>.json/.tsv`` and one ``process`` record per tag in
 ``<data_root>/provenance.json``. ``--task npass`` processes the eight tasks one after the other. It never overwrites
-an existing split file and raises on any corrupt row or count mismatch; molecules whose embedding fails are kept
-(flat 2-D coordinates), flagged and counted in the QC files.
+an existing split file (the call raises before writing anything) and raises on any corrupt row, count mismatch or
+split whose size differs from the rule's; molecules whose embedding fails are kept (flat 2-D coordinates), flagged and
+counted in the QC files.
 
 ``validate`` runs the same reading, conformer generation and checks and prints the QC summaries without writing.
 """
@@ -78,6 +81,7 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--task", required=True, choices=sorted(common.DATASET_OF_TASK) + [ALL])
     parser.add_argument("--config", type=Path, default=common.TASK_YAML)
     parser.add_argument("--data-root", type=Path, default=None)
+    parser.add_argument("--tags", nargs="+", default=None, help="split tags to process (default: every tag of the task)")
     parser.add_argument("--splits", nargs="+", default=None)
     args = parser.parse_args(argv)
     if args.task == ALL and (args.data_root is not None or args.command == "download"):
@@ -100,8 +104,13 @@ def main(argv: Optional[list] = None) -> int:
         unknown = [s for s in splits if s not in config["splits"]]
         if unknown:
             parser.error(f"unknown splits {unknown}; choose from {config['splits']}")
+        tags = args.tags or config["split_tags"]
+        unknown = [tag for tag in tags if tag not in config["split_tags"]]
+        if unknown:
+            parser.error(f"unknown split tags {unknown}; choose from {config['split_tags']}")
         print(f"== {task}", flush=True)
-        common.build_processed(config, splits=splits, config_path=args.config, dry_run=args.command == "validate")
+        common.build_processed(config, splits=splits, tags=tags, config_path=args.config,
+                               dry_run=args.command == "validate")
     return 0
 
 

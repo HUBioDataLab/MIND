@@ -2,6 +2,7 @@
 
     python -m downstream.finetune --task <task> --model <snapshot> --device cuda:0 [--random-init] [--seeds 0 1 2]
     python -m downstream.finetune --task lba --model <snapshot> --device cuda:0 [--split-tag identity30]
+    python -m downstream.finetune --task npass_ptp1b --model <snapshot> --device cuda:0 --seeds 0 1 2
 
 Every task kind is fine-tuned with the probe's loss, validation score and evaluation code
 (``downstream.probe.build_loss`` / ``validation_score`` / ``evaluate_task``), so a fine-tune result and a probe result
@@ -38,7 +39,9 @@ budget packs hundreds of small molecules into one optimizer step). Training samp
 every epoch (seed, epoch), as in pretraining; validation/test use the fixed embedding seed and run with deterministic
 CUDA algorithms, as ``downstream.embed`` does; training does not (``core.deterministic``: atomic adds in the backward
 pass). Windows of a cropped chain are separate training examples carrying the chain labels; at evaluation their pooled
-embeddings are residue-weighted per chain before the head. LBA fine-tuning supports the ``joint`` representation only.
+embeddings are residue-weighted per chain before the head. LBA fine-tuning supports the ``joint`` representation only. A task with one split per seed (NPASS)
+trains seed ``k`` on the split of tag ``seed<k>`` (and initializes with seed ``k``); ``--split-tag`` is optional and must
+equal the tag of every seed.
 
 One process trains on one device (``--device``; CUDA only, flash_varlen attention has no CPU kernel). There is no
 multi-GPU (DDP) path. Results go to ``outputs/downstream/<task>/<model_id>/<protocol>.<pooling>/seed<k>/``
@@ -63,6 +66,7 @@ import torch
 from torch import nn
 
 from downstream.common import encoder as mind_encoder
+from downstream.common import split_replicates
 from downstream.common.heads import build_head
 from downstream.common.registry import (
     RANDOM_INIT_SUFFIX, git_commit, new_results_dir, resolve_model, results_dir, run_record, sha256_file,
@@ -370,7 +374,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--outputs-root", type=Path, default=None)
-    parser.add_argument("--split-tag", default=None, help="LBA only: identity30 (default) | identity60")
+    parser.add_argument("--split-tag", default=None,
+                        help="LBA: identity30 (default) | identity60; NPASS: optional, must equal seed<k> of every seed")
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
     parser.add_argument("--lr-encoder", type=float, default=None,
                         help="override the encoder LR of the arm (finetune.lr_encoder or lr_encoder_random_init)")
@@ -405,10 +410,12 @@ def check_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Non
         parser.error("--warmup-ratio must be in [0, 1)")
     if args.lr_schedule == "plateau" and args.warmup_ratio:
         parser.error("--warmup-ratio cannot be combined with --lr-schedule plateau")
-    if args.task != "lba" and args.split_tag:
-        parser.error("--split-tag applies to the lba task only")
     if args.seeds is not None and len(set(args.seeds)) != len(args.seeds):
         parser.error("--seeds lists a seed twice")
+    if args.split_tag and args.task != "lba":
+        task = load_task(args.task)
+        if not split_replicates.is_replicated(task.load_task_config(task.TASK_YAML, data_root=args.data_root)):
+            parser.error("--split-tag applies to the lba task and to tasks with one split per seed only")
 
 
 def run(args: argparse.Namespace) -> list:
@@ -427,17 +434,18 @@ def run(args: argparse.Namespace) -> list:
     train_split, val_split, test_splits = split_roles(config)
     resolved = resolve_model(args.model, root=args.outputs_root)
     model_id = resolved.model_id + (RANDOM_INIT_SUFFIX if args.random_init else "")
-    protocol, split_kwargs, split_tag, representation = "finetune", {}, None, None
+    protocol, split_kwargs, representation = "finetune", {}, None
+    seeds = list(args.seeds or settings["seeds"])
+    seed_tags = {seed: None for seed in seeds}  # split tag of each seed
     if args.task == "lba":
         if config["representation"] != "joint":
             raise ValueError("LBA fine-tuning supports representation=joint only")
         split_tag, representation = args.split_tag or config["primary_split_tag"], "joint"
         split_kwargs = {"representation": representation}
         protocol = f"finetune.{split_tag}.{representation}"
-        source_dir = task.processed_dir(config, split_tag)
-    else:
-        source_dir = task.processed_dir(config)
-    seeds = list(args.seeds or settings["seeds"])
+        seed_tags = {seed: split_tag for seed in seeds}
+    elif split_replicates.is_replicated(config):
+        seed_tags = {seed: split_replicates.tag_for_run(config, seed, explicit=args.split_tag) for seed in seeds}
     directories = {seed: results_dir(args.task, model_id, protocol, seed, pooling=pooling, root=args.outputs_root)
                    for seed in seeds}
     finished = [str(d) for d in directories.values() if (d / "metrics.json").exists()]
@@ -447,20 +455,29 @@ def run(args: argparse.Namespace) -> list:
         print("note: CLI overrides change the task.yaml settings; ds-run reports these seeds as trained with other "
               "settings. Use a separate --outputs-root for trial runs.", flush=True)
     names = (train_split, val_split, *test_splits)
-    splits = {name: task.ProcessedSplit(source_dir / f"{name}.pt", **split_kwargs) for name in names}
-    processed = {name: {"path": str(source_dir / f"{name}.pt"), "sha256": sha256_file(source_dir / f"{name}.pt")}
-                 for name in names}
-    train_labels = np.asarray(splits[train_split].labels)
-    subsets = (task.test_subsets(config, splits[test_splits[0]].chains)
-               if kind in ("multilabel", *MASKED_KINDS) else {})
-    scale = target_scale(train_labels) if kind in SCALED_KINDS else None
-    groups = ({name: task.group_labels(splits[name].chains) for name in (val_split, *test_splits)}
-              if kind == "ranking_regression" else {})
     metric = config.get("primary_metric")
-    out_dim = output_dim(kind, config.get("label_count"), train_labels)
     outputs = []
 
+    def load_split_bundle(tag):
+        """The processed splits of one split tag and everything derived from them (read before any training)."""
+        source_dir = task.processed_dir(config, tag) if tag else task.processed_dir(config)
+        splits = {name: task.ProcessedSplit(source_dir / f"{name}.pt", **split_kwargs) for name in names}
+        processed = {name: {"path": str(source_dir / f"{name}.pt"), "sha256": sha256_file(source_dir / f"{name}.pt")}
+                     for name in names}
+        train_labels = np.asarray(splits[train_split].labels)
+        subsets = (task.test_subsets(config, splits[test_splits[0]].chains, *([tag] if tag else []))
+                   if kind in ("multilabel", *MASKED_KINDS) else {})
+        scale = target_scale(train_labels) if kind in SCALED_KINDS else None
+        groups = ({name: task.group_labels(splits[name].chains) for name in (val_split, *test_splits)}
+                  if kind == "ranking_regression" else {})
+        return splits, processed, train_labels, subsets, scale, groups, output_dim(kind, config.get("label_count"),
+                                                                                     train_labels)
+
+    bundles = {tag: load_split_bundle(tag) for tag in dict.fromkeys(seed_tags.values())}
+
     for seed in seeds:
+        split_tag = seed_tags[seed]
+        splits, processed, train_labels, subsets, scale, groups, out_dim = bundles[split_tag]
         out = new_results_dir(args.task, model_id, protocol, seed, pooling=pooling, root=args.outputs_root)
         with open(out / "run.log", "w") as log_handle:
             def log(message, handle=log_handle):

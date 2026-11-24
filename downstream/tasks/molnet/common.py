@@ -613,12 +613,13 @@ class MolnetProcessedSplit:
         return np.asarray(sample_embeddings, dtype=np.float32)
 
 
-def test_subsets(config: dict, chains: Sequence[str]) -> Dict[str, np.ndarray]:
+def test_subsets(config: dict, chains: Sequence[str], *, directory: Path | None = None) -> Dict[str, np.ndarray]:
     """Row masks of the test molecules per QC flag (only flags with members) plus ``no_flags``.
 
-    Read from ``qc_test.tsv``. A molecule that is not listed raises: a silent False would drop it from every subset.
+    Read from ``qc_test.tsv`` of ``directory`` (default: the task's processed directory). A molecule that is not
+    listed raises: a silent False would drop it from every subset.
     """
-    path = processed_dir(config) / "qc_test.tsv"
+    path = (directory if directory is not None else processed_dir(config)) / "qc_test.tsv"
     with open(path, newline="") as handle:
         rows = {row["id"]: set(filter(None, row["flags"].split(","))) for row in csv.DictReader(handle, delimiter="\t")}
     unlisted = [c for c in chains if c not in rows]

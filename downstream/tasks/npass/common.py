@@ -2,22 +2,25 @@
 
 One task per target of the NaFM NPASS regression benchmark (``task.yaml`` documents the sources, the protocol of the
 reference code and every point that is not stated anywhere). Each task has its own ``data_root``
-(``<source_root>/<task>``) with ``processed/<revision>/{train,valid,test}.pt``, ``qc_<split>.{json,tsv}`` and a
-``provenance.json``; the raw CSV is a read-only input shared by all eight tasks.
+(``<source_root>/<task>``) with ``processed/<tag>/<revision>/{train,valid,test}.pt``, ``qc_<split>.{json,tsv}`` (one
+directory per split tag ``seed<k>``, see ``downstream.common.split_replicates``) and a ``provenance.json``; the raw
+CSV is a read-only input shared by all eight tasks.
 
 Rules (``task.yaml``):
 
 * rows of one ``target_id`` in CSV order, label ``activity_value`` unchanged; the row count must equal
   ``expected_molecules`` (the paper's count is kept next to it and a difference needs a ``count_note``);
-* split: the NaFM reference code's random 80/10/10 permutation of ``split.seed``; the sizes must sum to the molecule
-  count (the reference code would drop samples silently, here that raises);
+* split: the NaFM reference code's random 80/10/10 permutation, drawn once per seed of ``split.seeds`` (tag
+  ``seed<k>`` = the split of run seed ``k``); the sizes must sum to the molecule count (the reference code would drop
+  samples silently, here that raises) and every processed split must have exactly the size the rule gives;
 * graph input: RDKit ETKDGv3 conformer with explicit hydrogens and a fixed seed, MMFF94 optimization, hydrogens
   dropped (counted), no cropping. A molecule whose embedding fails keeps flat 2-D coordinates and is flagged and
   counted, never dropped; MMFF outcomes are counted;
 * a corrupt row (missing column, empty or duplicated id, unparsable SMILES, non-finite value) raises.
 
 The payload and the loader are those of the MoleculeNet family (``downstream.tasks.molnet.common``), so ``embed``,
-``probe``, ``finetune`` and the fingerprint baselines treat an NPASS task like a one-target MoleculeNet regression.
+``probe``, ``finetune`` and the fingerprint baselines treat an NPASS task like a one-target MoleculeNet regression,
+with the split tag of the run seed.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import yaml
 
 from data_loading.atom_position_vocab import RARE_ATOMIC_NUMBER
 from data_loading.cache_to_pyg import element_to_atomic_number
+from downstream.common import split_replicates
 from downstream.common.provenance import record_process_run
 from downstream.tasks.molnet import common as molnet
 from downstream.tasks.molnet.common import Molecule
@@ -98,6 +102,16 @@ def split_indices(count: int, fractions: Sequence[float], seed: int) -> Dict[str
     return {"train": order[:train], "valid": order[train:train + valid], "test": order[train + valid:]}
 
 
+def check_partition(indices: Dict[str, np.ndarray], count: int, expected: Dict[str, int], where: str) -> None:
+    """Raise unless the splits are disjoint, cover rows ``0..count-1`` and have the expected sizes."""
+    sizes = {name: int(len(rows)) for name, rows in indices.items()}
+    if sizes != {name: int(size) for name, size in expected.items()}:
+        raise ValueError(f"{where}: split sizes {sizes}, expected {dict(expected)}")
+    covered = np.concatenate([np.asarray(rows, dtype=np.int64) for rows in indices.values()])
+    if sorted(covered.tolist()) != list(range(count)):
+        raise ValueError(f"{where}: the splits are not a partition of the {count} rows (overlap or gap)")
+
+
 # ---------------------------------------------------------------------------
 # Config and paths
 # ---------------------------------------------------------------------------
@@ -134,6 +148,15 @@ def load_task_config(path: Path = TASK_YAML, *, data_root: Path | None = None, d
     fractions = [float(f) for f in config["split"]["fractions"]]
     if len(fractions) != 3 or any(f <= 0 for f in fractions) or abs(sum(fractions) - 1.0) > 1e-9:
         raise ValueError("split.fractions must be three positive numbers that sum to 1")
+    split_seeds = config["split"].get("seeds")
+    if (not isinstance(split_seeds, list) or not split_seeds or len(set(split_seeds)) != len(split_seeds)
+            or any(isinstance(s, bool) or not isinstance(s, int) or s < 0 for s in split_seeds)):
+        raise ValueError("split.seeds must be a non-empty list of distinct non-negative integers (one split per seed)")
+    for run in ("probe", "finetune"):
+        unsplit = sorted(set(config[run]["seeds"]) - set(split_seeds))
+        if unsplit:
+            raise ValueError(f"{run}.seeds {unsplit} have no split: the split and the model initialization share the "
+                             f"seed, so every {run} seed must be listed in split.seeds {split_seeds}")
     if entry["kind"] != KIND:
         raise ValueError(f"dataset {dataset}: kind must be {KIND!r}")
     if int(entry["num_targets"]) != 1:
@@ -165,7 +188,9 @@ def load_task_config(path: Path = TASK_YAML, *, data_root: Path | None = None, d
     config["coordinate_scale"] = 1.0
     config["plausible_median_nn_angstrom"] = (low, high)
     config["processed_revision"] = str(config["processed_revision"])
-    config["split"] = {**config["split"], "fractions": fractions}
+    config["split"] = {**config["split"], "fractions": fractions, "seeds": list(split_seeds)}
+    config["split_seeds"] = list(split_seeds)
+    config["split_tags"] = [split_replicates.tag_for_seed(s) for s in split_seeds]
     return config
 
 
@@ -173,8 +198,15 @@ def csv_path(config: dict) -> Path:
     return molnet.task_paths(config)["raw"] / config["source_file"]["name"]
 
 
-processed_dir = molnet.processed_dir
 task_paths = molnet.task_paths
+
+
+def processed_dir(config: dict, tag: str) -> Path:
+    """``<data_root>/processed/<tag>/<revision>``: the processed files of the split of run seed ``seed_for_tag(tag)``."""
+    if tag not in config["split_tags"]:
+        raise ValueError(f"unknown split tag {tag!r}; {config['task']} has the tags {config['split_tags']} "
+                         "(one per seed of split.seeds)")
+    return task_paths(config)["processed"] / tag / str(config["processed_revision"])
 
 
 # ---------------------------------------------------------------------------
@@ -310,36 +342,52 @@ def _conformer_summary(statuses: Sequence[Tuple[str, str]], ids: Sequence[str]) 
     }
 
 
-def process_task(config: dict) -> Dict[str, Tuple[dict, List[Molecule], dict]]:
-    """Read, split and convert one task into ``{split: (payload, molecules, summary)}``; nothing is written."""
+def process_task(config: dict, tags: Sequence[str] | None = None) -> Dict[str, Dict[str, Tuple[dict, List[Molecule], dict]]]:
+    """Read and convert one task into ``{tag: {split: (payload, molecules, summary)}}``; nothing is written.
+
+    Every molecule is converted once (the conformer does not depend on the split) and shared by the tags. For each tag
+    the rows are split with the reference permutation of that tag's seed; a split whose size differs from the one the
+    rule gives for the target's row count, or splits that are not a partition of the rows, raise.
+    """
+    tags = list(tags or config["split_tags"])
+    unknown = [tag for tag in tags if tag not in config["split_tags"]]
+    if unknown:
+        raise ValueError(f"unknown split tags {unknown}; {config['task']} has {config['split_tags']}")
     rows = read_target_rows(config)
-    indices = split_indices(len(rows), config["split"]["fractions"], config["split"]["seed"])
-    built = {int(i): build_molecule(rows[int(i)], config=config) for split in config["splits"] for i in indices[split]}
-    smiles_split = {}
-    for split in config["splits"]:
-        for i in indices[split]:
-            smiles_split.setdefault(rows[int(i)]["smiles"], set()).add(split)
+    built = {i: build_molecule(row, config=config) for i, row in enumerate(rows)}
     result = {}
-    for split in config["splits"]:
-        order = [int(i) for i in indices[split]]
-        molecules = [built[i][0] for i in order]
-        ids = [f"{config['dataset']}_{rows[i]['id']}" for i in order]
-        labels = np.stack([m.labels for m in molecules]).astype(np.float32)
-        summary = molnet._qc_summary(config, split, molecules, labels)
-        summary["conformer_policy"] = (f"ETKDGv3 seed {config['conformer']['seed']} + {config['conformer']['mmff_variant']} "
-                                       f"(1 conformer; 2-D fallback on embedding failure)")
-        summary["coordinates"] = molnet.check_coordinate_scale(config, split, molecules)
-        summary["conformer_generation"] = _conformer_summary([built[i][1:] for i in order], ids)
-        summary["smiles_shared_with_other_split"] = int(sum(len(smiles_split[m.smiles]) > 1 for m in molecules))
-        summary["label_mean_std"] = [round(float(labels.mean()), 6), round(float(labels.std()), 6)]
-        summary["split_rule"] = {**config["split"], "rows_of_target": len(rows), "paper_molecules": config["paper_molecules"]}
-        schema = {"format": SCHEMA_FORMAT, "conformer": "etkdgv3_mmff", "hydrogens": "dropped",
-                  "source": config["source_name"], "revision": str(config["processed_revision"]),
-                  "coordinate_unit": "angstrom", "coordinate_source_unit": "angstrom", "coordinate_scale": 1.0,
-                  "target_id": config["target_id"], "split_seed": int(config["split"]["seed"]),
-                  "conformer_seed": int(config["conformer"]["seed"]), "rdkit": _rdkit_version()}
-        payload = molnet.payload_from_molecules(config, split, molecules, ids, summary, schema)
-        result[split] = (payload, molecules, summary)
+    for tag in tags:
+        seed = split_replicates.seed_for_tag(tag)
+        indices = split_indices(len(rows), config["split"]["fractions"], seed)
+        check_partition(indices, len(rows), config["expected_counts"], f"{config['task']} {tag}")
+        smiles_split = {}
+        for split in config["splits"]:
+            for i in indices[split]:
+                smiles_split.setdefault(rows[int(i)]["smiles"], set()).add(split)
+        result[tag] = {}
+        for split in config["splits"]:
+            order = [int(i) for i in indices[split]]
+            molecules = [built[i][0] for i in order]
+            ids = [f"{config['dataset']}_{rows[i]['id']}" for i in order]
+            labels = np.stack([m.labels for m in molecules]).astype(np.float32)
+            summary = molnet._qc_summary(config, split, molecules, labels)
+            summary["split_tag"], summary["split_seed"] = tag, seed
+            summary["conformer_policy"] = (f"ETKDGv3 seed {config['conformer']['seed']} + {config['conformer']['mmff_variant']} "
+                                           f"(1 conformer; 2-D fallback on embedding failure)")
+            summary["coordinates"] = molnet.check_coordinate_scale(config, split, molecules)
+            summary["conformer_generation"] = _conformer_summary([built[i][1:] for i in order], ids)
+            summary["smiles_shared_with_other_split"] = int(sum(len(smiles_split[m.smiles]) > 1 for m in molecules))
+            summary["label_mean_std"] = [round(float(labels.mean()), 6), round(float(labels.std()), 6)]
+            summary["split_rule"] = {"policy": config["split"]["policy"], "fractions": config["split"]["fractions"],
+                                     "seed": seed, "rows_of_target": len(rows),
+                                     "paper_molecules": config["paper_molecules"]}
+            schema = {"format": SCHEMA_FORMAT, "conformer": "etkdgv3_mmff", "hydrogens": "dropped",
+                      "source": config["source_name"], "revision": str(config["processed_revision"]),
+                      "coordinate_unit": "angstrom", "coordinate_source_unit": "angstrom", "coordinate_scale": 1.0,
+                      "target_id": config["target_id"], "split_tag": tag, "split_seed": seed,
+                      "conformer_seed": int(config["conformer"]["seed"]), "rdkit": _rdkit_version()}
+            payload = molnet.payload_from_molecules(config, split, molecules, ids, summary, schema)
+            result[tag][split] = (payload, molecules, summary)
     return result
 
 
@@ -349,38 +397,48 @@ def _rdkit_version() -> str:
     return str(rdkit.__version__)
 
 
-def build_processed(config: dict, *, splits: Sequence[str], config_path: Path, dry_run: bool = False) -> int:
-    """Process the requested splits of one task; returns 0 (every failure raises). ``dry_run`` writes nothing."""
+def build_processed(config: dict, *, splits: Sequence[str], config_path: Path, tags: Sequence[str] | None = None,
+                    dry_run: bool = False) -> int:
+    """Process the requested splits of the requested tags (default: every tag); returns 0 (every failure raises).
+
+    No file is written when any target file already exists (nothing is overwritten, and nothing is half-processed
+    because of an existing tag): the whole call raises first. ``dry_run`` writes nothing.
+    """
     import json
 
-    out_dir = processed_dir(config)
+    tags = list(tags or config["split_tags"])
     if not dry_run:
-        existing = [out_dir / f"{s}.pt" for s in splits if (out_dir / f"{s}.pt").exists()]
+        existing = [processed_dir(config, tag) / f"{s}.pt" for tag in tags for s in splits
+                    if (processed_dir(config, tag) / f"{s}.pt").exists()]
         if existing:
-            raise FileExistsError(f"refusing to overwrite {existing[0]}")
+            raise FileExistsError(f"refusing to overwrite {existing[0]} ({len(existing)} existing file(s); process "
+                                  "the missing tags with --tags)")
     started = datetime.now(timezone.utc).isoformat()
-    result = process_task(config)
-    for split in splits:
-        payload, molecules, summary = result[split]
-        print(json.dumps(summary, indent=1), flush=True)
-        if dry_run:
-            continue
-        out_dir.mkdir(parents=True, exist_ok=True)
-        molnet._write_qc(out_dir, split, payload["ids"], molecules, summary)
-        target = out_dir / f"{split}.pt"
-        partial = target.with_name(target.name + ".partial")
-        torch.save(payload, partial)
-        partial.replace(target)
-        print(f"[{split}] wrote {target} ({len(molecules)} molecules)", flush=True)
-    if not dry_run:
-        record_process_run(
-            task_paths(config)["provenance"], started_utc=started, config_path=config_path, processed_dir=out_dir,
-            splits=list(splits), exit_code=0, inputs=[csv_path(config)],
-            extra={"dataset": config["dataset"], "task": config["task"], "target_id": config["target_id"],
-                   "policy": {"split": config["split"], "conformer": config["conformer"], "hydrogens": "dropped",
-                              "cropping": "none", "flags_not_dropped": list(molnet.FLAG_NAMES),
-                              "molecules_dropped": 0},
-                   "rdkit": _rdkit_version()})
+    result = process_task(config, tags)
+    for tag in tags:
+        out_dir = processed_dir(config, tag)
+        for split in splits:
+            payload, molecules, summary = result[tag][split]
+            print(json.dumps(summary, indent=1), flush=True)
+            if dry_run:
+                continue
+            out_dir.mkdir(parents=True, exist_ok=True)
+            molnet._write_qc(out_dir, split, payload["ids"], molecules, summary)
+            target = out_dir / f"{split}.pt"
+            partial = target.with_name(target.name + ".partial")
+            torch.save(payload, partial)
+            partial.replace(target)
+            print(f"[{tag}/{split}] wrote {target} ({len(molecules)} molecules)", flush=True)
+        if not dry_run:
+            record_process_run(
+                task_paths(config)["provenance"], started_utc=started, config_path=config_path, processed_dir=out_dir,
+                splits=list(splits), exit_code=0, inputs=[csv_path(config)],
+                extra={"dataset": config["dataset"], "task": config["task"], "target_id": config["target_id"],
+                       "split_tag": tag, "split_seed": split_replicates.seed_for_tag(tag),
+                       "policy": {"split": config["split"], "conformer": config["conformer"], "hydrogens": "dropped",
+                                  "cropping": "none", "flags_not_dropped": list(molnet.FLAG_NAMES),
+                                  "molecules_dropped": 0},
+                       "rdkit": _rdkit_version()})
     return 0
 
 
@@ -404,6 +462,13 @@ def check_schema_matches_task_yaml(payload: dict, path: Path) -> None:
         raise ValueError(f"{path}: file holds target {schema.get('target_id')!r}, task.yaml says {entry['target_id']!r}")
     if schema.get("coordinate_unit") != "angstrom":
         raise ValueError(f"{path}: coordinates are not recorded in Angstrom (schema {schema})")
+    tag = schema.get("split_tag")
+    if Path(path).parent.parent.name != tag:
+        raise ValueError(f"{path}: file holds split {tag!r} but lies under {Path(path).parent.parent.name!r}")
+    if tag not in [split_replicates.tag_for_seed(s) for s in values["split"]["seeds"]] or (
+            split_replicates.seed_for_tag(tag) != schema.get("split_seed")):
+        raise ValueError(f"{path}: split tag {tag!r} / seed {schema.get('split_seed')!r} do not match task.yaml "
+                         f"split.seeds {values['split']['seeds']}")
 
 
 class NpassProcessedSplit(molnet.MolnetProcessedSplit):
@@ -427,6 +492,7 @@ def task_module(name: str):
     module.load_task_config = lambda path=TASK_YAML, *, data_root=None: molnet.with_finetune_entries(
         load_task_config(path, data_root=data_root, dataset=dataset), path)
     module.processed_dir = processed_dir
-    module.test_subsets = molnet.test_subsets
+    module.test_subsets = lambda config, chains, split_tag: molnet.test_subsets(
+        config, chains, directory=processed_dir(config, split_tag))
     module.ProcessedSplit = NpassProcessedSplit
     return module

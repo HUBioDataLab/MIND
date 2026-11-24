@@ -13,7 +13,7 @@ for MIND encoders.
 | `lba` | regression, pK | ATOM3D LBA (PDBbind 2019 refined, 4,463 complexes), 30 % split 3507/466/490, 60 % split 3563/448/452 | RMSE (lower) |
 | `rsr` | ranking regression, RMSD of 3D RNA models | ATOM3D RNA Structure Ranking (Zenodo 4961085, candidates split by time): FARFAR2-Puzzles models of 21 RNA-Puzzles, 12,479 / 4,000 / 4,000 models (train / val / test; 13 / 4 / 4 puzzles) | mean per-puzzle Spearman (higher) |
 | `mn_bbbp` ... `mn_qm8` (14 MoleculeNet tasks, QM9 excluded) | `multilabel_masked` (BBBP, BACE, ClinTox, Tox21, ToxCast, SIDER, HIV, PCBA, MUV) or `multitarget_regression` (ESOL, FreeSolv, Lipo, QM7, QM8) | Uni-Mol LMDB release, scaffold split as shipped; first conformer, hydrogens dropped, no cropping | ROC-AUC + PRC-AUC (classification); RMSE + MAE (regression; primary: RMSE for ESOL/FreeSolv/Lipo, MAE for QM7/QM8) |
-| `npass_ptp1b`, `npass_ache`, `npass_cox2`, `npass_hivrt`, `npass_tyrosinase`, `npass_cyp3a4`, `npass_mrp4`, `npass_cox1` (8 NPASS tasks) | `multitarget_regression`, one target | NaFM data release (Figshare 10.6084/m9.figshare.28980254.v1, `regression_data.csv`, CC BY 4.0), 612 / 341 / 189 (paper: 190) / 186 / 186 / 178 / 177 / 140 molecules; random 80/10/10 split of the NaFM reference code (seed 0); RDKit ETKDGv3 + MMFF94 conformer, hydrogens dropped | RMSE (primary) + MAE |
+| `npass_ptp1b`, `npass_ache`, `npass_cox2`, `npass_hivrt`, `npass_tyrosinase`, `npass_cyp3a4`, `npass_mrp4`, `npass_cox1` (8 NPASS tasks) | `multitarget_regression`, one target | NaFM data release (Figshare 10.6084/m9.figshare.28980254.v1, `regression_data.csv`, CC BY 4.0), 612 / 341 / 189 (paper: 190) / 186 / 186 / 178 / 177 / 140 molecules; random 80/10/10 split of the NaFM reference code, one per seed (0, 1, 2); RDKit ETKDGv3 + MMFF94 conformer, hydrogens dropped | RMSE (primary) + MAE |
 
 ## Quick use
 
@@ -56,6 +56,11 @@ make ds-status                               # state of this month's ds_* logs
 For `lba`, `embed`, `probe` and `finetune` also take `--split-tag identity30|identity60`;
 `embed` and `probe` additionally take `--representation joint|separate`. Each
 combination writes its own embeddings and results directory.
+
+The `npass_*` tasks have one split per seed: the tag `seed<k>` is the split of run seed `k` (and the model
+initialization uses seed `k` too). `embed` needs `--split-tag seed<k>` (embeddings `<tag>.<split>`); `probe` and
+`finetune` take the tag from each seed in `--seeds` (an explicit `--split-tag` must agree with it); `ds-run` and
+`ds-ecfp` schedule one job per tag.
 
 Training-like steps (embed, probe, fine-tune) are user-run through Make targets.
 
@@ -118,9 +123,13 @@ Eight natural-product bioactivity regressions of the NaFM paper (Table 2). `make
 the 0.46 MiB `regression_data.csv` (url, size, md5, sha256 and row count pinned in `downstream/tasks/npass/task.yaml`; a
 difference stops the run) into `<source_root>/raw`, shared by the eight tasks. `make ds-process TASK=npass_ptp1b` (or
 `TASK=npass` for all eight; `ds-validate` is the read-only dry run) selects the rows of the target id, splits them with
-the NaFM reference code's rule (`np.random.default_rng(0).permutation`, `round(0.8 n)` / `round(0.1 n)` / rest), builds one
-RDKit ETKDGv3 conformer with explicit hydrogens and seed 0, MMFF94-optimizes it and drops the hydrogens. Output:
-`<source_root>/<task>/processed/v1/{train,valid,test}.pt`, `qc_<split>.json/.tsv`, `provenance.json`. The payload and loader
+the NaFM reference code's rule (`np.random.default_rng(seed).permutation`, `round(0.8 n)` / `round(0.1 n)` / rest) once for
+each seed 0, 1, 2 (split tags `seed0`, `seed1`, `seed2`), builds one
+RDKit ETKDGv3 conformer with explicit hydrogens and seed 0 per molecule (shared by the tags), MMFF94-optimizes it and
+drops the hydrogens. Output:
+`<source_root>/<task>/processed/<tag>/v1/{train,valid,test}.pt`, `qc_<split>.json/.tsv`, `provenance.json` (a record per tag;
+`--tags` selects tags, an existing file is never overwritten and the call raises before writing anything). Every processed split
+must have exactly the size the rule gives for the target's row count, and the three splits of a tag must partition the rows. The payload and loader
 are the MoleculeNet ones, so `embed`, `probe`, `finetune` and the ECFP4 baselines (`make ds-ecfp TASKS=npass`) apply
 unchanged; `TASKS=npass` selects the family in `ds-run`.
 
@@ -132,11 +141,13 @@ cause is not documented; `count_note`).
 
 What the primary sources fix and what they do not (details in the `task.yaml` header): the data file, the per-target
 counts and the reference code's random 80/10/10 split are established; the reference code draws the split from the run
-seed, while here one split (seed 0) serves all three training seeds, so our standard deviations cover initialization
-only. The unit and transform of `activity_value`, the NPASS activity type and filtering behind the file, the paper's seed
+seed, and so does the benchmark here: seed `k` trains and tests on the split of tag `seed<k>`, and the results of the three
+seeds are the three repeats of a cell (the ledger groups the tags into one setting, `split_replicates` in the catalog), so the
+standard deviation includes split-to-split variance as in the paper's repeats. The paired bootstrap of `ds-compare` is
+undefined for these tasks (the test molecules differ between seeds); the report says so. The unit and transform of `activity_value`, the NPASS activity type and filtering behind the file, the paper's seed
 list and the split of its Table 2 are not stated anywhere (the paper says only "three random seeds"); errors are therefore
-in the unit of that column. Literature numbers are not strictly comparable to ours. Per-seed splits would need a split tag
-like LBA's through embed, probe, finetune and the ledger; that is not implemented.
+in the unit of that column. The paper's seed list is unknown (here 0, 1, 2), so the draws can differ from the paper's, and literature numbers
+are comparable in protocol shape only (our probe or fine-tune recipe, conformer graphs).
 
 SaProt (`saprot_650m_pdb`, `saprot_650m_af2`, `saprot_35m_af2`) sees the residues
 MIND kept, one `<AA><3Di>` token each; the 3Di state comes from Foldseek on the
@@ -524,12 +535,12 @@ lists this month's `ds_*.log` files with that line (no line: still running or ki
 
 `downstream/baselines/ecfp.py` and `ecfp_tuned.py`: two baselines for the 14 MoleculeNet and the 8 NPASS tasks on the same features, the
 Morgan fingerprint (radius 2 = ECFP4, 2048 bits, RDKit `rdFingerprintGenerator`) of the SMILES stored in the processed
-splits, and on the same fixed split (Uni-Mol scaffold split; NPASS: the seed-0 random split). CPU only, no checkpoint.
+splits, and on the same split (Uni-Mol scaffold split; NPASS: the random split of each seed, probes and fits per seed tag). CPU only, no checkpoint.
 
 | model id | protocol | what it is | seeds |
 |---|---|---|---|
 | `ecfp4` | `linear_probe`, `mlp_probe` | the MIND probe (`downstream.probe`: same heads, masked losses, validation-metric epoch selection, `task.yaml` probe settings) with the fingerprint as the feature | 0-2 |
-| `ecfp4_tuned` | `sklearn_tuned` | scikit-learn `LogisticRegression` (liblinear; grid C in 0.01, 0.1, 1; 0.05, 0.5 from 30,000 train molecules) or `Ridge` (alpha in 0.1 ... 1000) per target, the parameter chosen on the validation split by the primary metric, test scored once, no feature scaling, no subsampling | 0 only (the fit is deterministic) |
+| `ecfp4_tuned` | `sklearn_tuned` | scikit-learn `LogisticRegression` (liblinear; grid C in 0.01, 0.1, 1; 0.05, 0.5 from 30,000 train molecules) or `Ridge` (alpha in 0.1 ... 1000) per target, the parameter chosen on the validation split by the primary metric, test scored once, no feature scaling, no subsampling | 0 only (the fit is deterministic); NPASS: one fit per seed's split, the tag's seed |
 
 ```bash
 make ds-ecfp PLAN=1                                   # what would run; writes nothing

@@ -264,6 +264,8 @@ def _aligned(path: Path, eval_split: str, order: Optional[np.ndarray]):
 
 
 def _ci_reason(row: dict, spec: dict) -> Optional[str]:
+    if spec.get("split_replicates"):
+        return "the test molecules differ between seeds (one split per seed): no paired bootstrap over test samples"
     if row["eval_split"] == "val":
         return "validation labels are not in predictions.npz"
     if row["subset"] != "all":

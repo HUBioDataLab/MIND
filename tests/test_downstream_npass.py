@@ -62,8 +62,8 @@ def tiny_config(tmp_path, count=20, dataset="ptp1b"):
     return config
 
 
-def processed(config, split):
-    return common.NpassProcessedSplit(common.processed_dir(config) / f"{split}.pt")
+def processed(config, split, tag="seed0"):
+    return common.NpassProcessedSplit(common.processed_dir(config, tag) / f"{split}.pt")
 
 
 @pytest.fixture
@@ -105,7 +105,7 @@ def test_task_yaml_pins_the_source_and_documents_every_count_difference():
     assert list(different) == ["cox2"] and "189" in different["cox2"] and "190" in different["cox2"]
     finetune = values["finetune"]
     assert finetune["lr_encoder"] == 1e-4 and finetune["seeds"] == [0, 1, 2] and values["probe"]["seeds"] == [0, 1, 2]
-    assert values["split"]["seed"] == 0 and values["split"]["fractions"] == [0.8, 0.1, 0.1]
+    assert values["split"]["seeds"] == [0, 1, 2] and values["split"]["fractions"] == [0.8, 0.1, 0.1]
 
 
 def test_the_config_loader_refuses_an_undocumented_difference_and_inconsistent_counts(tmp_path):
@@ -133,6 +133,17 @@ def test_the_config_loader_refuses_an_undocumented_difference_and_inconsistent_c
         common.load_task_config(bad, dataset="cox1")
     with pytest.raises(ValueError, match="unknown NPASS dataset"):
         common.load_task_config(dataset="ptp1c")
+    for seeds, message in (([], "non-empty list"), ([0, 0], "distinct"), ([0, -1], "non-negative"), ("0", "non-empty list")):
+        values = yaml.safe_load(common.TASK_YAML.read_text())
+        values["split"]["seeds"] = seeds
+        bad.write_text(yaml.safe_dump(values))
+        with pytest.raises(ValueError, match=message):
+            common.load_task_config(bad, dataset="cox1")
+    values = yaml.safe_load(common.TASK_YAML.read_text())
+    values["split"]["seeds"] = [0, 1]            # the probe and fine-tune seeds 0 1 2 would have seed 2 without a split
+    bad.write_text(yaml.safe_dump(values))
+    with pytest.raises(ValueError, match="share the seed"):
+        common.load_task_config(bad, dataset="cox1")
 
 
 def test_makefile_alias_and_prepare_routing_and_help():
@@ -185,6 +196,51 @@ def test_split_indices_are_the_seeded_permutation_and_cover_every_row_once():
     assert sorted(np.concatenate(list(split.values())).tolist()) == list(range(50))
     other = common.split_indices(50, [0.8, 0.1, 0.1], 1)
     assert other["train"].tolist() != split["train"].tolist()
+
+
+def reference_split(count, seed, fractions=(0.8, 0.1, 0.1)):
+    """The NaFM reference code's make_splits, restated: permutation of the seed, round() sizes, test reduced by one."""
+    permutation = np.random.default_rng(seed).permutation(count)
+    train, valid, test = (round(count * f) for f in fractions)
+    if train + valid + test > count:
+        test -= 1
+    assert train + valid + test == count
+    return permutation[:train], permutation[train:train + valid], permutation[train + valid:]
+
+
+@pytest.mark.parametrize("count", [140, 177, 178, 186, 189, 341, 612])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_split_indices_reproduce_the_reference_permutation_for_every_target_size_and_seed(count, seed):
+    split = common.split_indices(count, [0.8, 0.1, 0.1], seed)
+    for mine, theirs in zip((split["train"], split["valid"], split["test"]), reference_split(count, seed)):
+        assert mine.tolist() == theirs.tolist()
+    assert tuple(len(split[s]) for s in ("train", "valid", "test")) == common.split_sizes(count, [0.8, 0.1, 0.1])
+    common.check_partition(split, count, dict(zip(("train", "valid", "test"), common.split_sizes(count, [0.8, 0.1, 0.1]))), "t")
+
+
+def test_seeds_give_different_permutations_and_equal_seeds_identical_ones_without_sharing_a_molecule():
+    first = [common.split_indices(186, [0.8, 0.1, 0.1], seed) for seed in (0, 1, 2)]
+    again = [common.split_indices(186, [0.8, 0.1, 0.1], seed) for seed in (0, 1, 2)]
+    for a, b in zip(first, again):
+        assert all(a[s].tolist() == b[s].tolist() for s in a)                      # identical seed, identical split
+    assert len({tuple(split["test"].tolist()) for split in first}) == 3            # another seed, another split
+    assert len({tuple(split["train"].tolist()) for split in first}) == 3
+    for split in first:                                                           # one seed: no molecule in two splits
+        members = [set(split[s].tolist()) for s in ("train", "valid", "test")]
+        assert not (members[0] & members[1] or members[0] & members[2] or members[1] & members[2])
+        assert members[0] | members[1] | members[2] == set(range(186))
+
+
+def test_check_partition_names_a_wrong_size_an_overlap_and_a_gap():
+    split = common.split_indices(10, [0.8, 0.1, 0.1], 0)
+    sizes = {"train": 8, "valid": 1, "test": 1}
+    common.check_partition(split, 10, sizes, "t")
+    with pytest.raises(ValueError, match="split sizes"):
+        common.check_partition(split, 10, {"train": 7, "valid": 2, "test": 1}, "t")
+    with pytest.raises(ValueError, match="not a partition"):
+        common.check_partition({**split, "test": split["train"][:1]}, 10, sizes, "t")
+    with pytest.raises(ValueError, match="not a partition"):
+        common.check_partition(split, 11, sizes, "t")
 
 
 # ---------------------------------------------------------------------------
@@ -257,48 +313,104 @@ def test_an_unparsable_smiles_raises_with_the_task_and_id(tmp_path):
         common.process_task(config)
 
 
-def test_processing_writes_the_split_payloads_qc_and_provenance(built):
+def test_processing_writes_every_seeds_split_with_payloads_qc_and_provenance(built):
     config = built
-    out = common.processed_dir(config)
-    sizes = {s: len(processed(config, s)) for s in config["splits"]}
-    assert sizes == config["expected_counts"] == {"train": 16, "valid": 2, "test": 2}
+    assert config["split_tags"] == ["seed0", "seed1", "seed2"]
     rows = common.read_target_rows(config)
-    split = common.split_indices(20, config["split"]["fractions"], config["split"]["seed"])
-    for name in config["splits"]:
-        loaded = processed(config, name)
-        expected = [rows[i] for i in split[name]]
-        assert loaded.ids == [f"ptp1b_{r['id']}" for r in expected] and loaded.smiles == [r["smiles"] for r in expected]
-        assert np.allclose(loaded.labels[:, 0], [r["value"] for r in expected], atol=1e-5)
-        assert loaded.labels.shape == (len(expected), 1) and loaded.label_mask.all()
-        assert loaded.schema["format"] == "nafm_npass_v1" and loaded.schema["target_id"] == "NPT178"
-        assert loaded.schema["split_seed"] == 0 and loaded.schema["rdkit"] and loaded.embeddable.all()
-        summary = json.loads((out / f"qc_{name}.json").read_text())
-        assert summary["molecules"] == summary["expected"] == len(expected) and summary["dropped"] == 0
-        assert summary["conformer_generation"]["embedding"] == {"etkdg": len(expected), "etkdg_random_coords": 0,
-                                                                "failed_2d_fallback": 0}
-        assert sum(summary["conformer_generation"]["mmff"].values()) == len(expected)
-        assert summary["split_rule"]["rows_of_target"] == 20 and summary["smiles_shared_with_other_split"] == 0
-        assert summary["coordinates"]["declared_unit"] == "angstrom"
-        assert len((out / f"qc_{name}.tsv").read_text().splitlines()) == len(expected) + 1
-    ids = [i for s in config["splits"] for i in processed(config, s).ids]
-    assert len(ids) == len(set(ids)) == 20                              # disjoint splits covering every molecule
-    record = json.loads((common.task_paths(config)["provenance"]).read_text())["runs"][-1]
-    assert record["kind"] == "process" and record["task"] == "npass_ptp1b" and record["policy"]["molecules_dropped"] == 0
-    assert record["policy"]["split"]["seed"] == 0 and set(record["outputs_sha256"]) >= {"train.pt", "qc_test.tsv"}
+    orders = {}
+    for tag in config["split_tags"]:
+        out = common.processed_dir(config, tag)
+        assert out.parts[-2:] == (tag, "v1")
+        sizes = {s: len(processed(config, s, tag)) for s in config["splits"]}
+        assert sizes == config["expected_counts"] == {"train": 16, "valid": 2, "test": 2}
+        seed = int(tag[len("seed"):])
+        split = common.split_indices(20, config["split"]["fractions"], seed)
+        orders[tag] = split
+        for name in config["splits"]:
+            loaded = processed(config, name, tag)
+            expected = [rows[i] for i in split[name]]
+            assert loaded.ids == [f"ptp1b_{r['id']}" for r in expected] and loaded.smiles == [r["smiles"] for r in expected]
+            assert np.allclose(loaded.labels[:, 0], [r["value"] for r in expected], atol=1e-5)
+            assert loaded.labels.shape == (len(expected), 1) and loaded.label_mask.all()
+            assert loaded.schema["format"] == "nafm_npass_v1" and loaded.schema["target_id"] == "NPT178"
+            assert loaded.schema["split_seed"] == seed and loaded.schema["split_tag"] == tag
+            assert loaded.schema["rdkit"] and loaded.embeddable.all()
+            summary = json.loads((out / f"qc_{name}.json").read_text())
+            assert summary["molecules"] == summary["expected"] == len(expected) and summary["dropped"] == 0
+            assert summary["split_tag"] == tag and summary["split_rule"]["seed"] == seed
+            assert summary["conformer_generation"]["embedding"] == {"etkdg": len(expected), "etkdg_random_coords": 0,
+                                                                    "failed_2d_fallback": 0}
+            assert sum(summary["conformer_generation"]["mmff"].values()) == len(expected)
+            assert summary["split_rule"]["rows_of_target"] == 20 and summary["smiles_shared_with_other_split"] == 0
+            assert summary["coordinates"]["declared_unit"] == "angstrom"
+            assert len((out / f"qc_{name}.tsv").read_text().splitlines()) == len(expected) + 1
+        ids = [i for s in config["splits"] for i in processed(config, s, tag).ids]
+        assert len(ids) == len(set(ids)) == 20                          # disjoint splits covering every molecule
+    assert len({tuple(orders[tag]["test"]) for tag in orders}) == 3     # every seed draws another split
+    runs = json.loads((common.task_paths(config)["provenance"]).read_text())["runs"]
+    assert [r["split_tag"] for r in runs] == config["split_tags"]
+    for record in runs:
+        assert record["kind"] == "process" and record["task"] == "npass_ptp1b" and record["policy"]["molecules_dropped"] == 0
+        assert record["split_seed"] == int(record["split_tag"][4:]) and set(record["outputs_sha256"]) >= {"train.pt", "qc_test.tsv"}
+        assert Path(record["processed_dir"]) == common.processed_dir(config, record["split_tag"])
+
+
+def test_processing_never_overwrites_and_a_refusal_writes_nothing(tmp_path, built):
+    config = built
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
         common.build_processed(config, splits=["train"], config_path=common.TASK_YAML)
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        common.build_processed(config, splits=["test"], tags=["seed1"], config_path=common.TASK_YAML)
+    # one tag of three missing: the call for that tag alone succeeds, the call for all three refuses before writing
+    partial = tiny_config(tmp_path / "partial")
+    write_csv(common.csv_path(partial), fixture_rows())
+    assert common.build_processed(partial, splits=list(partial["splits"]), tags=["seed0"], config_path=common.TASK_YAML) == 0
+    before = sorted(p.name for p in common.task_paths(partial)["processed"].rglob("*"))
+    with pytest.raises(FileExistsError, match="--tags"):
+        common.build_processed(partial, splits=list(partial["splits"]), config_path=common.TASK_YAML)
+    assert sorted(p.name for p in common.task_paths(partial)["processed"].rglob("*")) == before
+    assert not common.processed_dir(partial, "seed1").exists()
+    assert common.build_processed(partial, splits=list(partial["splits"]), tags=["seed1", "seed2"],
+                                  config_path=common.TASK_YAML) == 0
+    assert all(processed(partial, "test", tag).ids for tag in partial["split_tags"])
+    with pytest.raises(ValueError, match="unknown split tags"):
+        common.process_task(partial, ["seed7"])
+    with pytest.raises(ValueError, match="unknown split tag"):
+        common.processed_dir(partial, "seed7")
+
+
+def test_a_split_of_the_wrong_size_or_overlapping_splits_raise(tmp_path, monkeypatch):
+    config = tiny_config(tmp_path)
+    write_csv(common.csv_path(config), fixture_rows())
+    real = common.split_indices
+
+    def one_too_few(count, fractions, seed):
+        split = real(count, fractions, seed)
+        return {**split, "train": split["train"][:-1]}
+
+    monkeypatch.setattr(common, "split_indices", one_too_few)
+    with pytest.raises(ValueError, match=r"npass_ptp1b seed0: split sizes .*expected"):
+        common.process_task(config)
+
+    def overlapping(count, fractions, seed):
+        split = real(count, fractions, seed)
+        return {**split, "valid": split["train"][:2]}      # right sizes, but a molecule is in two splits
+
+    monkeypatch.setattr(common, "split_indices", overlapping)
+    with pytest.raises(ValueError, match="not a partition"):
+        common.process_task(config)
 
 
 def test_processing_twice_gives_identical_coordinates_and_validate_writes_nothing(tmp_path, built):
     other = tiny_config(tmp_path / "second")
     write_csv(common.csv_path(other), fixture_rows())
-    assert common.build_processed(other, splits=["test"], config_path=common.TASK_YAML) == 0
+    assert common.build_processed(other, splits=["test"], tags=["seed0"], config_path=common.TASK_YAML) == 0
     a, b = processed(built, "test"), processed(other, "test")
     assert a.ids == b.ids and np.array_equal(a._positions, b._positions)
     dry = tiny_config(tmp_path / "third")
     write_csv(common.csv_path(dry), fixture_rows())
     assert common.build_processed(dry, splits=["train"], config_path=common.TASK_YAML, dry_run=True) == 0
-    assert not common.processed_dir(dry).exists()
+    assert not common.task_paths(dry)["processed"].exists()
 
 
 def test_failed_embeddings_are_flagged_and_counted_never_dropped(tmp_path, monkeypatch):
@@ -311,9 +423,9 @@ def test_failed_embeddings_are_flagged_and_counted_never_dropped(tmp_path, monke
 
     monkeypatch.setattr(AllChem, "EmbedMolecule", fail_for_chlorine)
     config = tiny_config(tmp_path)
-    test_row = int(common.split_indices(20, config["split"]["fractions"], config["split"]["seed"])["test"][0])
+    test_row = int(common.split_indices(20, config["split"]["fractions"], 0)["test"][0])
     write_csv(common.csv_path(config), fixture_rows(chlorine_at=test_row))      # the chlorine molecule is a test molecule
-    assert common.build_processed(config, splits=list(config["splits"]), config_path=common.TASK_YAML) == 0
+    assert common.build_processed(config, splits=list(config["splits"]), tags=["seed0"], config_path=common.TASK_YAML) == 0
     failed_id = f"ptp1b_NPC{1000 + test_row}"
     loaded = processed(config, "test")
     index = loaded.ids.index(failed_id)
@@ -321,13 +433,13 @@ def test_failed_embeddings_are_flagged_and_counted_never_dropped(tmp_path, monke
     assert loaded.flags["all_conformers_flat"][index] and loaded.flags["first_conformer_flat"][index]
     lo, hi = int(loaded._offsets[index]), int(loaded._offsets[index + 1])
     assert hi - lo == 5 and np.abs(loaded._positions[lo:hi, 2]).max() == 0 and np.isfinite(loaded._positions).all()
-    summary = json.loads((common.processed_dir(config) / "qc_test.json").read_text())
+    summary = json.loads((common.processed_dir(config, "seed0") / "qc_test.json").read_text())
     generation = summary["conformer_generation"]
     assert generation["embedding"]["failed_2d_fallback"] == 1 and generation["embedding_failed_ids"] == [failed_id]
     assert generation["mmff"]["skipped_2d_fallback"] == 1 and summary["flags"]["all_conformers_flat"] == 1
-    tsv = (common.processed_dir(config) / "qc_test.tsv").read_text().splitlines()
+    tsv = (common.processed_dir(config, "seed0") / "qc_test.tsv").read_text().splitlines()
     assert any(line.startswith(failed_id) and "all_conformers_flat" in line for line in tsv)
-    subsets = molnet.test_subsets(config, loaded.chains)                         # reported next to the full test set
+    subsets = molnet.test_subsets(config, loaded.chains, directory=common.processed_dir(config, "seed0"))
     assert subsets["all_conformers_flat"].tolist() == [i == index for i in range(len(loaded))]
     assert subsets["no_flags"].sum() == len(loaded) - 1
 
@@ -352,10 +464,11 @@ def test_a_retry_with_random_coordinates_is_counted(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_the_loader_refuses_a_file_of_another_target_revision_or_format(built):
-    path = common.processed_dir(built) / "test.pt"
+    path = common.processed_dir(built, "seed0") / "test.pt"
     payload = torch.load(path, weights_only=False)
     for key, value, message in (("target_id", "NPT204", "file holds target"), ("revision", "v0", "revision"),
-                                ("format", "unimol_molnet_v1", "schema format")):
+                                ("format", "unimol_molnet_v1", "schema format"),
+                                ("split_tag", "seed1", "lies under"), ("split_seed", 1, "do not match task.yaml")):
         broken = dict(payload, schema=dict(payload["schema"], **{key: value}))
         torch.save(broken, path)
         with pytest.raises(ValueError, match=message):
@@ -364,9 +477,14 @@ def test_the_loader_refuses_a_file_of_another_target_revision_or_format(built):
     assert len(common.NpassProcessedSplit(path)) == 2
 
 
-def test_a_clean_test_split_has_no_flagged_subset(built):
-    subsets = molnet.test_subsets(built, processed(built, "test").chains)
-    assert set(subsets) == {"no_flags"} and subsets["no_flags"].all()
+def test_a_clean_test_split_has_no_flagged_subset_and_the_module_reads_the_tags_qc(built):
+    for tag in built["split_tags"]:
+        chains = processed(built, "test", tag).chains
+        subsets = load_task("npass_ptp1b").test_subsets(built, chains, tag)
+        assert set(subsets) == {"no_flags"} and subsets["no_flags"].all()
+    other = processed(built, "test", "seed1").chains
+    with pytest.raises(ValueError, match="not in qc_test.tsv"):      # the molecules of another seed's test split
+        molnet.test_subsets(built, other, directory=common.processed_dir(built, "seed0"))
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +551,8 @@ def test_prepare_cli_validates_without_writing_and_npass_alias_rejects_download(
         prepare.main(["download", "--task", "npass"])
     with pytest.raises(SystemExit):
         prepare.main(["process", "--task", "npass_unknown"])
+    with pytest.raises(SystemExit):
+        prepare.main(["process", "--task", "npass_cox1", "--tags", "seed7"])
     with pytest.raises(FileNotFoundError, match="ds-download"):
         prepare.main(["validate", "--task", "npass_cox1"])
 
@@ -441,7 +561,7 @@ def test_prepare_cli_validates_without_writing_and_npass_alias_rejects_download(
 # Fingerprint baseline and report on the family
 # ---------------------------------------------------------------------------
 
-def test_fingerprint_baseline_expands_npass_and_runs_end_to_end(tmp_path, monkeypatch):
+def test_fingerprint_baseline_expands_npass_and_runs_end_to_end_per_seed_split(tmp_path, monkeypatch):
     assert ecfp.expand_tasks("npass") == list(NPASS_TASKS) and ecfp.expand_tasks("molnet") == list(MOLNET_TASKS)
     assert ecfp.expand_tasks("all") == list(SMILES_TASKS)
     with pytest.raises(ValueError, match="MoleculeNet and NPASS tasks only"):
@@ -453,13 +573,34 @@ def test_fingerprint_baseline_expands_npass_and_runs_end_to_end(tmp_path, monkey
     config.update(expected_molecules=20, paper_molecules=20, expected_counts=sizes)
     write_csv(common.csv_path(config), fixture_rows())
     assert common.build_processed(config, splits=list(config["splits"]), config_path=common.TASK_YAML) == 0
-    assert ecfp.main(["--tasks", "npass_ptp1b", "--heads", "linear", "--seeds", "0", "--threads", "1", "--models", "probe",
-                      "--outputs-root", str(tmp_path / "outputs"), "--results-root", str(tmp_path / "results"),
-                      "--log-root", str(tmp_path / "logs"), "--no-ledger"]) == 0
-    base = tmp_path / "outputs" / "downstream" / "npass_ptp1b" / "ecfp4"
-    metrics = json.loads((base / "linear_probe.ecfp4_bits2048" / "seed0" / "metrics.json").read_text())
-    assert metrics["task"] == "npass_ptp1b" and metrics["kind"] == "multitarget_regression"
-    assert set(metrics["test"]["all"]) >= {"rmse", "mae"}
-    markdown = report.to_markdown("npass_ptp1b", report.collect("npass_ptp1b", tmp_path / "outputs"))
+    outputs = tmp_path / "outputs"
+    argv = ["--tasks", "npass_ptp1b", "--heads", "linear", "--threads", "1", "--outputs-root", str(outputs),
+            "--results-root", str(tmp_path / "results"), "--log-root", str(tmp_path / "logs"), "--no-ledger"]
+    assert ecfp.main(argv + ["--seeds", "0", "1", "--models", "both"]) == 0
+    base = outputs / "downstream" / "npass_ptp1b" / "ecfp4"
+    assert sorted(p.name for p in (base / "embeddings").glob("*.npz")) == sorted(
+        f"seed{k}.{s}.npz" for k in (0, 1) for s in ("train", "valid", "test"))        # a fingerprint set per seed's split
+    tests = {}
+    for seed in (0, 1):
+        metrics = json.loads((base / "linear_probe.ecfp4_bits2048" / f"seed{seed}" / "metrics.json").read_text())
+        assert metrics["task"] == "npass_ptp1b" and metrics["kind"] == "multitarget_regression"
+        assert metrics["split_tag"] == f"seed{seed}" and metrics["protocol"] == "linear_probe"
+        assert set(metrics["test"]["all"]) >= {"rmse", "mae"}
+        with np.load(base / "linear_probe.ecfp4_bits2048" / f"seed{seed}" / "predictions.npz") as arrays:
+            tests[seed] = arrays["test_chains"].tolist()
+        assert tests[seed] == processed(config, "test", f"seed{seed}").chains         # seed k is scored on split k
+        tuned = base.parent / "ecfp4_tuned" / "sklearn_tuned.ecfp4_bits2048" / f"seed{seed}"
+        tuned_metrics = json.loads((tuned / "metrics.json").read_text())
+        assert tuned_metrics["split_tag"] == f"seed{seed}" and tuned_metrics["seed"] == seed
+        assert json.loads((tuned / "config.json").read_text())["probe"]["seeds"] == [0, 1, 2]
+    assert tests[0] != tests[1]
+    assert not (base / "linear_probe.ecfp4_bits2048" / "seed2").exists()
+    plan, = [ecfp.plan_task("npass_ptp1b", ecfp.FingerprintSpec(), ["linear"], [0, 1, 2], outputs)]
+    assert plan["tags"] == ["seed0", "seed1", "seed2"] and plan["probes"] == [("linear", [2], "seed2")]
+    assert plan["tuned"] == [(2, "seed2")] and plan["embed_splits"] == ["seed2.train", "seed2.valid", "seed2.test"]
+    with pytest.raises(ValueError, match="seed 3 has no split"):
+        ecfp.plan_task("npass_ptp1b", ecfp.FingerprintSpec(), ["linear"], [3], outputs)
+    markdown = report.to_markdown("npass_ptp1b", report.collect("npass_ptp1b", outputs))
     assert "NPASS (NaFM benchmark" in markdown and "MoleculeNet (Uni-Mol" not in markdown
-    assert "MoleculeNet (Uni-Mol LMDB" in report.masked_markdown(report.collect("npass_ptp1b", tmp_path / "outputs"))
+    assert "split-to-split variance" in markdown
+    assert "MoleculeNet (Uni-Mol LMDB" in report.masked_markdown(report.collect("npass_ptp1b", outputs))

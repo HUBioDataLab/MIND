@@ -8,17 +8,20 @@ The baseline is a frozen-feature probe whose feature is a Morgan fingerprint of 
 ECFP4) instead of a pooled encoder embedding. Everything after the feature is the code of the MIND probes:
 ``downstream.probe`` (linear or MLP head, masked BCE / masked MSE on train-standardized targets, the same epoch
 selection on the validation metric, the same evaluation functions and the same ``task.yaml`` probe settings), run
-once per seed, on the fixed split of the processed MoleculeNet or NPASS files.
+once per seed, on the fixed split of the processed MoleculeNet files, or (NPASS, one split per seed) on the split of
+the seed's own tag ``seed<k>``.
 
 Steps per task (what already exists is skipped, so an interrupted run can be repeated):
 
 1. Fingerprints of every split, written like an encoder embedding to
-   ``<outputs root>/downstream/<task>/ecfp4/embeddings/<split>.{npz,json}`` with pooling name
+   ``<outputs root>/downstream/<task>/ecfp4/embeddings/<split>.{npz,json}`` (NPASS: ``<tag>.<split>``, one set per
+   seed) with pooling name
    ``ecfp4_<variant><n_bits>`` (``ecfp4_bits2048``). The json record carries the RDKit version, radius, size and
    variant. A SMILES RDKit cannot parse raises (it is never replaced by an all-zero row).
 2. ``--models probe`` (model ``ecfp4``): ``python -m downstream.probe`` per head with the seeds that have no
    ``metrics.json`` yet. ``--models tuned`` (model ``ecfp4_tuned``): ``downstream.baselines.ecfp_tuned``, the
-   validation-tuned scikit-learn logistic / ridge regression on the same fingerprints, one seed. ``both`` (default)
+   validation-tuned scikit-learn logistic / ridge regression on the same fingerprints, one seed (NPASS: one fit per
+   seed's split, its seed being the tag's). ``both`` (default)
    runs both; ``--jobs`` processes at a time, the largest tasks first.
 3. ``downstream.ledger add`` of the outputs root and the ledger reports (``$MIND_RESULTS_ROOT``), unless
    ``--no-ledger``; the final table lists the primary metric per task and head.
@@ -50,6 +53,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from downstream import ledger, ledger_report
+from downstream.common import split_replicates
 from downstream.common.registry import REPO_ROOT, embeddings_path, git_commit, outputs_root, results_dir, sha256_file
 from downstream.tasks import MOLNET_TASKS, NPASS_TASKS, SMILES_TASKS, load_task
 
@@ -131,63 +135,83 @@ def _config(task_name: str) -> dict:
     return task.load_task_config(task.TASK_YAML)
 
 
-def _processed_paths(task_name: str, config: dict) -> dict:
+def run_units(config: dict, seeds: Sequence[int]) -> list:
+    """``[(split tag, seeds)]``: one unit with every seed, or (one split per seed) one unit per seed with its own tag."""
+    if not split_replicates.is_replicated(config):
+        return [(None, list(seeds))]
+    return [(split_replicates.tag_for_run(config, seed), [seed]) for seed in dict.fromkeys(seeds)]
+
+
+def _stem(tag: Optional[str], split: str) -> str:
+    """Name of an embedding file: the split, prefixed by its split tag for a task with one split per seed."""
+    return f"{tag}.{split}" if tag else split
+
+
+def _processed_paths(task_name: str, config: dict, tag: Optional[str] = None) -> dict:
     task = load_task(task_name)
-    directory = Path(task.processed_dir(config))
+    directory = Path(task.processed_dir(config, tag) if tag else task.processed_dir(config))
     return {split: directory / f"{split}.pt" for split in config["splits"]}
 
 
-def embedding_state(task_name: str, spec: FingerprintSpec, root: Path) -> tuple[list, list]:
-    """``(splits to write, splits done)``; a half-written pair or a record of another definition raises."""
+def embedding_state(task_name: str, spec: FingerprintSpec, root: Path,
+                    tags: Sequence[Optional[str]] = (None,)) -> tuple[list, list]:
+    """``(file stems to write, stems done)``; a half-written pair or a record of another definition raises."""
     config = _config(task_name)
     missing, done = [], []
-    for split in config["splits"]:
-        npz = embeddings_path(task_name, MODEL_ID, split, root=root)
-        record_path = npz.with_suffix(".json")
-        if npz.is_file() and record_path.is_file():
-            record = json.loads(record_path.read_text())
-            wanted = spec.describe()
-            found = {key: (record.get("fingerprint") or {}).get(key) for key in wanted}
-            if found != wanted:
-                raise RuntimeError(f"{record_path} was written with fingerprint {found}, this run asks for {wanted}; "
-                                   "use another outputs root")
-            done.append(split)
-        elif npz.is_file() or record_path.is_file():
-            raise RuntimeError(f"half-written embedding {npz} (.npz without .json or the reverse); inspect it by hand")
-        else:
-            missing.append(split)
+    for tag in tags:
+        for split in config["splits"]:
+            stem = _stem(tag, split)
+            npz = embeddings_path(task_name, MODEL_ID, stem, root=root)
+            record_path = npz.with_suffix(".json")
+            if npz.is_file() and record_path.is_file():
+                record = json.loads(record_path.read_text())
+                wanted = spec.describe()
+                found = {key: (record.get("fingerprint") or {}).get(key) for key in wanted}
+                if found != wanted:
+                    raise RuntimeError(f"{record_path} was written with fingerprint {found}, the request is {wanted}; "
+                                       "use another outputs root")
+                done.append(stem)
+            elif npz.is_file() or record_path.is_file():
+                raise RuntimeError(f"half-written embedding {npz} (.npz without .json or the reverse); inspect it by hand")
+            else:
+                missing.append(stem)
     return missing, done
 
 
-def write_task_embeddings(task_name: str, spec: FingerprintSpec, root: Path) -> list:
-    """Fingerprints of every split of ``task_name``; returns the json records written. Never overwrites."""
+def write_task_embeddings(task_name: str, spec: FingerprintSpec, root: Path, tags: Sequence[Optional[str]] = (None,),
+                          stems: Optional[Sequence[str]] = None) -> list:
+    """Fingerprints of every split of ``task_name`` (of the file ``stems`` only, when given); returns the json records
+    written. Never overwrites."""
     task = load_task(task_name)
     config = _config(task_name)
-    paths = _processed_paths(task_name, config)
     started = datetime.now(timezone.utc).isoformat()
     commit = git_commit()
     records = []
-    for name, path in paths.items():
-        timer = time.monotonic()
-        out = embeddings_path(task_name, MODEL_ID, name, root=root)
-        if out.exists() or out.with_suffix(".json").exists():
-            raise FileExistsError(f"refusing to overwrite {out}")
-        sha = sha256_file(path)
-        split = task.ProcessedSplit(path)
-        if not hasattr(split, "smiles"):
-            raise ValueError(f"{task_name}: the processed split has no SMILES; a fingerprint needs them")
-        matrix = fingerprint_matrix(split.smiles, split.ids, spec)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        partial = out.with_name(out.stem + ".partial.npz")
-        np.savez_compressed(partial, chains=np.array(split.chains), labels=np.asarray(split.labels),
-                            **{f"emb_{spec.pooling}": matrix})
-        partial.replace(out)
-        record = {"task": task_name, "started_utc": started, "git": commit, "device": "cpu", "split": name,
-                  "split_tag": None, "representation": None, "model_id": MODEL_ID, "fingerprint": spec.describe(),
-                  "processed": str(path), "processed_sha256": sha, "chains": len(split.chains),
-                  "poolings": [spec.pooling], "dim": spec.n_bits, "seconds": round(time.monotonic() - timer, 1)}
-        out.with_suffix(".json").write_text(json.dumps(record, indent=1))
-        records.append(record)
+    for tag in tags:
+        for name, path in _processed_paths(task_name, config, tag).items():
+            stem = _stem(tag, name)
+            if stems is not None and stem not in stems:
+                continue
+            timer = time.monotonic()
+            out = embeddings_path(task_name, MODEL_ID, stem, root=root)
+            if out.exists() or out.with_suffix(".json").exists():
+                raise FileExistsError(f"refusing to overwrite {out}")
+            sha = sha256_file(path)
+            split = task.ProcessedSplit(path)
+            if not hasattr(split, "smiles"):
+                raise ValueError(f"{task_name}: the processed split has no SMILES; a fingerprint needs them")
+            matrix = fingerprint_matrix(split.smiles, split.ids, spec)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            partial = out.with_name(out.stem + ".partial.npz")
+            np.savez_compressed(partial, chains=np.array(split.chains), labels=np.asarray(split.labels),
+                                **{f"emb_{spec.pooling}": matrix})
+            partial.replace(out)
+            record = {"task": task_name, "started_utc": started, "git": commit, "device": "cpu", "split": name,
+                      "split_tag": tag, "representation": None, "model_id": MODEL_ID, "fingerprint": spec.describe(),
+                      "processed": str(path), "processed_sha256": sha, "chains": len(split.chains),
+                      "poolings": [spec.pooling], "dim": spec.n_bits, "seconds": round(time.monotonic() - timer, 1)}
+            out.with_suffix(".json").write_text(json.dumps(record, indent=1))
+            records.append(record)
     return records
 
 
@@ -212,33 +236,42 @@ def expand_tasks(text: str) -> list:
     return list(dict.fromkeys(expanded))
 
 
-def tuned_metrics_path(task_name: str, spec: FingerprintSpec, root: Path) -> Path:
-    return results_dir(task_name, TUNED_MODEL_ID, TUNED_PROTOCOL, TUNED_SEED, pooling=spec.pooling, root=root) / "metrics.json"
+def tuned_metrics_path(task_name: str, spec: FingerprintSpec, root: Path, seed: int = TUNED_SEED) -> Path:
+    """``metrics.json`` of the tuned fit; ``seed`` is 0, or (one split per seed) the seed of the fitted tag."""
+    return results_dir(task_name, TUNED_MODEL_ID, TUNED_PROTOCOL, seed, pooling=spec.pooling, root=root) / "metrics.json"
 
 
 def plan_task(task_name: str, spec: FingerprintSpec, heads: Sequence[str], seeds: Sequence[int], root: Path,
               models: str = "both") -> dict:
+    """What is left to do for one task. ``probes`` are ``(head, seeds, split tag)``, ``tuned`` the ``(seed, split tag)``
+    fits still to run (one split per seed: one per seed and tag; otherwise seed 0 of the fixed split)."""
     config = _config(task_name)
-    missing, _ = embedding_state(task_name, spec, root)
+    units = run_units(config, seeds)
+    tags = [tag for tag, _ in units]
+    missing, _ = embedding_state(task_name, spec, root, tags)
     probes = []
     for head in heads if models in ("probe", "both") else ():
-        todo = [s for s in seeds if not (results_dir(task_name, MODEL_ID, f"{head}_probe", s, pooling=spec.pooling,
-                                                     root=root) / "metrics.json").is_file()]
-        if todo:
-            probes.append((head, todo))
-    paths = _processed_paths(task_name, config)
-    absent = [str(p) for p in paths.values() if not p.is_file()]
-    tuned = models in ("tuned", "both") and not tuned_metrics_path(task_name, spec, root).is_file()
-    return {"task": task_name, "embed_splits": missing, "probes": probes, "tuned": tuned, "no_data": absent,
-            "train_molecules": config["expected_counts"]["train"] * config["num_targets"]}
+        for tag, unit_seeds in units:
+            todo = [s for s in unit_seeds if not (results_dir(task_name, MODEL_ID, f"{head}_probe", s,
+                                                              pooling=spec.pooling, root=root) / "metrics.json").is_file()]
+            if todo:
+                probes.append((head, todo, tag))
+    absent = [str(p) for tag in tags for p in _processed_paths(task_name, config, tag).values() if not p.is_file()]
+    tuned = []
+    if models in ("tuned", "both"):
+        fits = [(split_replicates.seed_for_tag(tag), tag) for tag in tags] if tags != [None] else [(TUNED_SEED, None)]
+        tuned = [(seed, tag) for seed, tag in fits if not tuned_metrics_path(task_name, spec, root, seed).is_file()]
+    return {"task": task_name, "tags": tags, "embed_splits": missing, "probes": probes, "tuned": tuned,
+            "no_data": absent, "train_molecules": config["expected_counts"]["train"] * config["num_targets"]}
 
 
 def plan_text(plans: list, spec: FingerprintSpec, root: Path, results: Optional[Path], jobs: int, threads: int) -> str:
     lines = [f"ECFP4 baseline: model id {MODEL_ID}, pooling {spec.pooling}, {spec.describe()}",
              f"outputs root {root}", f"results root {results}", f"{jobs} job(s) at a time, {threads} thread(s) (or fit workers) each", ""]
     for plan in plans:
-        todo = "; ".join(f"{head}: seeds {seeds}" for head, seeds in plan["probes"]) or "all probes done"
-        todo += "; tuned sklearn: seed 0" if plan["tuned"] else "; tuned sklearn done or not requested"
+        todo = "; ".join(f"{head}: seeds {seeds}" for head, seeds, _ in plan["probes"]) or "all probes done"
+        todo += (f"; tuned sklearn: seeds {[seed for seed, _ in plan['tuned']]}" if plan["tuned"]
+                 else "; tuned sklearn done or not requested")
         embed = f"fingerprints of {plan['embed_splits']}" if plan["embed_splits"] else "fingerprints done"
         data = f"  NO PROCESSED DATA: {plan['no_data']}" if plan["no_data"] else ""
         lines.append(f"{plan['task']}: {embed}; {todo}{data}")
@@ -250,15 +283,16 @@ def _thread_env(threads: int) -> dict:
 
 
 def _probe_command(task_name: str, head: str, seeds: Sequence[int], spec: FingerprintSpec, root: Path,
-                   threads: int) -> list:
+                   threads: int, tag: Optional[str] = None) -> list:
     return [sys.executable, "-u", "-m", "downstream.probe", "--task", task_name, "--model-id", MODEL_ID, "--head", head,
             "--pooling", spec.pooling, "--seeds", *map(str, seeds), "--threads", str(threads), "--outputs-root", str(root),
-            "--feature-scaling", FEATURE_SCALING]
+            "--feature-scaling", FEATURE_SCALING] + (["--split-tag", tag] if tag else [])
 
 
-def _tuned_command(task_name: str, spec: FingerprintSpec, root: Path, threads: int) -> list:
+def _tuned_command(task_name: str, spec: FingerprintSpec, root: Path, threads: int, tag: Optional[str] = None) -> list:
     return [sys.executable, "-u", "-m", "downstream.baselines.ecfp_tuned", "--task", task_name, "--feature", spec.variant,
-            "--n-bits", str(spec.n_bits), "--threads", str(threads), "--outputs-root", str(root)]
+            "--n-bits", str(spec.n_bits), "--threads", str(threads), "--outputs-root", str(root)] + (
+        ["--split-tag", tag] if tag else [])
 
 
 def _run_probe(label: str, argv: list, log: Path, env_threads: int, expected: list) -> Optional[str]:
@@ -348,7 +382,7 @@ def main(argv=None) -> int:
             continue
         try:
             started = time.monotonic()
-            write_task_embeddings(plan["task"], spec, root)
+            write_task_embeddings(plan["task"], spec, root, plan["tags"], plan["embed_splits"])
             print(f"[{datetime.now():%H:%M:%S}] FINISHED fingerprints {plan['task']} ({int(time.monotonic() - started)} s)",
                   flush=True)
             plan["embed_ok"] = True
@@ -360,19 +394,20 @@ def main(argv=None) -> int:
     for plan in plans:
         if plan.get("embed_ok") is False:
             failures += [(f"probe_{head} {plan['task']}", "not run: the fingerprints of this task failed")
-                         for head, _ in plan["probes"]]
-            failures += [(f"tuned {plan['task']}", "not run: the fingerprints of this task failed")] * plan["tuned"]
+                         for head, _, _ in plan["probes"]]
+            failures += [(f"tuned {plan['task']}", "not run: the fingerprints of this task failed")] * len(plan["tuned"])
             continue
-        for head, seeds in plan["probes"]:
+        for head, seeds, tag in plan["probes"]:
             expected = [results_dir(plan["task"], MODEL_ID, f"{head}_probe", s, pooling=spec.pooling, root=root)
                         / "metrics.json" for s in seeds]
-            label = f"probe_{head} {plan['task']}"
-            work.append((plan["train_molecules"], label, _probe_command(plan["task"], head, seeds, spec, root, args.threads),
+            label = f"probe_{head} {plan['task']}" + (f" {tag}" if tag else "")
+            work.append((plan["train_molecules"], label,
+                         _probe_command(plan["task"], head, seeds, spec, root, args.threads, tag),
                          run_dir / f"{label.replace(' ', '_')}.log", expected, args.threads))
-        if plan["tuned"]:  # liblinear / ridge are single-threaded; the fit workers are the threads
-            label = f"tuned {plan['task']}"
-            work.append((plan["train_molecules"], label, _tuned_command(plan["task"], spec, root, args.threads),
-                         run_dir / f"{label.replace(' ', '_')}.log", [tuned_metrics_path(plan["task"], spec, root)], 1))
+        for seed, tag in plan["tuned"]:  # liblinear / ridge are single-threaded; the fit workers are the threads
+            label = f"tuned {plan['task']}" + (f" {tag}" if tag else "")
+            work.append((plan["train_molecules"], label, _tuned_command(plan["task"], spec, root, args.threads, tag),
+                         run_dir / f"{label.replace(' ', '_')}.log", [tuned_metrics_path(plan["task"], spec, root, seed)], 1))
     work.sort(key=lambda item: -item[0])  # the largest jobs first keeps the pool busy until the end
     work = [item[1:] for item in work]
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:

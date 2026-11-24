@@ -1,6 +1,6 @@
 # NPASS natural-product bioactivity regression, the eight-target benchmark of the NaFM paper (Ding et al., arXiv
 # 2503.17656, Table 2): one regression task per protein target, one task family (MoleculeNet style), one processed
-# directory per task under <source_root>/<task>/processed/<revision>.
+# directory per task and split tag under <source_root>/<task>/processed/<tag>/<revision>.
 #
 # Source (established from primary sources; see "What is and is not known" below): `regression_data.csv` of the NaFM
 # data release (Figshare 10.6084/m9.figshare.28980254.v1, file 54346484, CC BY 4.0), columns np_id, SMILES, target_id,
@@ -26,12 +26,14 @@
 #               COX-2 count 190, and whether the reference code's test.py reproduces Table 2 (its README calls it a
 #               minimal demonstration, not the production evaluation).
 #
-# Decision taken here (the framework trains every seed on ONE fixed split per task): the split is the reference code's
-# split for seed 0 (`split.seed`), the three training seeds only change the initialization and batch order. The
-# paper's standard deviations most likely include split-to-split variance; ours cover initialization only. Literature
-# numbers are therefore NOT strictly comparable to ours (different split draw, frozen-probe or our fine-tune recipe,
-# conformer-based graphs), and the reports say so. Per-seed splits would need a split tag like LBA's (embed / probe /
-# finetune / ledger); that is not implemented.
+# Splits and seeds (one processed split per run seed, as the reference code): the split of run seed k is the reference
+# code's split for seed k (`split.seeds`, tags seed0, seed1, ...; processed/<tag>/<revision>/), and the model
+# initialization uses the same seed k, as the reference code passes one seed to both. A cell of the results is the
+# mean and sample standard deviation over the seeds, so its standard deviation includes the split-to-split variance
+# of the paper's repeats as well as the initialization. What still differs from the paper's Table 2: the paper's seed
+# list is not stated (here 0, 1, 2), the frozen-probe or our fine-tune recipe replaces the paper's fine-tuning, the
+# graphs come from RDKit conformers, and the activity unit is undocumented; the numbers are comparable in protocol
+# shape only. A probe or fine-tune seed without a processed split is refused.
 #
 # Graph input: SMILES -> RDKit ETKDGv3 conformer with explicit hydrogens (fixed seed), MMFF94 optimization, hydrogens
 # dropped, first (only) conformer, no cropping; the ligand graph is the one of the MoleculeNet path. A molecule whose
@@ -60,7 +62,7 @@ source_file:
 splits: [train, valid, test]
 split:
   policy: random_permutation       # np.random.default_rng(seed).permutation, as the NaFM reference code
-  seed: 0
+  seeds: [0, 1, 2]                 # one split per seed; every probe and fine-tune seed must be listed
   fractions: [0.8, 0.1, 0.1]
 
 conformer:
@@ -117,7 +119,7 @@ finetune_seconds_per_epoch: {ptp1b: 2, ache: 1, cox2: 1, hivrt: 1, tyrosinase: 1
 # One entry per target. `target_id` selects the rows of the CSV; `paper_molecules` is the count of the paper's Table 2;
 # `expected_molecules` is the row count of the pinned file (processing fails on any difference) and must equal the
 # paper's count unless `count_note` explains the difference. `expected_counts` are the split sizes the rule above
-# gives for `expected_molecules`; the config loader recomputes and checks them. Target names come from the NaFM
+# gives for `expected_molecules` (the same for every seed); the config loader recomputes and checks them. Target names come from the NaFM
 # adapter of a third-party repository (not from the paper or the release); the counts agree for 7 of 8.
 datasets:
   ptp1b: {task: npass_ptp1b, target_id: NPT178, target_name: PTP1B, paper_molecules: 612, expected_molecules: 612, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 490, valid: 61, test: 61}}

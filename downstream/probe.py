@@ -2,6 +2,7 @@
 
     python -m downstream.probe --task ec  --model-id <snapshot|snapshot.random_init|esm2_...> --head linear
     python -m downstream.probe --task lba --model-id <snapshot> --head mlp [--split-tag identity30]
+    python -m downstream.probe --task npass_ptp1b --model-id <snapshot> --head mlp --seeds 0 1 2
 
 Per seed: features are standardized with train statistics, the head is trained,
 the epoch with the best validation metric is kept (early stopping on
@@ -28,6 +29,9 @@ the epoch with the best validation metric is kept (early stopping on
 ``--feature-scaling none`` is for the sparse ECFP4 fingerprints of ``downstream.baselines.ecfp`` (which use their own
 model id and pooling name); encoder embeddings are always standardized, and the two are refused when mixed up.
 
+A task with one split per seed (NPASS) trains seed ``k`` on the split of tag ``seed<k>`` (embeddings
+``<tag>.<split>``); ``--split-tag`` is optional and must then equal the tag of every seed.
+
 Results go to ``outputs/downstream/<task>/<model_id>/<protocol>.<pooling>/seed<k>/``.
 """
 
@@ -43,6 +47,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from downstream.common import split_replicates
 from downstream.common.heads import HEADS, build_head
 from downstream.common.metrics import (
     accuracy, evaluate, evaluate_multiclass, evaluate_multitask_classification, evaluate_ranking_regression,
@@ -363,7 +368,8 @@ def main(argv=None) -> int:
     parser.add_argument("--seeds", type=int, nargs="+", default=None)
     parser.add_argument("--data-root", type=Path, default=None)
     parser.add_argument("--outputs-root", type=Path, default=None)
-    parser.add_argument("--split-tag", default=None, help="LBA only: identity30 (default) | identity60")
+    parser.add_argument("--split-tag", default=None,
+                        help="LBA: identity30 (default) | identity60; NPASS: optional, must equal seed<k> of every seed")
     parser.add_argument("--representation", default=None, help="LBA only: joint (default) | separate")
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
     parser.add_argument("--feature-scaling", default="standardize", choices=FEATURE_SCALINGS,
@@ -376,44 +382,64 @@ def main(argv=None) -> int:
     torch.set_num_threads(args.threads)
     task = load_task(args.task)
     kind = task.KIND
-    if args.task != "lba" and (args.split_tag or args.representation):
-        parser.error("--split-tag and --representation apply to the lba task only")
     config = task.load_task_config(task.TASK_YAML, data_root=args.data_root)
+    replicated = split_replicates.is_replicated(config)
+    if args.representation and args.task != "lba":
+        parser.error("--representation applies to the lba task only")
+    if args.split_tag and args.task != "lba" and not replicated:
+        parser.error("--split-tag applies to the lba task and to tasks with one split per seed only")
     settings = config["probe"]
     pooling = args.pooling or settings["pooling"]
     protocol = f"{args.head}_probe"
     train_split, val_split, test_splits = split_roles(config)
     test_split = test_splits[0]
-    prefix = ""
     split_tag = representation = None
+    seeds = list(args.seeds or settings["seeds"])
+    seed_tags = {seed: None for seed in seeds}  # split tag of each seed
     if args.task == "lba":
         split_tag = args.split_tag or config["primary_split_tag"]
         representation = args.representation or config["representation"]
-        prefix = f"{split_tag}.{representation}."
         protocol = f"{protocol}.{split_tag}.{representation}"
+        seed_tags = {seed: split_tag for seed in seeds}
+    elif replicated:  # one split per seed; an explicit --split-tag must be the tag of every seed
+        try:
+            seed_tags = {seed: split_replicates.tag_for_run(config, seed, explicit=args.split_tag) for seed in seeds}
+        except ValueError as exc:
+            parser.error(str(exc))
 
-    data = {name: load_embeddings(args.task, args.model_id, prefix + name, pooling, args.outputs_root, kind=kind)
-            for name in (train_split, val_split, *test_splits)}
-    provenance = {s: json.loads(Path(p).with_suffix(".json").read_text()) for s, (_, _, _, p) in data.items()}
-    fingerprint = {"fingerprint" in record for record in provenance.values()}
-    if len(fingerprint) != 1:
-        parser.error("the embedding splits disagree on being a fingerprint")
-    if fingerprint.pop() != (args.feature_scaling == "none"):
-        parser.error("fingerprint features need --feature-scaling none and encoder embeddings --feature-scaling "
-                     "standardize (the ledger groups probes by their settings and cannot tell the two apart)")
-    if args.feature_scaling == "standardize":
-        mean = data[train_split][2].mean(axis=0)
-        std = data[train_split][2].std(axis=0).clip(min=1e-6)
-    else:
-        mean = np.zeros(data[train_split][2].shape[1], np.float32)
-        std = np.ones_like(mean)
-    tensors = {name: (torch.from_numpy((x - mean) / std), torch.from_numpy(y))
-               for name, (_, y, x, _) in data.items()}
-    subsets = task.test_subsets(config, data[test_split][0]) if kind in ("multilabel", *MASKED_KINDS) else {}
-    scale = target_scale(data[train_split][1]) if kind in SCALED_KINDS else None
-    groups = ({name: task.group_labels(data[name][0]) for name in (val_split, *test_splits)}
-              if kind == "ranking_regression" else {})
-    for seed in args.seeds or settings["seeds"]:
+    def embedding_prefix(tag) -> str:
+        return "" if tag is None else f"{tag}.{representation}." if representation else f"{tag}."
+
+    def load_split_data(tag):
+        data = {name: load_embeddings(args.task, args.model_id, embedding_prefix(tag) + name, pooling,
+                                      args.outputs_root, kind=kind)
+                for name in (train_split, val_split, *test_splits)}
+        provenance = {s: json.loads(Path(p).with_suffix(".json").read_text()) for s, (_, _, _, p) in data.items()}
+        fingerprint = {"fingerprint" in record for record in provenance.values()}
+        if len(fingerprint) != 1:
+            parser.error("the embedding splits disagree on being a fingerprint")
+        if fingerprint.pop() != (args.feature_scaling == "none"):
+            parser.error("fingerprint features need --feature-scaling none and encoder embeddings --feature-scaling "
+                         "standardize (the ledger groups probes by their settings and cannot tell the two apart)")
+        if args.feature_scaling == "standardize":
+            mean = data[train_split][2].mean(axis=0)
+            std = data[train_split][2].std(axis=0).clip(min=1e-6)
+        else:
+            mean = np.zeros(data[train_split][2].shape[1], np.float32)
+            std = np.ones_like(mean)
+        tensors = {name: (torch.from_numpy((x - mean) / std), torch.from_numpy(y))
+                   for name, (_, y, x, _) in data.items()}
+        subsets = (task.test_subsets(config, data[test_split][0], *([tag] if replicated else []))
+                   if kind in ("multilabel", *MASKED_KINDS) else {})
+        scale = target_scale(data[train_split][1]) if kind in SCALED_KINDS else None
+        groups = ({name: task.group_labels(data[name][0]) for name in (val_split, *test_splits)}
+                  if kind == "ranking_regression" else {})
+        return data, provenance, mean, std, tensors, subsets, scale, groups
+
+    # One embedding set per split tag (a single one unless every seed has its own split), all read before any training.
+    loaded = {tag: load_split_data(tag) for tag in dict.fromkeys(seed_tags.values())}
+    for seed in seeds:
+        data, provenance, mean, std, tensors, subsets, scale, groups = loaded[seed_tags[seed]]
         out = new_results_dir(args.task, args.model_id, protocol, seed, pooling=pooling,
                               root=args.outputs_root)
         log_handle = open(out / "run.log", "w")
@@ -440,7 +466,7 @@ def main(argv=None) -> int:
         metrics = {
             "task": args.task, "kind": kind, "model_id": args.model_id, "protocol": protocol,
             "pooling": pooling, "seed": seed, "best_epoch": best["epoch"],
-            "split_tag": split_tag, "representation": representation,
+            "split_tag": seed_tags[seed], "representation": representation,
             "val": metrics_val, "test": metrics_test,
         }
         if scale is not None:
