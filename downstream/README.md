@@ -73,8 +73,10 @@ and, for MoleculeNet, at most `max_samples_per_batch` 32 molecules (the per-proc
 without it a 15,000-node budget packs hundreds of molecules into one step). MoleculeNet per-dataset changes live in
 `finetune_overrides` of its task.yaml (PCBA: 20 epochs; the others keep 50). Validation and test scoring use
 deterministic CUDA kernels, training does not. `run.log` gives the train and validation seconds of every epoch and
-notes when the best epoch is the last one (the arm may still have been improving). `--lr-encoder`, `--epochs` and
-`--patience` override the file and are recorded in `config.json`; use a separate `OUTPUTS_ROOT` for such trial runs.
+notes when the best epoch is the last one (the arm may still have been improving). `--lr-encoder`, `--lr-head`,
+`--weight-decay`, `--mlp-dropout`, `--pooling` (one of the task's `embedding.poolings`), `--epochs` and `--patience`
+override the file and are recorded in `config.json`; ds-run reports seeds trained with overrides as other settings, so
+use a separate `OUTPUTS_ROOT` for such trial runs.
 All requested seeds are checked before training, and `metrics.json` is written last and atomically (it marks a
 finished seed). One process uses one GPU; there is no multi-GPU path. `make ds-finetune TASK=<task> MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1] [SEEDS="0 1 2"]
 [OUTPUTS_ROOT=<dir>] [FT_ARGS="--epochs 2"]` runs one task detached; `make ds-run ... HEADS=linear,mlp,finetune` (or

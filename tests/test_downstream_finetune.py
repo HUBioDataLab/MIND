@@ -167,7 +167,8 @@ def stand_in_task(monkeypatch, tmp_path, task, kind, *, width=4, extra=None):
         splits = ["train", "valid", "test"]
     for split in splits:
         _write_split(root / f"{split}.pt", kind, rng, count=12 if split == "train" else 8, width=width)
-    config = {"task": task, "splits": splits, "embedding": {"seed": 0}, "finetune": dict(SETTINGS), **(extra or {})}
+    config = {"task": task, "splits": splits, "embedding": {"seed": 0, "poolings": ["mean_atoms", "mean_residues"]},
+              "finetune": dict(SETTINGS), **(extra or {})}
     if kind == "multiclass":
         config.update(train_split="train", valid_split="valid", test_splits=splits[2:], label_count=width)
     if task == "lba":
@@ -263,6 +264,58 @@ def test_cli_overrides_win_and_are_recorded(monkeypatch, tmp_path, outputs, enco
     saved = json.loads((out / "config.json").read_text())["finetune"]
     assert (saved["epochs"], saved["lr_encoder"], saved["patience"]) == (2, 0.02, 5)
     assert sum(line.startswith("epoch ") for line in (out / "run.log").read_text().splitlines()) == 2
+
+
+def test_hyperparameter_overrides_win_and_are_recorded(monkeypatch, tmp_path, outputs, encoder_calls):
+    stand_in_task(monkeypatch, tmp_path, "fold", "multiclass")
+    out, = finetune.run(finetune_args("fold", outputs, epochs=1, lr_head=0.02, weight_decay=0.05, mlp_dropout=0.3,
+                                      pooling="mean_residues"))
+    saved = json.loads((out / "config.json").read_text())["finetune"]
+    assert (saved["lr_head"], saved["weight_decay"], saved["mlp_dropout"], saved["pooling"]) == (
+        0.02, 0.05, 0.3, "mean_residues")
+    assert saved["lr_encoder"] == SETTINGS["lr_encoder"]  # untouched settings keep the task.yaml value
+    assert out.parent.name.endswith("mean_residues")  # the pooling is part of the results directory name
+    assert json.loads((out / "metrics.json").read_text())["pooling"] == "mean_residues"
+
+
+def test_override_values_are_validated():
+    base = {"lr_encoder": None, "epochs": None, "patience": None}
+    for name, value in (("lr_head", 0), ("lr_head", -1e-3), ("weight_decay", -0.1), ("mlp_dropout", 1.0),
+                        ("mlp_dropout", -0.1), ("pooling", "max")):
+        with pytest.raises(ValueError, match=name):
+            finetune.resolve_settings(SETTINGS, random_init=False, overrides={**base, name: value})
+    ok = finetune.resolve_settings(SETTINGS, random_init=False,
+                                   overrides={"weight_decay": 0.0, "mlp_dropout": 0.0, "lr_head": 1e-4})
+    assert (ok["weight_decay"], ok["mlp_dropout"], ok["lr_head"]) == (0.0, 0.0, 1e-4)
+    with pytest.raises(ValueError, match="not available for this task"):
+        finetune.resolve_settings(SETTINGS, random_init=False, overrides={"pooling": "ca"},
+                                  allowed_poolings=["mean_atoms"])
+    with pytest.raises(ValueError, match="not one of"):
+        finetune.resolve_settings(SETTINGS, random_init=False, overrides={"warmup": 3})
+
+
+def test_override_cli_refusals(capsys):
+    parser = finetune.build_parser()
+    for argv, text in ((["--lr-head", "0"], "--lr-head must be positive"),
+                       (["--weight-decay", "-1"], "--weight-decay must be >= 0"),
+                       (["--mlp-dropout", "1"], "--mlp-dropout must be in [0, 1)")):
+        args = parser.parse_args(["--task", "ec", "--model", "x", *argv])
+        with pytest.raises(SystemExit):
+            finetune.check_args(parser, args)
+        assert text in capsys.readouterr().err
+    with pytest.raises(SystemExit):  # an unknown pooling is refused by the parser itself
+        parser.parse_args(["--task", "ec", "--model", "x", "--pooling", "max"])
+    assert "--pooling" in capsys.readouterr().err
+
+
+def test_ds_run_treats_overrides_as_other_settings():
+    from downstream.finetune_settings import same_settings
+
+    plain = finetune.resolve_settings(SETTINGS, random_init=False)
+    for name, value in (("lr_head", 3e-4), ("weight_decay", 1e-2), ("mlp_dropout", 0.5), ("pooling", "mean_residues")):
+        changed = finetune.resolve_settings(SETTINGS, random_init=False, overrides={name: value})
+        assert not same_settings(changed, plain)
+    assert same_settings(plain, finetune.resolve_settings(SETTINGS, random_init=False, overrides={"lr_head": None}))
 
 
 # ---------------------------------------------------------------------------------------------------------

@@ -240,6 +240,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threads", type=int, default=8, help="CPU threads for torch; the machine is shared with training runs")
     parser.add_argument("--lr-encoder", type=float, default=None,
                         help="override the encoder LR of the arm (finetune.lr_encoder or lr_encoder_random_init)")
+    parser.add_argument("--lr-head", type=float, default=None, help="override finetune.lr_head")
+    parser.add_argument("--weight-decay", type=float, default=None, help="override finetune.weight_decay (AdamW, >= 0)")
+    parser.add_argument("--mlp-dropout", type=float, default=None, help="override finetune.mlp_dropout, in [0, 1)")
+    parser.add_argument("--pooling", default=None, choices=mind_encoder.ALL_POOLINGS,
+                        help="override finetune.pooling (the task's embedding.poolings limit the choice)")
     parser.add_argument("--epochs", type=int, default=None, help="override finetune.epochs")
     parser.add_argument("--patience", type=int, default=None, help="override finetune.patience (task.yaml: null)")
     return parser
@@ -248,10 +253,14 @@ def build_parser() -> argparse.ArgumentParser:
 def check_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.threads < 1:
         parser.error("--threads must be at least 1")
-    for name in OVERRIDES:
+    for name in ("lr_encoder", "lr_head", "epochs", "patience"):
         value = getattr(args, name)
         if value is not None and value <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.weight_decay is not None and args.weight_decay < 0:
+        parser.error("--weight-decay must be >= 0")
+    if args.mlp_dropout is not None and not 0 <= args.mlp_dropout < 1:
+        parser.error("--mlp-dropout must be in [0, 1)")
     if args.task != "lba" and args.split_tag:
         parser.error("--split-tag applies to the lba task only")
     if args.seeds is not None and len(set(args.seeds)) != len(args.seeds):
@@ -265,7 +274,8 @@ def run(args: argparse.Namespace) -> list:
     kind = task.KIND
     config = task.load_task_config(task.TASK_YAML, data_root=args.data_root)
     settings = resolve_settings(config["finetune"], random_init=args.random_init,
-                                overrides={name: getattr(args, name) for name in OVERRIDES})
+                                overrides={name: getattr(args, name) for name in OVERRIDES},
+                                allowed_poolings=config["embedding"]["poolings"])
     device = torch.device(args.device)
     pooling = settings["pooling"]
     eval_seed = int(config["embedding"]["seed"])
