@@ -10,6 +10,7 @@ for MIND encoders.
 | `fold` | multi-class, 1,195 SCOPe 1.75 folds | GearNet Fold3D (Zenodo 7593591, fold3d.zip, CC BY 4.0), 12,312 / 736 / 718 / 1,272 / 1,254 (train / valid / test_fold / test_family / test_superfamily) | accuracy, one per test split |
 | `reaction` | multi-class, 384 EC numbers | IEConv ProtFunct (github.com/phermosilla/IEConv_proteins, Google Drive archive), 29,215 / 2,562 / 5,651 | accuracy |
 | `lba` | regression, pK | ATOM3D LBA (PDBbind 2019 refined, 4,463 complexes), 30 % split 3507/466/490, 60 % split 3563/448/452 | RMSE (lower) |
+| `rsr` | ranking regression, RMSD of 3D RNA models | ATOM3D RNA Structure Ranking (Zenodo 4961085, candidates split by time): FARFAR2-Puzzles models of 21 RNA-Puzzles, 12,479 / 4,000 / 4,000 models (train / val / test; 13 / 4 / 4 puzzles) | mean per-puzzle Spearman (higher) |
 | `mn_bbbp` ... `mn_qm8` (14 MoleculeNet tasks, QM9 excluded) | `multilabel_masked` (BBBP, BACE, ClinTox, Tox21, ToxCast, SIDER, HIV, PCBA, MUV) or `multitarget_regression` (ESOL, FreeSolv, Lipo, QM7, QM8) | Uni-Mol LMDB release, scaffold split as shipped; first conformer, hydrogens dropped, no cropping | ROC-AUC + PRC-AUC (classification); RMSE + MAE (regression; primary: RMSE for ESOL/FreeSolv/Lipo, MAE for QM7/QM8) |
 | `npass_ptp1b`, `npass_ache`, `npass_cox2`, `npass_hivrt`, `npass_tyrosinase`, `npass_cyp3a4`, `npass_mrp4`, `npass_cox1` (8 NPASS tasks) | `multitarget_regression`, one target | NaFM data release (Figshare 10.6084/m9.figshare.28980254.v1, `regression_data.csv`, CC BY 4.0), 612 / 341 / 189 (paper: 190) / 186 / 186 / 178 / 177 / 140 molecules; random 80/10/10 split of the NaFM reference code (seed 0); RDKit ETKDGv3 + MMFF94 conformer, hydrogens dropped | RMSE (primary) + MAE |
 
@@ -62,7 +63,7 @@ Training-like steps (embed, probe, fine-tune) are user-run through Make targets.
 `downstream.finetune` trains encoder and head together for every task kind, with the probe's loss, validation score and
 evaluation function (`downstream.probe.evaluate_task`), so a `finetune` row in the results ledger carries the same
 metrics as the probe rows of that task (EC/GO Fmax per identity cutoff and AUPRs, GO's IC-binned AUPR, Fold/Reaction
-accuracy per test split, LBA RMSE/Pearson/Spearman, MoleculeNet ROC-AUC/PRC-AUC or RMSE/MAE with the QC subsets).
+accuracy per test split, LBA RMSE/Pearson/Spearman, RSR per-puzzle and global Spearman/Pearson, MoleculeNet ROC-AUC/PRC-AUC or RMSE/MAE with the QC subsets).
 MoleculeNet classification uses BCE over the labelled cells only (NaN = missing); MoleculeNet regression standardizes
 the targets with train statistics and reports errors in the original units. Settings come from the `finetune` block of
 each `task.yaml` (`downstream/finetune_settings.py` resolves them): AdamW, `lr_encoder` (pretrained encoder) below
@@ -247,6 +248,50 @@ fine-tuning is `joint` only.
   (`-RMSE` for LBA), so one early-stopping rule covers EC and LBA.
 
 
+## RSR (ATOM3D RNA structure ranking)
+
+Target: all-atom RMSD (Angstrom) of a candidate 3D model of an RNA to its experimental structure; the task ranks the
+candidates of a puzzle. Source: Zenodo record 4961085, `RSR-candidates-split-by-time.tar.gz` (1,269,970,448 bytes, md5
+pinned in `downstream/tasks/rsr/task.yaml` from the record API, plus the record's README, LICENSE_SA and split-index
+files). Zenodo gives md5 only: `download` records the sha256 of every file in `provenance.json` on the first run and
+refuses a later run whose file differs. The LMDB layout is read like LBA's (gzip + JSON or msgpack, `to_dict(orient="split")`
+frames, no `atom3d` dependency, pickle refused), but the archive's folder names are not documented, so the three LMDBs
+are located by name (`train`, `val`, `test` holding `data.mdb`) and exactly one set must exist.
+
+- Split: ATOM3D's temporal split by puzzle (the models of a puzzle never cross splits). `expected_counts` 12,479 / 4,000 /
+  4,000 are the line counts of the record's index files; `download` and `process` compare them with the LMDB
+  `num_examples` and stop on a difference. 13 x 1000 would be 13,000 training models: some training puzzle(s) have fewer
+  than 1000, per-puzzle counts are in `qc_<split>.json`. The paper text calls the validation puzzles "14-17 (excluding
+  16)" (three), the record has four (4,000 models); processing follows the record and `expected_puzzles` (13 / 4 / 4).
+- Graph: the RNA training adapter's own 23-slot routine (`downstream/common/rna_graph.py`, a parallel of the protein
+  `graph_builder`): hydrogens, the listed placeholder atoms and non-blank/`A` alternate locations are skipped, atom names go through the adapter's
+  legacy aliases, residues must be A/C/G/U. Per model, counted in `qc_<split>.tsv`: nucleotides with an incomplete
+  backbone (the 5' end has no phosphate; kept, a quarantined block as in pretraining), missing base atoms (not repaired:
+  the base slots take the real atoms in priority order and the rest become V at C1', so atoms behind a gap move to an
+  earlier slot, as in pretraining), removed unexpected atoms, dropped terminal OP3. A model that cannot be converted
+  (unsupported residue, duplicated atom names, bad RMSD, no/mixed puzzle, too few nucleotides) is a counted failure with its
+  reason; above `qc.max_failed_structure_fraction`, `qc.max_incomplete_base_fraction`, a puzzle count other than expected or
+  a puzzle with no usable model the split is not written and the command exits 1. Puzzle overlap between processed
+  splits exits 1. RNA graphs have no random edges, so embeddings do not depend on the seed.
+- Ids are `<puzzle>/<LMDB index>`; the puzzle is the first element of the LMDB `id` (the text of a tuple `(puzzle, model)`, e.g. `rna_puzzle_14_bound`; the atoms' `ensemble` column is the model's file name, not the puzzle). The raw
+  LMDB id is kept in the QC table and the processed file.
+- Metrics (`downstream/common/metrics.py: evaluate_ranking_regression`): per puzzle Spearman and Pearson, averaged over the
+  puzzles (`mean_per_puzzle`), and pooled over all models (`global`); `mean_per_puzzle` also has the mean top-1 loss
+  (true RMSD of the model ranked first minus the best true RMSD of its puzzle; ATOM3D does not report it) and the
+  per-puzzle lists; `global` also RMSE and MAE. A puzzle with an undefined correlation makes that mean `null` with the
+  reason, never a mean over the rest. The ledger cells are `(test, mean_per_puzzle|global, spearman_rho|pearson_r)`, the
+  same names as the literature file.
+- Probe: the head reads the pooled embedding (`mean_atoms`), MSE on the RMSD standardized with train statistics (scores
+  are mapped back to Angstrom), epoch selection by the validation mean per-puzzle Spearman. Fine-tuning
+  (`downstream.finetune`) uses the same loss, selection and metrics; `finetune.lr_encoder` is 1e-4 (small-task recipe), the
+  random-init arm 3e-4. Embedding needs a checkpoint trained with `geometry_neutral_virtual_slots` for RNA (`rna: true`);
+  `ds-run` runs `rsr` only for models whose card lists the `rna` domain.
+- Commands: `make ds-download TASK=rsr`, `make ds-validate TASK=rsr` (converts 20 models per split, writes nothing),
+  `make ds-process TASK=rsr WORKERS=8`; embed / probe / fine-tune take `--task rsr`.
+- Read on the real data: json serialization, `scores.rms`, LMDB counts equal the index files; 21 puzzles (13 / 4 / 4;
+  `rna_puzzle_2_hack` has 479 models, all others 1000). Rosetta placeholder atoms RPA1/RPA2/RPB1/RPB2 (empty element, 0-7
+  per model, no RNA atoms) are removed and counted as `placeholder_atoms_removed`; no other unknown atoms occur.
+
 ## GO (go_mf, go_bp, go_cc)
 
 One task family, three tasks, one processed file per split holding all three label matrices
@@ -391,8 +436,8 @@ A checkpoint path is first snapshotted as NAME (a NAME that already names anothe
 store or in the ledger, stops the run). Then one embedding job per task on the GPUs (at most PER_GPU per GPU; splits
 already embedded are skipped), then, after every embedding job has ended, the probes on CPU (SEEDS; seeds already
 done are skipped), `ledger add`, and a table of the primary metric per task and head plus the missing required
-cells. `all` is EC, GO, Fold, LBA (identity30 and identity60, joint), the 14 MoleculeNet and the 8 NPASS tasks (`TASKS=molnet`, `TASKS=npass`);
-Reaction only when named. A task outside the model's pretraining domains (protein needs `pdb`, MoleculeNet and NPASS `unimol`) is skipped
+cells. `all` is EC, GO, Fold, LBA (identity30 and identity60, joint), RSR, the 14 MoleculeNet and the 8 NPASS tasks (`TASKS=molnet`, `TASKS=npass`);
+Reaction only when named. A task outside the model's pretraining domains (protein needs `pdb`, RSR `rna`, MoleculeNet and NPASS `unimol`) is skipped
 and listed under `all`, refused when named. A failing job is reported with its log and the others continue; the
 run ends with the list of what is missing and exit code 1. `PLAN=1` prints what would run (and recorded embedding
 times of other models, when there are any) and writes nothing. Logs and `summary.md` go to

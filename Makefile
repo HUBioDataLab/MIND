@@ -308,6 +308,8 @@ eval-counterfactual:
 #   make ds-process TASK=ec WORKERS=16
 #   make ds-download TASK=lba           (1.05 GiB for both split tags, 0.53 GiB each; md5 and size pinned)
 #   make ds-process TASK=lba [TAGS="identity30 identity60"]
+#   make ds-download TASK=rsr           (1.27 GiB ATOM3D RNA structure ranking; md5 and size pinned, sha256 recorded on the first run)
+#   make ds-validate TASK=rsr           ds-process TASK=rsr WORKERS=8      (validate converts 20 models per split, read-only)
 #   make ds-download TASK=go_mf         (1.58 GiB; the three GO branches share one download and one processed file;
 #   make ds-validate TASK=go_mf          ds-process TASK=go_mf WORKERS=16 builds all of them; validate is read-only)
 #   make ds-download TASK=fold          (0.62 GiB; GearNet Fold3D, Zenodo 7593591; md5 and size pinned)
@@ -639,6 +641,7 @@ help:
 	@echo "    LBA: make ds-download TASK=lba / ds-process TASK=lba"
 	@echo "         make ds-embed TASK=lba MODEL=<snapshot> GPU=<id> [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
 	@echo "         make ds-probe TASK=lba MODEL_ID=<id> HEAD=mlp [SPLIT_TAG=identity30] [REPRESENTATION=joint]"
+	@echo "    RSR: make ds-download|ds-validate|ds-process TASK=rsr WORKERS=8   (RNA; then ds-embed/ds-probe/ds-finetune TASK=rsr)"
 	@echo "    make stop GPU=6                      Kill training on GPU 6"
 	@echo "    make status                          Show all processes + GPUs"
 	@echo "    make logs                            List recent log files"

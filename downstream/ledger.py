@@ -41,7 +41,8 @@ ENV_VAR = "MIND_RESULTS_ROOT"
 CATALOG_PATH = Path(__file__).with_name("ledger_catalog.yaml")
 LEDGER_FILES = ("measurements", "models", "annotations", "ingests")
 STATUSES = ("valid", "superseded", "invalid", "caveat", "smoke")
-DOWNSTREAM_KINDS = ("multilabel", "multiclass", "regression", "multilabel_masked", "multitarget_regression")
+DOWNSTREAM_KINDS = ("multilabel", "multiclass", "regression", "multilabel_masked", "multitarget_regression",
+                    "ranking_regression")
 PROBE_HEADS = {"linear_probe": "linear", "mlp_probe": "mlp", "sklearn_tuned": "sklearn_tuned"}
 # Models without a MIND checkpoint card: a Hugging Face baseline and the fingerprint baseline (downstream.baselines.ecfp).
 UNTRAINED_KINDS = ("hf_baseline", "fingerprint_baseline")
@@ -51,16 +52,18 @@ _TOP_KEYS = {"task", "kind", "model_id", "protocol", "pooling", "seed", "best_ep
 # Count / operating-point fields: kept as row context, never as metric rows.
 _CONTEXT_KEYS = {"num_proteins", "num_samples", "molecules", "num_classes_present", "macro_aupr_num_terms",
                  "macro_aupr_num_terms_skipped", "target_mean", "target_std", "num_tasks", "num_tasks_evaluated",
-                 "num_tasks_skipped", "num_targets", "fmax_threshold"}
+                 "num_tasks_skipped", "num_targets", "fmax_threshold", "num_puzzles"}
 _SAMPLE_KEYS = ("num_proteins", "num_samples", "molecules")
 _LIST_KEYS = {"per_task", "per_task_prc_auc", "skipped_task_indices", "rmse_per_target", "mae_per_target",
-              "num_labeled_per_target"}
+              "num_labeled_per_target", "puzzles", "per_puzzle_num_samples", "per_puzzle_spearman_rho",
+              "per_puzzle_pearson_r", "per_puzzle_top1_loss"}
 # Metrics a block of each kind always has; an undefined block (empty subset, single-class subset) gets one
 # row per metric with the reason, so the report can say UNDEFINED instead of leaving a hole.
 _KIND_METRICS = {"multilabel": ("fmax", "pair_aupr", "top1_accuracy", "macro_aupr"),
                  "multiclass": ("accuracy", "balanced_accuracy"),
                  "regression": ("rmse", "mae", "pearson_r", "spearman_rho"),
-                 "multilabel_masked": ("roc_auc", "prc_auc"), "multitarget_regression": ("rmse", "mae")}
+                 "multilabel_masked": ("roc_auc", "prc_auc"), "multitarget_regression": ("rmse", "mae"),
+                 "ranking_regression": ("spearman_rho", "pearson_r")}
 
 
 class LedgerError(RuntimeError):
@@ -334,10 +337,15 @@ def _block_rows(block, kind: str, where: str) -> tuple[list, Optional[int], dict
 
 
 def _eval_blocks(metrics: dict, kind: str, where: str) -> list:
-    blocks = [("val", "all", metrics["val"])]
     test = metrics["test"]
     if not isinstance(test, dict):
         raise ValueError(f"{where}: 'test' must be a dict")
+    if kind == "ranking_regression":  # both splits hold one block per subset: mean_per_puzzle and global
+        if not isinstance(metrics["val"], dict):
+            raise ValueError(f"{where}: 'val' must be a dict")
+        return ([("val", name, block) for name, block in metrics["val"].items()]
+                + [("test", name, block) for name, block in test.items()])
+    blocks = [("val", "all", metrics["val"])]
     if kind == "multiclass":
         blocks += [(name, "all", block) for name, block in test.items()]
     elif kind in ("multilabel_masked", "multitarget_regression"):

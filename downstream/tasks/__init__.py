@@ -4,7 +4,9 @@ Every task module exposes the same surface used by the ``downstream.*`` CLIs:
 
 ``TASK_YAML``      path of the checked-in task config
 ``KIND``           ``multilabel`` (EC, GO-MF/BP/CC), ``multiclass`` (Fold, Reaction), ``regression`` (LBA),
-                   ``multilabel_masked`` (MoleculeNet classification) or ``multitarget_regression`` (MoleculeNet regression, NPASS)
+                   ``multilabel_masked`` (MoleculeNet classification), ``multitarget_regression`` (MoleculeNet regression, NPASS) or
+                   ``ranking_regression`` (RSR: one RMSD per model, scored by per-puzzle correlations; the module also
+                   exposes ``group_labels(chains)``)
 ``load_task_config(path, *, data_root)``
 ``processed_dir(config, ...)``
 ``ProcessedSplit``  processed split loader
@@ -24,14 +26,14 @@ NPASS_TASKS = (
 )
 # Tasks whose input is a SMILES string with a generated conformer (the fingerprint baselines cover exactly these).
 SMILES_TASKS = MOLNET_TASKS + NPASS_TASKS
-TASKS = ("ec", "lba", "go_mf", "go_bp", "go_cc", "fold", "reaction") + SMILES_TASKS
+TASKS = ("ec", "lba", "go_mf", "go_bp", "go_cc", "fold", "reaction") + SMILES_TASKS + ("rsr",)
 # Tasks whose module is not ``downstream.tasks.<name>.dataset``: the three GO branches share one family.
 TASK_MODULES = {
     "go_mf": "downstream.tasks.go.mf",
     "go_bp": "downstream.tasks.go.bp",
     "go_cc": "downstream.tasks.go.cc",
 }
-KINDS = ("multilabel", "multiclass", "regression", "multilabel_masked", "multitarget_regression")
+KINDS = ("multilabel", "multiclass", "regression", "multilabel_masked", "multitarget_regression", "ranking_regression")
 
 
 def load_task(name: str) -> ModuleType:
@@ -53,4 +55,6 @@ def load_task(name: str) -> ModuleType:
             raise AttributeError(f"task {name!r} does not expose {attribute!r}")
     if module.KIND not in KINDS:
         raise ValueError(f"task {name!r} has unknown kind {module.KIND!r}")
+    if module.KIND == "ranking_regression" and not hasattr(module, "group_labels"):
+        raise AttributeError(f"ranking task {name!r} does not expose 'group_labels'")
     return module

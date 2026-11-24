@@ -13,6 +13,7 @@ metrics:
   pair_aupr: {direction: higher, unit: fraction}
   macro_aupr: {direction: higher, unit: fraction}
   top1_accuracy: {direction: higher, unit: fraction}
+  top1_loss: {direction: lower, unit: task}   # RSR extra: true RMSD of the model ranked first minus the best; not in ATOM3D
   accuracy: {direction: higher, unit: fraction}
   balanced_accuracy: {direction: higher, unit: fraction}
   rmse: {direction: lower, unit: task}
@@ -121,6 +122,19 @@ tasks:
       - {eval_split: test, subset: all, metric: rmse, source: "ATOM3D T5/T8; ProNet T4"}
       - {eval_split: test, subset: all, metric: pearson_r, source: "ATOM3D T5/T8; ProNet T4"}
       - {eval_split: test, subset: all, metric: spearman_rho, source: "ATOM3D T5/T8; ProNet T4"}
+  rsr:
+    family: rna_structure
+    kind: ranking_regression
+    target_unit: Angstrom
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: test, subset: mean_per_puzzle, metric: spearman_rho}
+    required:
+      # subset mean_per_puzzle = mean of the per-puzzle correlations; global = all test models pooled
+      - {eval_split: test, subset: mean_per_puzzle, metric: spearman_rho, source: "ATOM3D T6/T8"}
+      - {eval_split: test, subset: global, metric: spearman_rho, source: "ATOM3D T6/T8"}
+      - {eval_split: test, subset: mean_per_puzzle, metric: pearson_r, source: "ATOM3D T8"}
+      - {eval_split: test, subset: global, metric: pearson_r, source: "ATOM3D T8"}
   mn_bbbp: &mn_cls
     family: molecule_property
     kind: multilabel_masked

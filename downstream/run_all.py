@@ -32,9 +32,9 @@ itself detaches and returns at once, so ds-run cannot wait for it; it refuses to
 
 ``--model <snapshot>.random_init`` is the same as ``--model <snapshot> --random-init``.
 
-``all`` = EC, GO-MF/BP/CC, Fold, LBA (the catalog's required split tags, joint representation) and the 14
+``all`` = EC, GO-MF/BP/CC, Fold, LBA (the catalog's required split tags, joint representation), RSR and the 14
 MoleculeNet tasks. Reaction has no processed data and runs only when named. A task whose domain the
-model was not pretrained on (card ``domains``; protein needs ``pdb``, MoleculeNet needs ``unimol``) is skipped and
+model was not pretrained on (card ``domains``; protein needs ``pdb``, RSR ``rna``, MoleculeNet ``unimol``) is skipped and
 listed under ``all`` and refused when named explicitly.
 
 A failing job (non-zero exit, or exit 0 without its output files) is reported with its log and the others go on;
@@ -70,10 +70,10 @@ from downstream.tasks import MOLNET_TASKS, NPASS_TASKS, TASKS, load_task
 HEADS = ("linear", "mlp")  # downstream.common.heads.HEADS (not imported: it pulls torch into the plan step)
 FINETUNE = "finetune"  # the --heads entry that selects end-to-end fine-tuning
 PROTOCOL_CHOICES = HEADS + (FINETUNE,)
-ALL_TASKS = ("ec", "go_mf", "go_bp", "go_cc", "fold", "lba") + MOLNET_TASKS + NPASS_TASKS
+ALL_TASKS = ("ec", "go_mf", "go_bp", "go_cc", "fold", "lba", "rsr") + MOLNET_TASKS + NPASS_TASKS
 # Pretraining domains (card "domains", the enabled multi_domain datasets) a task's input needs. The LBA joint graph
 # is a protein graph (ligand atoms with pos_code sm).
-MODALITY_DOMAINS = {"protein": ("pdb",), "complex": ("pdb",), "small_molecule": ("unimol",)}
+MODALITY_DOMAINS = {"protein": ("pdb",), "complex": ("pdb",), "small_molecule": ("unimol",), "rna": ("rna",)}
 HF_PREFIXES = ("esm2_", "saprot_")
 
 

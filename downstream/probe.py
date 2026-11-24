@@ -14,6 +14,9 @@ the epoch with the best validation metric is kept (early stopping on
 ``lba`` single-value regression, MSE (or Huber) loss, validation **RMSE
         minimized** (lower is better), test reported as RMSE / Pearson r /
         Spearman rho.
+``rsr`` ranking regression (ATOM3D RNA Structure Ranking): one RMSD per model, MSE (or Huber) loss on RMSD standardized
+        with train statistics, validation = mean per-puzzle Spearman maximized, test = mean per-puzzle and global
+        Spearman / Pearson (+ mean top-1 loss, RMSE); the puzzle of a model is read from its id.
 ``mn_*`` MoleculeNet. ``multilabel_masked`` (classification, NaN = missing label): masked BCE loss, validation
         mean ROC-AUC maximized, test ROC-AUC + PRC-AUC. ``multitarget_regression``: masked MSE on targets
         standardized with train statistics, validation = the task's primary error (RMSE or MAE, original units)
@@ -32,7 +35,7 @@ import argparse
 import copy
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -40,8 +43,8 @@ from torch import nn
 
 from downstream.common.heads import HEADS, build_head
 from downstream.common.metrics import (
-    accuracy, evaluate, evaluate_multiclass, evaluate_multitask_classification, evaluate_regression,
-    multitarget_regression_errors, multitask_roc_auc, protein_fmax, rmse, train_term_ic,
+    accuracy, evaluate, evaluate_multiclass, evaluate_multitask_classification, evaluate_ranking_regression,
+    evaluate_regression, multitarget_regression_errors, multitask_roc_auc, protein_fmax, rmse, train_term_ic,
 )
 from downstream.common.registry import embeddings_path, new_results_dir, run_record, write_text_atomic
 from downstream.tasks import KINDS, TASKS, load_task
@@ -59,6 +62,8 @@ def load_embeddings(task: str, model_id: str, split: str, pooling: str, root=Non
 
 
 MASKED_KINDS = ("multilabel_masked", "multitarget_regression")
+SCALED_KINDS = ("multitarget_regression", "ranking_regression")  # heads fitted on train-standardized targets
+SINGLE_VALUE_KINDS = ("regression", "ranking_regression")        # one output per sample
 FEATURE_SCALINGS = ("standardize", "none")
 
 
@@ -139,10 +144,11 @@ def output_scores(output: torch.Tensor, *, kind: str, scale=None) -> np.ndarray:
         return torch.sigmoid(output).numpy()
     if kind == "multiclass":
         return torch.softmax(output, dim=-1).numpy()
-    if kind == "multitarget_regression":
+    if kind in SCALED_KINDS:
         if scale is None:
-            raise ValueError("a multitarget_regression head predicts standardized targets; pass scale=(mean, std)")
-        return output.numpy() * scale[1] + scale[0]
+            raise ValueError(f"a {kind} head predicts standardized targets; pass scale=(mean, std)")
+        values = output.squeeze(-1).numpy() if kind == "ranking_regression" else output.numpy()
+        return values * scale[1] + scale[0]
     if kind != "regression":
         raise ValueError(f"unknown task kind {kind!r}; choose from {KINDS}")
     return output.squeeze(-1).numpy()
@@ -160,18 +166,22 @@ def output_dim(kind: str, num_classes, train_labels: np.ndarray) -> int:
         if not num_classes:
             raise ValueError("a multiclass head needs num_classes (task.yaml label_count)")
         return int(num_classes)
-    return 1 if kind == "regression" else int(train_labels.shape[1])
+    return 1 if kind in SINGLE_VALUE_KINDS else int(train_labels.shape[1])
 
 
 def evaluate_task(kind: str, config: dict, *, train_labels: np.ndarray, val_labels: np.ndarray,
                   val_scores: np.ndarray, test_labels: Dict[str, np.ndarray], test_scores: Dict[str, np.ndarray],
-                  subsets: dict) -> tuple:
+                  subsets: dict, val_groups: Optional[np.ndarray] = None,
+                  test_groups: Optional[Dict[str, np.ndarray]] = None) -> tuple:
     """``(metrics_val, metrics_test, headline)`` of one trained model; shared by the probe and fine-tuning.
 
     ``test_labels`` / ``test_scores`` map each test split name to its arrays, the primary test split first (only
     multiclass tasks have more than one). ``subsets`` are the primary test split's row masks (identity cutoffs or
-    QC flags); empty for kinds without subsets.
+    QC flags); empty for kinds without subsets. ``val_groups`` / ``test_groups`` (per-sample group labels, by test split
+    name) are required by ``ranking_regression`` and refused elsewhere.
     """
+    if kind != "ranking_regression" and (val_groups is not None or test_groups is not None):
+        raise ValueError(f"group labels apply to ranking_regression tasks only, not {kind}")
     if list(test_scores) != list(test_labels) or not test_labels:
         raise ValueError(f"test splits of labels {list(test_labels)} and scores {list(test_scores)} differ")
     if kind != "multiclass" and len(test_labels) != 1:
@@ -200,6 +210,16 @@ def evaluate_task(kind: str, config: dict, *, train_labels: np.ndarray, val_labe
                     if kind == "multilabel_masked" else
                     f"val rmse {metrics_val['rmse']:.4f} mae {metrics_val['mae']:.4f} "
                     f"test rmse {metrics_test['all']['rmse']:.4f} mae {metrics_test['all']['mae']:.4f}")
+    elif kind == "ranking_regression":
+        if val_groups is None or test_groups is None or test_split not in test_groups:
+            raise ValueError("ranking_regression evaluation needs val_groups and test_groups for the test split")
+        metrics_val = evaluate_ranking_regression(val_labels.reshape(-1), val_scores, val_groups)
+        metrics_test = evaluate_ranking_regression(labels.reshape(-1), scores, test_groups[test_split])
+        mean_block, pooled = metrics_test["mean_per_puzzle"], metrics_test["global"]
+        headline = (f"val mean spearman {_format_optional(metrics_val['mean_per_puzzle']['spearman_rho'])} test mean "
+                    f"spearman {_format_optional(mean_block['spearman_rho'])} global spearman "
+                    f"{_format_optional(pooled['spearman_rho'])} mean pearson {_format_optional(mean_block['pearson_r'])} "
+                    f"global pearson {_format_optional(pooled['pearson_r'])} top1 loss {mean_block['top1_loss']:.3f}")
     elif kind == "regression":
         metrics_val = evaluate_regression(val_labels.reshape(-1), val_scores)
         metrics_test = {"all": evaluate_regression(labels.reshape(-1), scores)}
@@ -236,7 +256,7 @@ def build_loss(kind: str, settings: dict) -> nn.Module:
         return MaskedBCEWithLogitsLoss()
     if kind == "multitarget_regression":
         return MaskedMSELoss()
-    if kind != "regression":
+    if kind not in SINGLE_VALUE_KINDS:
         raise ValueError(f"unknown task kind {kind!r}; choose from {KINDS}")
     loss = settings.get("loss", "mse")
     if loss == "mse":
@@ -246,12 +266,20 @@ def build_loss(kind: str, settings: dict) -> nn.Module:
     raise ValueError(f"unknown regression loss {loss!r}; choose from mse, huber")
 
 
-def validation_score(kind: str, targets: np.ndarray, predictions: np.ndarray, metric: str = None) -> float:
+def validation_score(kind: str, targets: np.ndarray, predictions: np.ndarray, metric: str = None,
+                     groups: Optional[np.ndarray] = None) -> float:
     """Higher is better, so one early-stopping rule covers both task kinds.
 
     EC maximizes Fmax directly; LBA minimizes RMSE, so the negative RMSE is
-    returned. Never compare these two numbers across tasks.
+    returned. Never compare these two numbers across tasks. ``ranking_regression`` returns the mean per-puzzle
+    Spearman (needs ``groups``); an undefined one (a puzzle with constant predictions) is ``-inf``, so such an epoch
+    is never selected and a run with no defined epoch fails loudly.
     """
+    if kind == "ranking_regression":
+        if groups is None:
+            raise ValueError("ranking_regression validation needs the group (puzzle) of every sample")
+        value = evaluate_ranking_regression(targets.reshape(-1), predictions.reshape(-1), groups)["mean_per_puzzle"]
+        return -float("inf") if value["spearman_rho"] is None else float(value["spearman_rho"])
     if kind == "multilabel":
         return protein_fmax(targets, predictions)["fmax"]
     if kind == "multiclass":
@@ -272,16 +300,17 @@ def validation_label(kind: str, score: float, metric: str = None) -> tuple:
     return (("val_fmax", score) if kind == "multilabel" else
             ("val_accuracy", score) if kind == "multiclass" else
             ("val_roc_auc", score) if kind == "multilabel_masked" else
+            ("val_mean_spearman", score) if kind == "ranking_regression" else
             (f"val_{metric}", -score) if kind == "multitarget_regression" else ("val_rmse", -score))
 
 
 def train_probe(train_x, train_y, val_x, val_y, *, head_kind, settings, seed, log, kind="multilabel",
-                num_classes=None, scale=None, metric=None):
+                num_classes=None, scale=None, metric=None, val_groups=None):
     torch.manual_seed(seed)
     fit_y = train_y
-    if kind == "multitarget_regression":
+    if kind in SCALED_KINDS:
         if scale is None:
-            raise ValueError("a multitarget_regression probe needs scale=(mean, std) of the train targets")
+            raise ValueError(f"a {kind} probe needs scale=(mean, std) of the train targets")
         fit_y = (train_y - torch.from_numpy(scale[0])) / torch.from_numpy(scale[1])  # NaN stays NaN (missing)
     if kind == "multiclass" and not num_classes:
         raise ValueError("a multiclass probe needs num_classes (task.yaml label_count)")
@@ -301,12 +330,13 @@ def train_probe(train_x, train_y, val_x, val_y, *, head_kind, settings, seed, lo
             optimizer.zero_grad()
             output = head(train_x[rows])
             target = fit_y[rows]
-            loss = (loss_fn(output.squeeze(-1), target.reshape(-1)) if kind == "regression"
+            loss = (loss_fn(output.squeeze(-1), target.reshape(-1)) if kind in SINGLE_VALUE_KINDS
                     else loss_fn(output, target))
             loss.backward()
             optimizer.step()
             total += float(loss) * len(rows)
-        score = validation_score(kind, val_y.numpy(), predict(head, val_x, kind=kind, scale=scale), metric)
+        score = validation_score(kind, val_y.numpy(), predict(head, val_x, kind=kind, scale=scale), metric,
+                                 groups=val_groups)
         label, shown = validation_label(kind, score, metric)
         log(f"epoch {epoch} train_loss {total / len(order):.5f} {label} {shown:.4f}")
         if score > best["score"]:
@@ -377,7 +407,9 @@ def main(argv=None) -> int:
     tensors = {name: (torch.from_numpy((x - mean) / std), torch.from_numpy(y))
                for name, (_, y, x, _) in data.items()}
     subsets = task.test_subsets(config, data[test_split][0]) if kind in ("multilabel", *MASKED_KINDS) else {}
-    scale = target_scale(data[train_split][1]) if kind == "multitarget_regression" else None
+    scale = target_scale(data[train_split][1]) if kind in SCALED_KINDS else None
+    groups = ({name: task.group_labels(data[name][0]) for name in (val_split, *test_splits)}
+              if kind == "ranking_regression" else {})
     for seed in args.seeds or settings["seeds"]:
         out = new_results_dir(args.task, args.model_id, protocol, seed, pooling=pooling,
                               root=args.outputs_root)
@@ -389,13 +421,14 @@ def main(argv=None) -> int:
         head, best = train_probe(*tensors[train_split], *tensors[val_split], head_kind=args.head,
                                  settings=settings, seed=seed, log=log, kind=kind,
                                  num_classes=config.get("label_count"), scale=scale,
-                                 metric=config.get("primary_metric"))
+                                 metric=config.get("primary_metric"), val_groups=groups.get(val_split))
         val_scores = predict(head, tensors[val_split][0], kind=kind, scale=scale)
         test_scores = {name: predict(head, tensors[name][0], kind=kind, scale=scale) for name in test_splits}
         test_labels = {name: data[name][1] for name in test_splits}
         metrics_val, metrics_test, headline = evaluate_task(
             kind, config, train_labels=data[train_split][1], val_labels=data[val_split][1], val_scores=val_scores,
-            test_labels=test_labels, test_scores=test_scores, subsets=subsets)
+            test_labels=test_labels, test_scores=test_scores, subsets=subsets, val_groups=groups.get(val_split),
+            test_groups={name: groups[name] for name in test_splits} if groups else None)
         metrics = {
             "task": args.task, "kind": kind, "model_id": args.model_id, "protocol": protocol,
             "pooling": pooling, "seed": seed, "best_epoch": best["epoch"],
@@ -404,7 +437,7 @@ def main(argv=None) -> int:
         }
         if scale is not None:
             metrics["target_standardization"] = {"mean": scale[0].tolist(), "std": scale[1].tolist(),
-                                                 "primary_metric": config["primary_metric"]}
+                                                 "primary_metric": config.get("primary_metric")}
         save_predictions(out / "predictions.npz", kind, test_chains={name: data[name][0] for name in test_splits},
                          test_labels=test_labels, test_scores=test_scores, val_scores=val_scores)
         torch.save({"state_dict": head.state_dict(), "feature_mean": mean, "feature_std": std,

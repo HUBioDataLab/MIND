@@ -14,6 +14,8 @@ of one task carry the same metrics, computed the same way:
     ROC-AUC; test ROC-AUC / PRC-AUC averaged over tasks, plus the QC-flagged test subsets.
 ``multitarget_regression`` (MoleculeNet regression)  masked MSE on targets standardized with train statistics;
     validation = the task's primary error (original units) minimized; test RMSE / MAE plus the QC subsets.
+``ranking_regression`` (RSR)  MSE on the RMSD standardized with train statistics; validation = mean per-puzzle Spearman
+    maximized; test mean per-puzzle and global Spearman / Pearson, mean top-1 loss, RMSE.
 
 Protocol (``finetune`` block of task.yaml, resolved by ``downstream.finetune_settings``; CLI overrides are recorded in
 config.json): AdamW with ``lr_encoder`` for the encoder and ``lr_head`` for the head, gradients clipped to
@@ -65,8 +67,8 @@ from downstream.common.registry import (
 from downstream.embed import embed_split_mind
 from downstream.finetune_settings import OVERRIDES, resolve_settings
 from downstream.probe import (
-    MASKED_KINDS, build_loss, evaluate_task, output_dim, output_scores, save_predictions, target_scale,
-    validation_label, validation_score,
+    MASKED_KINDS, SCALED_KINDS, SINGLE_VALUE_KINDS, build_loss, evaluate_task, output_dim, output_scores,
+    save_predictions, target_scale, validation_label, validation_score,
 )
 from downstream.tasks import TASKS, load_task
 from downstream.tasks.multiclass import split_roles
@@ -96,15 +98,15 @@ def training_targets(labels: np.ndarray, kind: str, scale=None) -> torch.Tensor:
     if kind == "multiclass":
         return torch.from_numpy(labels.astype(np.int64))
     values = labels.astype(np.float32)
-    if kind == "multitarget_regression":
+    if kind in SCALED_KINDS:
         if scale is None:
-            raise ValueError("multitarget_regression fine-tuning needs scale=(mean, std) of the train targets")
+            raise ValueError(f"{kind} fine-tuning needs scale=(mean, std) of the train targets")
         values = (values - scale[0]) / scale[1]  # NaN stays NaN (missing)
     return torch.from_numpy(values)
 
 
 def compute_loss(loss_fn: nn.Module, output: torch.Tensor, targets: torch.Tensor, kind: str) -> torch.Tensor:
-    if kind == "regression":
+    if kind in SINGLE_VALUE_KINDS:
         return loss_fn(output.squeeze(-1), targets.reshape(-1))
     return loss_fn(output, targets)
 
@@ -192,7 +194,8 @@ def split_scores(model, head, split, device, *, seed: int, settings: dict, kind:
 
 
 def fit(model, head, splits: dict, *, train_split: str, val_split: str, device, settings: dict, seed: int,
-        eval_seed: int, kind: str, scale, metric: Optional[str], log: Callable[[str], None]) -> dict:
+        eval_seed: int, kind: str, scale, metric: Optional[str], log: Callable[[str], None],
+        val_groups=None) -> dict:
     """Train encoder + head and restore the epoch with the best validation score; returns that epoch's record."""
     optimizer = build_optimizer(model, head, settings)
     loss_fn = build_loss(kind, settings)
@@ -207,7 +210,7 @@ def fit(model, head, splits: dict, *, train_split: str, val_split: str, device, 
         trained = time.monotonic()
         scores = split_scores(model, head, splits[val_split], device, seed=eval_seed, settings=settings, kind=kind,
                               scale=scale)
-        score = validation_score(kind, val_labels, scores, metric)
+        score = validation_score(kind, val_labels, scores, metric, groups=val_groups)
         label, shown = validation_label(kind, score, metric)
         log(f"epoch {epoch} train_loss {loss:.5f} {label} {shown:.4f} (train {trained - started:.1f} s, "
             f"validation {time.monotonic() - trained:.1f} s)")
@@ -308,7 +311,9 @@ def run(args: argparse.Namespace) -> list:
     train_labels = np.asarray(splits[train_split].labels)
     subsets = (task.test_subsets(config, splits[test_splits[0]].chains)
                if kind in ("multilabel", *MASKED_KINDS) else {})
-    scale = target_scale(train_labels) if kind == "multitarget_regression" else None
+    scale = target_scale(train_labels) if kind in SCALED_KINDS else None
+    groups = ({name: task.group_labels(splits[name].chains) for name in (val_split, *test_splits)}
+              if kind == "ranking_regression" else {})
     metric = config.get("primary_metric")
     out_dim = output_dim(kind, config.get("label_count"), train_labels)
     outputs = []
@@ -322,7 +327,8 @@ def run(args: argparse.Namespace) -> list:
 
             torch.manual_seed(seed)
             model = mind_encoder.load_mind_encoder(str(resolved.ckpt_path), device,
-                                                   random_init=args.random_init, init_seed=seed)
+                                                   random_init=args.random_init, init_seed=seed,
+                                                   domains=mind_encoder.geometry_domains(config.get("modality")))
             mean, std = feature_statistics(split_features(model, splits[train_split], device, seed=eval_seed,
                                                           settings=settings))
             head = StandardizedHead(build_head(settings["head"], int(mean.shape[0]), out_dim,
@@ -334,7 +340,7 @@ def run(args: argparse.Namespace) -> list:
                 f"{settings['max_atoms_per_batch']} nodes / {settings['max_samples_per_batch']} samples")
             best = fit(model, head, splits, train_split=train_split, val_split=val_split, device=device,
                        settings=settings, seed=seed, eval_seed=eval_seed, kind=kind, scale=scale, metric=metric,
-                       log=log)
+                       log=log, val_groups=groups.get(val_split))
             scores = {name: split_scores(model, head, splits[name], device, seed=eval_seed, settings=settings,
                                          kind=kind, scale=scale)
                       for name in (val_split, *test_splits)}
@@ -342,7 +348,9 @@ def run(args: argparse.Namespace) -> list:
             test_scores = {name: scores[name] for name in test_splits}
             metrics_val, metrics_test, headline = evaluate_task(
                 kind, config, train_labels=train_labels, val_labels=np.asarray(splits[val_split].labels),
-                val_scores=scores[val_split], test_labels=test_labels, test_scores=test_scores, subsets=subsets)
+                val_scores=scores[val_split], test_labels=test_labels, test_scores=test_scores, subsets=subsets,
+                val_groups=groups.get(val_split),
+                test_groups={name: groups[name] for name in test_splits} if groups else None)
             metrics = {
                 "task": args.task, "kind": kind, "model_id": model_id, "protocol": protocol, "pooling": pooling,
                 "seed": seed, "best_epoch": best["epoch"], "split_tag": split_tag, "representation": representation,

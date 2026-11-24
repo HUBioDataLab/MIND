@@ -60,6 +60,20 @@ LBA_LITERATURE_NOTE = (
     "to a frozen-encoder probe."
 )
 REGRESSION_TASKS = ("lba",)
+# ATOM3D RSR, test split, Table 8 of arXiv 2012.04035v4 (transcribed by hand from the PDF; check before citing):
+# (model, Spearman mean per puzzle, Spearman global, Pearson mean per puzzle, Pearson global). 3DCNN and GNN are trained
+# from scratch on RSR; Rosetta is a scoring function. Top-1 loss is not reported by ATOM3D.
+RANKING_LITERATURE = {
+    "rsr": [("ATOM3D 3DCNN", 0.264, 0.372, 0.286, 0.360), ("ATOM3D GNN", 0.234, 0.512, 0.275, 0.519),
+            ("Rosetta scoring function", 0.173, 0.304, 0.129, 0.161)],
+}
+RANKING_TASKS = tuple(RANKING_LITERATURE)
+RANKING_NOTE = (
+    "ATOM3D RSR (FARFAR2-Puzzles, 1000 models per puzzle, temporal split by puzzle), target = RMSD to the native "
+    "structure. mean = average of the per-puzzle correlations, global = all test models pooled; higher is better. "
+    "top-1 loss (Angstrom, lower is better) is the true RMSD of the model ranked first minus the best true RMSD of its "
+    "puzzle, averaged over puzzles; ATOM3D does not report it. Literature rows are end-to-end models trained from "
+    "scratch on RSR (and an unlearned scoring function), not frozen probes, so they are not directly comparable.")
 MASKED_KINDS = ("multilabel_masked", "multitarget_regression")
 MOLNET_NOTE = (
     "MoleculeNet (Uni-Mol LMDB scaffold split, first conformer, H dropped). Frozen-encoder probes; no literature rows: "
@@ -110,6 +124,9 @@ def collect(task: str, root=None) -> list:
             if task == "fold":
                 row.update(_fold_average_stats(model_id, protocol, runs))
             rows.append(row)
+            continue
+        if all(run.get("kind") == "ranking_regression" for run in runs):
+            rows.append(_ranking_row(model_id, protocol, runs))
             continue
         if all(run.get("kind") == "regression" for run in runs):
             undefined = defaultdict(int)
@@ -167,6 +184,46 @@ def _masked_row(model_id: str, protocol: str, runs: list) -> dict:
             **{f: _stat([entry.get(f) for entry in entries]) for f in fields},
         }
     return row
+
+
+def _ranking_row(model_id: str, protocol: str, runs: list) -> dict:
+    """Row of an RSR probe or fine-tune over its seeds: the two correlation blocks of val and test."""
+    row = {"model_id": model_id, "protocol": protocol, "kind": "ranking_regression",
+           "seeds": sorted(run["seed"] for run in runs), "test_correlation_undefined": defaultdict(int)}
+    for split in ("val", "test"):
+        for block in ("mean_per_puzzle", "global"):
+            for metric in ("spearman_rho", "pearson_r"):
+                row[f"{split}_{block}_{metric}"] = _stat([run[split][block][metric] for run in runs])
+    row["test_mean_per_puzzle_top1_loss"] = _stat([run["test"]["mean_per_puzzle"]["top1_loss"] for run in runs])
+    row["test_global_rmse"] = _stat([run["test"]["global"]["rmse"] for run in runs])
+    for run in runs:
+        for block in ("mean_per_puzzle", "global"):
+            reason = run["test"][block].get("correlation_undefined_reason")
+            if reason is not None:
+                row["test_correlation_undefined"][f"{block}: {reason}"] += 1
+    row["test_correlation_undefined"] = dict(row["test_correlation_undefined"])
+    return row
+
+
+def ranking_markdown(task: str, rows: list) -> str:
+    header = ["model_id", "protocol", "val Spearman (mean)", "test Spearman (mean)", "test Spearman (global)",
+              "test Pearson (mean)", "test Pearson (global)", "test top-1 loss", "test RMSE (global)"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    for row in rows:
+        lines.append("| " + " | ".join([
+            row["model_id"], row["protocol"], _fmt(row["val_mean_per_puzzle_spearman_rho"]),
+            _fmt(row["test_mean_per_puzzle_spearman_rho"]), _fmt(row["test_global_spearman_rho"]),
+            _fmt(row["test_mean_per_puzzle_pearson_r"]), _fmt(row["test_global_pearson_r"]),
+            _fmt(row["test_mean_per_puzzle_top1_loss"]), _fmt(row["test_global_rmse"])]) + " |")
+    for name, mean_s, global_s, mean_p, global_p in RANKING_LITERATURE.get(task, []):
+        lines.append("| " + " | ".join([name, "literature", "-", f"{mean_s:.3f}", f"{global_s:.3f}", f"{mean_p:.3f}",
+                                        f"{global_p:.3f}", "-", "-"]) + " |")
+    notes = []
+    for row in rows:
+        for reason, count in sorted(row["test_correlation_undefined"].items()):
+            notes.append(f"Correlation undefined ({reason}) in {count} of {len(row['seeds'])} seeds for "
+                         f"{row['model_id']} / {row['protocol']}.")
+    return "\n".join(lines) + "\n\n" + RANKING_NOTE + "\n" + "".join(f"\n{note}\n" for note in notes)
 
 
 def masked_markdown(rows: list, task: str = "") -> str:
@@ -265,6 +322,8 @@ def multiclass_markdown(task: str, rows: list) -> str:
 def to_markdown(task: str, rows: list) -> str:
     if rows and rows[0].get("kind") in MASKED_KINDS:
         return masked_markdown(rows, task)
+    if task in RANKING_TASKS:
+        return ranking_markdown(task, rows)
     if task in REGRESSION_TASKS:
         return regression_markdown(task, rows)
     if task in MULTICLASS_TASKS:
@@ -303,7 +362,9 @@ def main(argv=None) -> int:
              "note": LBA_LITERATURE_NOTE if args.task in REGRESSION_TASKS else LITERATURE_NOTE}
             for n, v in LITERATURE.get(args.task, [])
         ] + [{"model": n, "test_accuracy_percent": v, "note": LITERATURE_NOTE}
-             for n, v in MULTICLASS_LITERATURE.get(args.task, [])],
+             for n, v in MULTICLASS_LITERATURE.get(args.task, [])]
+        + [{"model": n, "test_spearman_mean_per_puzzle": a, "test_spearman_global": b, "test_pearson_mean_per_puzzle": c,
+            "test_pearson_global": d, "note": RANKING_NOTE} for n, a, b, c, d in RANKING_LITERATURE.get(args.task, [])],
     }, indent=1))
     print(markdown)
     return 0

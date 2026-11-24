@@ -1,0 +1,160 @@
+# ATOM3D RNA Structure Ranking (RSR): rank candidate 3D models of an RNA by their predicted all-atom RMSD to the
+# experimentally determined structure. Source: FARFAR2-Puzzles candidates of the first 21 RNA-Puzzles, 1000 randomly
+# sampled models per puzzle, packaged by ATOM3D (Townshend et al., NeurIPS 2021 Datasets and Benchmarks Track;
+# Zenodo record 4961085, "candidates split by time").
+#
+# Split: temporal, by puzzle (the split never separates the models of one puzzle): train = puzzles 1-13,
+# validation = the next 4, test = the final 4. The paper text lists the validation puzzles as "14-17 (excluding 16)",
+# which is three puzzles; the record's README and its split-index files give four (4,000 validation models), and
+# processing follows the files (the ids name the four: rna_puzzle_14_bound, _14_free, _15, _17): a puzzle count that differs from expected_puzzles stops it.
+# Primary metric: Spearman correlation between predicted and true RMSD, averaged over the puzzles of the test split
+# ("mean per puzzle", higher is better); the global Spearman (all test models pooled) and both Pearson correlations are
+# reported with it (ATOM3D Table 8). The mean top-1 loss (true RMSD of the model ranked first minus the best true RMSD
+# of its puzzle, Angstrom) is computed in addition; ATOM3D does not report it.
+
+task: rsr
+modality: rna
+data_root: ${MIND_DATA_ROOT}/downstream/rsr/rna   # raw/, processed/, provenance.json
+kind: ranking_regression
+
+source: zenodo_4961085
+sources:
+  zenodo_4961085:
+    record: https://zenodo.org/records/4961085
+    doi: 10.5281/zenodo.4961085
+    base_url: https://zenodo.org/api/records/4961085/files/{name}/content
+    # md5 and sizes from the Zenodo record API (files[].checksum, files[].size), read on 2026-11-24. Zenodo publishes no
+    # sha256: `download` computes it on the first run, writes it to provenance.json and refuses any later run whose
+    # file hashes differently.
+    files:
+      split:
+        name: RSR-candidates-split-by-time.tar.gz
+        md5: ba48438ec1df66c583a76cc42e5fddb5
+        bytes: 1269970448
+      indices:
+        name: RSR-candidates-split-by-time-indices.tar.gz
+        md5: bbe72c949dfc0cb5e80b06e2cdfbe207
+        bytes: 52611
+      readme:
+        name: README.md
+        md5: 827ef44c7def126a6148a8b5ba6eae80
+        bytes: 2911
+      license:
+        name: LICENSE_SA
+        md5: bb082061306cc1dc0afcd128f972d344
+        bytes: 20137
+    # The Zenodo record is licensed "other-at" (attribution; LICENSE_SA ships with it): local use only, no
+    # redistribution of the data.
+    # The split archive holds three LMDB directories (train, val, test) whose values are gzip-compressed and serialized
+    # (serialization_format key: json or msgpack; a pickle is refused). One value is a dict with `atoms` (a pandas
+    # DataFrame in to_dict(orient="split") form), `id`, `scores` (`rms` = RMSD to the native, `score` = Rosetta score),
+    # `types` and `file_path`. The archive's folder names are not documented: `download` locates the three LMDB
+    # directories by name and `data.mdb` and stops unless exactly one set exists.
+    lmdb_value_formats: [json, msgpack]
+    # The indices archive holds indices/{train,val,test}_indices.txt, one LMDB-independent source index per line. Their
+    # line counts (12,479 / 4,000 / 4,000, counted on 2026-11-24) equal expected_counts and are re-checked at download.
+    index_files: {train: indices/train_indices.txt, val: indices/val_indices.txt, test: indices/test_indices.txt}
+
+splits: [train, val, test]
+# Models per split, from the index files of the record. The LMDB num_examples of the split archive must equal them
+# (read from the real archive: all three equal the index files).
+# 13 x 1000 = 13,000 would be a full training split: the index file holds 12,479 because rna_puzzle_2_hack has only 479
+# models (every other puzzle has exactly 1000; counted on the real LMDBs); per-puzzle counts are written to qc_<split>.json.
+expected_counts: {train: 12479, val: 4000, test: 4000}
+expected_puzzles: {train: 13, val: 4, test: 4}
+
+metric: spearman_rho       # primary; higher is better
+primary_subset: mean_per_puzzle
+metric_direction: max
+target_name: rms           # scores key of the LMDB item: all-atom RMSD to the native structure, Angstrom
+target_unit: Angstrom
+
+# ---------------------------------------------------------------------------
+# Decoy -> RNA graph (downstream/common/rna_graph.py: the training adapter's 12 backbone + 11 base slots)
+# ---------------------------------------------------------------------------
+puzzle_from: id_tuple_first     # the LMDB `id` is the text of a tuple (puzzle name, model name), e.g.
+                                # "('rna_puzzle_14_bound', 'S_000001_002')"; the puzzle is its first element and ids are
+                                # `<puzzle>/<LMDB index>`. The atoms' `ensemble` column is the model's own file name
+                                # (one value per model, e.g. S_000001_002.pdb), NOT the puzzle (the README says otherwise).
+                                # Read on the real data: 21 puzzles, e.g. rna_puzzle_14_bound / rna_puzzle_14_free.
+structure:
+  hydrogens: drop               # Rosetta models carry H; every pretraining adapter drops H (element H or D)
+  altloc: keep_blank_or_A       # as the RNA adapter; other alternate locations are counted and skipped
+  # Residue names are read as A, C, G, U after upper-casing and these aliases; any other residue name fails the model
+  # (counted as `unsupported_residue`, never skipped silently).
+  resname_aliases: {RA: A, RC: C, RG: G, RU: U, ADE: A, CYT: C, GUA: G, URA: U}
+  # Rosetta placeholder atoms: atoms named RPA1, RPA2, RPB1, RPB2 with an EMPTY element field appear in the models of
+  # about two thirds of the puzzles (0-7 per model, next to the end nucleotides of a chain). They are no RNA atoms and
+  # the 23-slot adapter has no slot for them: they are removed and counted per model (`placeholder_atoms_removed`).
+  # Only these names with an empty element are removed; any other atom with an empty element fails the model.
+  placeholder_atoms: [RPA1, RPA2, RPB1, RPB2]
+  # Atom names are read through the adapter's legacy aliases (O1P -> OP1, C1* -> C1', ...).
+missing_atoms:
+  # What the pretraining RNA adapter does, so a decoy is in-distribution; every case is counted per model
+  # (qc_<split>.tsv) and summed (qc_<split>.json):
+  #   incomplete backbone (e.g. the 5' end has no phosphate): the nucleotide keeps its atoms and is a quarantined block
+  #     of the template mapping, never a masking target.
+  #   missing base atom: NOT repaired. The 11 base slots take the real atoms in priority order and the rest are V
+  #     (generic padding at the C1' position), so atoms behind a gap move to an earlier slot (the adapter's rule).
+  #   atom name outside the canonical backbone / base / terminal lists: removed and counted.
+  #   duplicated atom name inside a nucleotide: the model fails (counted).
+  backbone: keep_quarantined
+  incomplete_base: adapter_padding
+  unexpected_atoms: remove_and_count
+
+min_nucleotides: 4
+qc:
+  max_failed_structure_fraction: 0.02    # per split, failed + dropped models; above it the processed file is not written, exit 1
+  max_incomplete_base_fraction: 0.05     # per split, models with at least one incomplete base; above it exit 1
+processed_revision: v1
+
+embedding:
+  seed: 0
+  poolings: [mean_atoms, mean_residues]   # `ca` needs the protein CA anchor; RNA anchors are not CA
+  max_atoms_per_batch: 30000
+
+# Probe: MLP or linear head on the pooled embedding; the target is standardized with the train mean / std and the
+# validation score is the mean per-puzzle Spearman (maximized), the metric the benchmark ranks by.
+probe:
+  pooling: mean_atoms
+  seeds: [0, 1, 2]
+  epochs: 300
+  patience: 30
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+  loss: mse
+  huber_delta: 1.0
+
+# Fine-tuning (downstream.finetune, user-run on one GPU): AdamW with an encoder LR below the head LR; a random-init
+# encoder trains from scratch with lr_encoder_random_init. patience: null runs every epoch; the epoch with the best
+# validation score (mean per-puzzle Spearman, valid split only) is evaluated on the test split.
+# lr_encoder 1e-4 is the small-task recipe decided after the learning-rate study; the molnet / lba / ec blocks of this
+# branch still carry 1e-5 until that change reaches them, so the value is stated here, not inherited.
+finetune:
+  pooling: mean_atoms
+  head: mlp
+  seeds: [0, 1, 2]
+  epochs: 50
+  patience: null
+  max_atoms_per_batch: 15000
+  max_samples_per_batch: null
+  lr_encoder: 0.0001
+  lr_encoder_random_init: 0.0003
+  lr_head: 0.001
+  weight_decay: 0.0001
+  grad_clip_norm: 0.5                # global gradient norm, as in pretraining
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+  loss: mse
+  huber_delta: 1.0
+
+# Estimated seconds per fine-tune epoch (train + validation) of one job alone on a GPU; ds-run uses it only to start the
+# longest fine-tune jobs first. UNMEASURED: extrapolated from the LBA runs (25 s for 4,463 complexes of about the same
+# node count) to 12,479 train + 4,000 validation RNA graphs without random-edge generation.
+finetune_seconds_per_epoch: 90
+
+# Sizes for `make ds-prepare` (GiB): extracted LMDB trees measured with du; processed output estimated (1-2 GB).
+disk_estimate_gib: {extracted: 1.3, processed: 2.0}

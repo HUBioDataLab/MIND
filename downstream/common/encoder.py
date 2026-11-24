@@ -35,16 +35,25 @@ PROTEIN_ENTITY = 0
 LIGAND_ENTITY = 1
 
 
-def _check_config(config) -> None:
+def geometry_domains(modality: str) -> tuple:
+    """Geometry-neutral domains a task's graphs need: RNA graphs ``rna``, everything else ``protein`` (as before)."""
+    return ("rna",) if modality == "rna" else ("protein",)
+
+
+def _check_config(config, domains=("protein",)) -> None:
     settings = getattr(config, "geometry_neutral_virtual_slots", None) or {}
-    if not (settings.get("enabled", False) and settings.get("protein", False)):
-        raise ValueError("downstream protein embedding requires geometry_neutral_virtual_slots for protein")
+    missing = [domain for domain in domains if not (settings.get("enabled", False) and settings.get(domain, False))]
+    if missing:
+        raise ValueError(f"downstream embedding requires geometry_neutral_virtual_slots for {' and '.join(missing)}")
     if getattr(config, "apply_attention_on", "node") != "node":
         raise ValueError("downstream embedding supports node attention only")
 
 
-def load_mind_encoder(ckpt_path: str, device, *, random_init: bool = False, init_seed: int = 0) -> PretrainingESAModel:
-    """Strictly load a checkpoint, or build the same architecture with untrained weights."""
+def load_mind_encoder(ckpt_path: str, device, *, random_init: bool = False, init_seed: int = 0,
+                      domains=("protein",)) -> PretrainingESAModel:
+    """Strictly load a checkpoint, or build the same architecture with untrained weights.
+
+    ``domains`` are the geometry-neutral domains the task's graphs need (``geometry_domains``)."""
     device = torch.device(device)
     if random_init:
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -54,7 +63,7 @@ def load_mind_encoder(ckpt_path: str, device, *, random_init: bool = False, init
             model = PretrainingESAModel(config=dict(config))
     else:
         model = PretrainingESAModel.load_from_checkpoint(ckpt_path, map_location=device, strict=True)
-    _check_config(model.config)
+    _check_config(model.config, domains)
     return model.to(device).eval()
 
 

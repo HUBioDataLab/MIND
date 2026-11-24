@@ -28,7 +28,7 @@ Any other IC vector can be passed to ``ic_binned_macro_aupr``.
 from __future__ import annotations
 
 import math
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -269,6 +269,88 @@ def evaluate_regression(targets: np.ndarray, predictions: np.ndarray) -> Dict[st
         "target_std": float(checked_targets.std()),
         "correlation_undefined_reason": reason,
     }
+
+
+# ---------------------------------------------------------------------------
+# Ranking regression (ATOM3D RSR): candidates of one target are ranked by predicted RMSD.
+# ---------------------------------------------------------------------------
+
+def group_indices(groups: np.ndarray) -> Dict[str, np.ndarray]:
+    """``{group: row indices}`` in order of first appearance; a group label must be a non-empty string."""
+    groups = np.asarray(groups)
+    if groups.ndim != 1 or groups.size == 0:
+        raise ValueError(f"groups must be a non-empty 1-D array, got shape {groups.shape}")
+    if any(not isinstance(label, str) or not label for label in groups.tolist()):
+        raise ValueError("every group label must be a non-empty string")
+    rows: Dict[str, list] = {}
+    for index, label in enumerate(groups.tolist()):
+        rows.setdefault(label, []).append(index)
+    return {label: np.asarray(indices, dtype=np.int64) for label, indices in rows.items()}
+
+
+def top1_loss(targets: np.ndarray, predictions: np.ndarray) -> float:
+    """True RMSD of the candidate predicted best (lowest predicted RMSD) minus the best true RMSD of the group.
+
+    Candidates tied at the lowest prediction count with the mean of their true values (the expected loss of a random
+    tie-break), so the value never depends on candidate order. Zero means the best candidate was ranked first.
+    """
+    targets, predictions = _check_regression(targets, predictions)
+    chosen = predictions == predictions.min()
+    return float(targets[chosen].mean() - targets.min())
+
+
+def _undefined_reason_text(reasons: Dict[str, list]) -> Optional[str]:
+    if not reasons:
+        return None
+    return "; ".join(f"{reason} in {len(groups)} group(s) ({', '.join(groups[:5])}{', ...' if len(groups) > 5 else ''})"
+                     for reason, groups in sorted(reasons.items()))
+
+
+def evaluate_ranking_regression(targets: np.ndarray, predictions: np.ndarray, groups: np.ndarray) -> Dict[str, object]:
+    """ATOM3D RSR metrics: ``mean_per_puzzle`` and ``global`` blocks, each with Spearman and Pearson.
+
+    ``mean_per_puzzle`` averages the per-group correlations (the structures of one RNA puzzle form a group), so it
+    measures the ranking of candidates of the same target; ``global`` pools every candidate. A group whose correlation
+    is undefined (constant prediction or target, fewer than two candidates) makes the mean undefined: the value is
+    ``None`` with ``correlation_undefined_reason`` naming the groups, never a mean over the remaining groups.
+    ``mean_per_puzzle`` also carries the mean ``top1_loss`` and the per-group values (``puzzles`` lists the group
+    order of every ``per_puzzle_*`` list).
+    """
+    targets, predictions = _check_regression(targets, predictions)
+    rows = group_indices(groups)
+    if sum(len(index) for index in rows.values()) != targets.size:
+        raise ValueError(f"{targets.size} targets but {sum(len(i) for i in rows.values())} group labels")
+    per = {name: [] for name in ("spearman_rho", "pearson_r", "top1_loss")}
+    reasons: Dict[str, list] = {}
+    for label, index in rows.items():
+        reason = _correlation_undefined_reason(targets[index], predictions[index])
+        if reason:
+            reasons.setdefault(reason, []).append(label)
+            per["spearman_rho"].append(None)
+            per["pearson_r"].append(None)
+        else:
+            per["spearman_rho"].append(spearman_rho(targets[index], predictions[index]))
+            per["pearson_r"].append(pearson_r(targets[index], predictions[index]))
+        per["top1_loss"].append(top1_loss(targets[index], predictions[index]))
+    mean_reason = _undefined_reason_text(reasons)
+    mean_block = {
+        "spearman_rho": None if mean_reason else float(np.mean(per["spearman_rho"])),
+        "pearson_r": None if mean_reason else float(np.mean(per["pearson_r"])),
+        "top1_loss": float(np.mean(per["top1_loss"])),
+        "num_samples": int(targets.size), "num_puzzles": len(rows),
+        "correlation_undefined_reason": mean_reason,
+        "puzzles": list(rows), "per_puzzle_num_samples": [int(len(i)) for i in rows.values()],
+        **{f"per_puzzle_{name}": values for name, values in per.items()},
+    }
+    pooled_reason = _correlation_undefined_reason(targets, predictions)
+    global_block = {
+        "spearman_rho": None if pooled_reason else spearman_rho(targets, predictions),
+        "pearson_r": None if pooled_reason else pearson_r(targets, predictions),
+        "rmse": rmse(targets, predictions), "mae": mae(targets, predictions),
+        "num_samples": int(targets.size), "num_puzzles": len(rows),
+        "correlation_undefined_reason": pooled_reason,
+    }
+    return {"mean_per_puzzle": mean_block, "global": global_block}
 
 
 # ---------------------------------------------------------------------------

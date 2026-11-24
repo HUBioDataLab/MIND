@@ -62,7 +62,7 @@ def encoder_calls(monkeypatch):
     calls = []
     config = tiny_model_config()
 
-    def load(ckpt_path, device, *, random_init=False, init_seed=0):
+    def load(ckpt_path, device, *, random_init=False, init_seed=0, domains=("protein",)):
         calls.append({"ckpt": ckpt_path, "random_init": random_init, "init_seed": init_seed})
         torch.manual_seed(1000 + init_seed)
         return StandInEncoder(config).to(device)

@@ -143,7 +143,8 @@ def main(argv=None) -> int:
             parser.error("the MIND encoder needs CUDA (flash_varlen attention has no CPU kernel)")
         resolved = resolve_model(args.model, root=args.outputs_root)
         model = mind_encoder.load_mind_encoder(str(resolved.ckpt_path), device,
-                                               random_init=args.random_init, init_seed=args.init_seed)
+                                               random_init=args.random_init, init_seed=args.init_seed,
+                                               domains=mind_encoder.geometry_domains(config.get("modality")))
         model_id = resolved.model_id
         if args.random_init:
             model_id += RANDOM_INIT_SUFFIX + (f"_s{args.init_seed}" if args.init_seed else "")
