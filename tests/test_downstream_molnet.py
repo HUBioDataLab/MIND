@@ -117,7 +117,7 @@ def processed(config, split):
 
 def test_registry_lists_the_14_molnet_tasks_and_keeps_the_old_ones_in_front():
     assert TASKS[:7] == ("ec", "lba", "go_mf", "go_bp", "go_cc", "fold", "reaction")
-    assert TASKS[7:] == MOLNET_TASKS
+    assert TASKS[7:21] == MOLNET_TASKS
     assert "multilabel_masked" in KINDS and "multitarget_regression" in KINDS
     assert KINDS[:3] == ("multilabel", "multiclass", "regression")
 

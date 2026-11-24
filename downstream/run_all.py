@@ -65,12 +65,12 @@ from typing import Callable, Dict, List, Optional
 from downstream import ledger, ledger_report
 from downstream.common import registry
 from downstream.finetune_settings import resolve_settings, same_settings
-from downstream.tasks import MOLNET_TASKS, TASKS, load_task
+from downstream.tasks import MOLNET_TASKS, NPASS_TASKS, TASKS, load_task
 
 HEADS = ("linear", "mlp")  # downstream.common.heads.HEADS (not imported: it pulls torch into the plan step)
 FINETUNE = "finetune"  # the --heads entry that selects end-to-end fine-tuning
 PROTOCOL_CHOICES = HEADS + (FINETUNE,)
-ALL_TASKS = ("ec", "go_mf", "go_bp", "go_cc", "fold", "lba") + MOLNET_TASKS
+ALL_TASKS = ("ec", "go_mf", "go_bp", "go_cc", "fold", "lba") + MOLNET_TASKS + NPASS_TASKS
 # Pretraining domains (card "domains", the enabled multi_domain datasets) a task's input needs. The LBA joint graph
 # is a protein graph (ligand atoms with pos_code sm).
 MODALITY_DOMAINS = {"protein": ("pdb",), "complex": ("pdb",), "small_molecule": ("unimol",)}

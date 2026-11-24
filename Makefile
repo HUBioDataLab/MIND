@@ -323,6 +323,10 @@ eval-counterfactual:
 #                                        pinned in molnet/task.yaml; an archive already in place is checked, not fetched)
 #   make ds-process TASK=mn_esol        (MoleculeNet mn_bbbp|bace|clintox|tox21|toxcast|sider|hiv|pcba|muv|esol|freesolv|lipo|qm7|qm8;
 #   make ds-validate TASK=mn_esol        validate reads and checks without writing; probe/report work as for the other tasks)
+#   make ds-download TASK=npass_ptp1b   (0.46 MiB CSV of the NaFM Figshare release, shared by the 8 NPASS tasks; size,
+#                                        md5 and sha256 pinned in npass/task.yaml; a file already in place is checked)
+#   make ds-process TASK=npass_ptp1b    (NPASS npass_ptp1b|ache|cox2|hivrt|tyrosinase|cyp3a4|mrp4|cox1, or TASK=npass for all 8;
+#   make ds-validate TASK=npass          RDKit conformers on the CPU; validate checks without writing)
 #   make ds-embed TASK=ec MODEL=<snapshot|alias|esm2_t6_8M_UR50D|saprot_650m_pdb> GPU=<id> [RANDOM_INIT=1]
 #   make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp [POOLING=mean_residues] [SEEDS="0 1 2"]
 #   make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1] [SEEDS="0 1 2"] [OUTPUTS_ROOT=<dir>]
@@ -352,9 +356,9 @@ eval-counterfactual:
 #   run longest first, FT_PER_GPU per GPU; every finished probe/fine-tune job is added to the ledger at once.
 #   PLAN=1 prints what would run and writes nothing. ds-run, ds-probe and ds-finetune run detached (setsid + nohup:
 #   closing the terminal does not stop them; the log ends with EXIT_CODE=<n>; make ds-status lists the logs);
-#   FOREGROUND=1 runs them in the terminal. TASKS=molnet stands for the 14 mn_* tasks (it may be combined: molnet,ec).
-# ECFP4 fingerprint baseline of the MoleculeNet tasks (downstream/baselines/ecfp.py; CPU only, no checkpoint):
-#   make ds-ecfp [TASKS=all|molnet|mn_bbbp,mn_esol,...] [VARIANT=probe|tuned|both] [HEADS=linear,mlp] [PROBE_JOBS=1]
+#   FOREGROUND=1 runs them in the terminal. TASKS=molnet stands for the 14 mn_* tasks, TASKS=npass for the 8 npass_* tasks (they may be combined: molnet,ec).
+# ECFP4 fingerprint baseline of the MoleculeNet and NPASS tasks (downstream/baselines/ecfp.py; CPU only, no checkpoint):
+#   make ds-ecfp [TASKS=all|molnet|npass|mn_bbbp,mn_esol,...] [VARIANT=probe|tuned|both] [HEADS=linear,mlp] [PROBE_JOBS=1]
 #        [OUTPUTS_ROOT=<dir>] [PLAN=1] [NO_LEDGER=1] [FOREGROUND=1]
 #   fingerprints (RDKit, radius 2, 2048 bits) -> VARIANT=probe: model ecfp4, the MIND probe code (SEEDS) | tuned: model
 #   ecfp4_tuned, scikit-learn logistic / ridge tuned on validation, seed 0 | both (default); finished work is skipped ->
@@ -391,10 +395,11 @@ DS_LBA_ARGS := $(DS_SPLIT_TAG_ARGS) $(if $(strip $(REPRESENTATION)),--representa
 # sequentially and only bounds its torch threads.
 # GO branches (go_mf, go_bp, go_cc) share one prepare module.
 # MoleculeNet tasks (mn_*) share the molnet prepare module, which takes --task and reads the LMDB files serially.
-DS_PREPARE_MODULE = $(if $(filter go_%,$(TASK)),go,$(if $(filter mn_%,$(TASK)),molnet,$(TASK)))
-DS_MOLNET_ARGS = $(if $(filter mn_%,$(TASK)),--task $(TASK),)
-DS_PROCESS_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS)))
-DS_DOWNLOAD_ARGS = $(if $(filter mn_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),))
+# NPASS tasks (npass_*, or npass for all eight) share the npass prepare module, which takes --task too.
+DS_PREPARE_MODULE = $(if $(filter go_%,$(TASK)),go,$(if $(filter mn_%,$(TASK)),molnet,$(if $(filter npass npass_%,$(TASK)),npass,$(TASK))))
+DS_MOLNET_ARGS = $(if $(filter mn_% npass npass_%,$(TASK)),--task $(TASK),)
+DS_PROCESS_ARGS = $(if $(filter mn_% npass npass_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),--workers $(WORKERS)))
+DS_DOWNLOAD_ARGS = $(if $(filter mn_% npass_%,$(TASK)),$(DS_MOLNET_ARGS),$(if $(filter lba,$(TASK)),--threads $(DS_THREADS) $(if $(strip $(TAGS)),--tags $(TAGS),),))
 
 .PHONY: ds-snapshot ds-prepare ds-fetch-models ds-download ds-process ds-validate ds-leakage ds-embed ds-probe ds-finetune ds-report test-downstream \
 	ds-ledger-add ds-ledger-annotate ds-ledger-report ds-summary ds-missing ds-compare ds-ledger-verify ds-ledger-recompute \
@@ -526,12 +531,13 @@ PER_GPU ?= 1
 PROBE_JOBS ?= 1
 # Concurrent fine-tune jobs per GPU (separate processes and output directories; ledger adds stay sequential).
 FT_PER_GPU ?= 1
-# TASKS=molnet stands for the 14 MoleculeNet tasks (downstream.tasks.MOLNET_TASKS; a test keeps the lists equal).
+# TASKS=molnet / TASKS=npass stand for the 14 MoleculeNet / 8 NPASS tasks (downstream.tasks.MOLNET_TASKS / NPASS_TASKS; a test keeps the lists equal).
 MOLNET_TASKS := mn_bbbp,mn_bace,mn_clintox,mn_tox21,mn_toxcast,mn_sider,mn_hiv,mn_pcba,mn_muv,mn_esol,mn_freesolv,mn_lipo,mn_qm7,mn_qm8
+NPASS_TASKS := npass_ptp1b,npass_ache,npass_cox2,npass_hivrt,npass_tyrosinase,npass_cyp3a4,npass_mrp4,npass_cox1
 _comma := ,
 _space := $(subst ,, )
 DS_RUN_TASKS = $(subst $(_space),$(_comma),$(strip $(foreach t,$(subst $(_comma), ,$(or $(strip $(TASKS)),all)),\
-	$(if $(filter molnet,$(t)),$(MOLNET_TASKS),$(t)))))
+	$(if $(filter molnet,$(t)),$(MOLNET_TASKS),$(if $(filter npass,$(t)),$(NPASS_TASKS),$(t))))))
 # $(1) = the model (MODEL, or each entry of MODELS).
 DS_RUN_CMD = python -u -m downstream.run_all --model "$(1)" $(if $(strip $(NAME)),--name "$(NAME)",) \
 	--tasks $(DS_RUN_TASKS) --gpus "$(GPU)" --per-gpu $(PER_GPU) --heads $(HEADS) --seeds $(SEEDS) \
@@ -608,16 +614,18 @@ help:
 	@echo "  Downstream (see downstream/README.md):"
 	@echo "    make ds-prepare [TASKS=all|molnet|ec,..] [EXCLUDE=\"reaction mn_pcba\"] [WORKERS=N] [PLAN=1]"
 	@echo "                                         Download + process the data of the selected tasks (CPU, network, detached)"
-	@echo "    make ds-run MODEL=<snapshot|ckpt> [NAME=<name>] GPU=<ids> [TASKS=all|molnet|ec,go_mf,..] [PLAN=1]"
+	@echo "    make ds-run MODEL=<snapshot|ckpt> [NAME=<name>] GPU=<ids> [TASKS=all|molnet|npass|ec,go_mf,..] [PLAN=1]"
 	@echo "                                         Embed + probe + ledger for one model (GPU, detached)"
 	@echo "                                         HEADS=linear,mlp,finetune adds fine-tuning; HEADS=finetune alone skips the probes"
-	@echo "    make ds-ecfp [TASKS=all|molnet|mn_bbbp,..] [PLAN=1]   ECFP4 fingerprint baselines of the MoleculeNet tasks (CPU, detached)"
+	@echo "    make ds-ecfp [TASKS=all|molnet|npass|mn_bbbp,..] [PLAN=1]   ECFP4 fingerprint baselines of the MoleculeNet and NPASS tasks (CPU, detached)"
 	@echo "    make ds-status                       Recent ds-* logs with their EXIT_CODE"
 	@echo "    make ds-snapshot CKPT=<ckpt> NAME=<snapshot> ALIAS=current_best"
 	@echo "    make ds-download TASK=ec / ds-process TASK=ec WORKERS=16   (data, explicit decision)"
 	@echo "    make ds-validate TASK=go_mf          Re-check downloaded labels/splits (read-only)"
 	@echo "    MoleculeNet: make ds-download TASK=mn_bbbp (one archive for all mn_* tasks)"
 	@echo "         make ds-process TASK=mn_<bbbp|bace|clintox|tox21|toxcast|sider|hiv|pcba|muv|esol|freesolv|lipo|qm7|qm8>"
+	@echo "    NPASS: make ds-download TASK=npass_ptp1b (one CSV for all npass_* tasks)"
+	@echo "         make ds-process TASK=npass_<ptp1b|ache|cox2|hivrt|tyrosinase|cyp3a4|mrp4|cox1> (or TASK=npass for all 8)"
 	@echo "    make ds-embed TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]   (GPU)"
 	@echo "    make ds-probe TASK=ec MODEL_ID=<id> HEAD=linear|mlp"
 	@echo "    make ds-finetune TASK=ec MODEL=<snapshot> GPU=<id> [RANDOM_INIT=1]   (one GPU, long; every task)"

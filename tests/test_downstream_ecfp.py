@@ -20,7 +20,7 @@ import yaml
 from downstream import ledger, ledger_report, probe
 from downstream.baselines import ecfp
 from downstream.common.registry import embeddings_path, results_dir
-from downstream.tasks import MOLNET_TASKS
+from downstream.tasks import MOLNET_TASKS, SMILES_TASKS
 from downstream.tasks.molnet import common
 from downstream.baselines import ecfp_tuned
 from ledger_helpers import (
@@ -94,10 +94,11 @@ def test_an_unparsable_smiles_raises_with_its_id_instead_of_becoming_a_zero_row(
         ecfp.fingerprint_matrix(["C", "C", "C"], ["a", "b"], ecfp.FingerprintSpec())
 
 
-def test_only_molnet_tasks_are_accepted_and_all_expands_to_the_fourteen():
-    assert ecfp.expand_tasks("all") == list(MOLNET_TASKS) == ecfp.expand_tasks("molnet")
+def test_only_smiles_tasks_are_accepted_and_all_expands_to_moleculenet_plus_npass():
+    assert ecfp.expand_tasks("molnet") == list(MOLNET_TASKS) and len(MOLNET_TASKS) == 14
+    assert ecfp.expand_tasks("all") == list(SMILES_TASKS) and len(SMILES_TASKS) == 22
     assert ecfp.expand_tasks("mn_bbbp,mn_esol,mn_bbbp") == ["mn_bbbp", "mn_esol"]
-    with pytest.raises(ValueError, match="MoleculeNet tasks only"):
+    with pytest.raises(ValueError, match="MoleculeNet and NPASS tasks only"):
         ecfp.expand_tasks("mn_bbbp,ec")
 
 
@@ -309,10 +310,10 @@ def test_baseline_is_not_missing_on_other_families_and_names_its_command_on_moln
     _, state = _state(tmp_path, _tree(tmp_path))
     models = ["model_a", "ecfp4", "ecfp4_tuned"]
     missing = ledger_report.missing_cells(state, models)
-    assert not [m for m in missing if m["model_key"].startswith("ecfp4") and not m["task"].startswith("mn_")]
+    assert not [m for m in missing if m["model_key"].startswith("ecfp4") and not m["task"].startswith(("mn_", "npass_"))]
     for model, variant, protocol in (("ecfp4", "probe", "mlp_probe"), ("ecfp4_tuned", "tuned", "sklearn_tuned")):
         found = [m for m in missing if m["model_key"] == model]
-        assert found and {m["task"] for m in found} <= set(MOLNET_TASKS) - {"mn_esol"}
+        assert found and {m["task"] for m in found} <= set(SMILES_TASKS) - {"mn_esol"}
         assert {m["protocol_id"] for m in found} == {protocol}  # the tuned baseline is required in its own protocol
         assert all(m["hint"] == f"make ds-ecfp TASKS={m['task']} VARIANT={variant}" for m in found)
     assert [m for m in missing if m["model_key"] == "model_a" and m["task"] == "ec"]  # MIND models still need EC
@@ -324,7 +325,7 @@ def test_baseline_is_not_missing_on_other_families_and_names_its_command_on_moln
     assert "`ecfp4_tuned` is read with its own protocol `sklearn_tuned`" in summary
     applicable = [t for t in ledger_report.summary_tasks(state["catalog"])
                   if ledger_report.applicable(state["catalog"], t, "ecfp4")]
-    assert applicable == list(MOLNET_TASKS)
+    assert applicable == list(SMILES_TASKS)
 
 
 def test_catalog_checks_the_fingerprint_baseline_entries(tmp_path):

@@ -161,6 +161,24 @@ tasks:
       - {eval_split: test, subset: all, metric: mae, source: "Uni-Mol T2; MoleculeNet T3"}
       - {eval_split: test, subset: all, metric: rmse, source: "MoleculeNet T3"}
   mn_qm8: *mn_reg_mae
+  # NPASS (NaFM Table 2): RMSE is the paper's metric; MAE is an extra. The unit of activity_value is not documented.
+  npass_ptp1b: &npass
+    family: molecule_property
+    kind: multitarget_regression
+    target_unit: native
+    required_protocols: [mlp_probe]
+    summary_protocol: mlp_probe
+    primary: {eval_split: test, subset: all, metric: rmse}
+    required:
+      - {eval_split: test, subset: all, metric: rmse, source: "NaFM T2"}
+      - {eval_split: test, subset: all, metric: mae, source: "extra (not reported by NaFM)"}
+  npass_ache: *npass
+  npass_cox2: *npass
+  npass_hivrt: *npass
+  npass_tyrosinase: *npass
+  npass_cyp3a4: *npass
+  npass_mrp4: *npass
+  npass_cox1: *npass
   pretrain_eval:
     family: pretraining
     kind: pretrain_eval

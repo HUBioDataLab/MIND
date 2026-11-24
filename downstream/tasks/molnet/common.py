@@ -395,35 +395,24 @@ def check_coordinate_scale(config: dict, split: str, molecules: Sequence[Molecul
             "median_nn_angstrom": round(median, 4), "molecules_checked": used, "plausible_range": [low, high]}
 
 
-def process_split(config: dict, split: str, owner: Dict[int, str]) -> Tuple[dict, List[Molecule], dict]:
-    """Read one LMDB split into ``(payload, molecules, summary)``; ``owner`` tracks ``ori_index`` across splits."""
-    path = lmdb_path(config, split)
-    molecules: List[Molecule] = []
-    for index, record in iter_lmdb(path, expected=config["expected_counts"][split]):
-        molecule = convert_record(record, config=config, where=f"{config['dataset']} {split} record {index}")
-        if molecule.ori_index in owner:
-            raise ValueError(f"{config['dataset']} {split} record {index}: ori_index {molecule.ori_index} appears in both "
-                             f"{owner[molecule.ori_index]} and {split}")
-        owner[molecule.ori_index] = split
-        molecules.append(molecule)
+def payload_from_molecules(config: dict, split: str, molecules: Sequence[Molecule], ids: Sequence[str], summary: dict,
+                           schema: dict) -> dict:
+    """The processed-split payload (the ``PAYLOAD_KEYS`` contract) of already converted molecules.
+
+    Shared by the MoleculeNet and NPASS families; ``schema`` is the family's own record (format, revision, units).
+    """
     labels = np.stack([m.labels for m in molecules]).astype(np.float32)
     table = sorted({e for m in molecules for e in m.elements})
     if len(table) > 255:
-        raise ValueError(f"{path}: {len(table)} distinct elements do not fit the uint8 element table")
+        raise ValueError(f"{config['task']} {split}: {len(table)} distinct elements do not fit the uint8 element table")
     index_of = {e: i for i, e in enumerate(table)}
     offsets = np.concatenate(([0], np.cumsum([len(m.elements) for m in molecules]))).astype(np.int64)
     positions = (np.concatenate([m.positions for m in molecules]) if offsets[-1]
                  else np.zeros((0, 3), np.float32)).astype(np.float32)
-    summary = _qc_summary(config, split, molecules, labels)
-    summary["coordinates"] = check_coordinate_scale(config, split, molecules)
-    ids = [f"{config['dataset']}_{m.ori_index}" for m in molecules]
-    payload = {
-        "schema": {"format": "unimol_molnet_v1", "conformer": "first", "hydrogens": "dropped",
-                   "source": config["source_name"], "revision": str(config["processed_revision"]),
-                   "coordinate_unit": "angstrom", "coordinate_source_unit": config["coordinate_unit"],
-                   "coordinate_scale": config["coordinate_scale"]},
+    return {
+        "schema": schema,
         "kind": config["kind"], "task": config["task"], "dataset": config["dataset"], "split": split,
-        "num_targets": config["num_targets"], "ids": ids, "smiles": [m.smiles for m in molecules],
+        "num_targets": config["num_targets"], "ids": list(ids), "smiles": [m.smiles for m in molecules],
         "scaffolds": [m.scaffold for m in molecules],
         "ori_index": torch.tensor([m.ori_index for m in molecules], dtype=torch.long),
         "labels": torch.from_numpy(labels), "label_mask": torch.from_numpy(~np.isnan(labels)),
@@ -438,7 +427,28 @@ def process_split(config: dict, split: str, owner: Dict[int, str]) -> Tuple[dict
         },
         "qc": summary,
     }
-    return payload, molecules, summary
+
+
+def process_split(config: dict, split: str, owner: Dict[int, str]) -> Tuple[dict, List[Molecule], dict]:
+    """Read one LMDB split into ``(payload, molecules, summary)``; ``owner`` tracks ``ori_index`` across splits."""
+    path = lmdb_path(config, split)
+    molecules: List[Molecule] = []
+    for index, record in iter_lmdb(path, expected=config["expected_counts"][split]):
+        molecule = convert_record(record, config=config, where=f"{config['dataset']} {split} record {index}")
+        if molecule.ori_index in owner:
+            raise ValueError(f"{config['dataset']} {split} record {index}: ori_index {molecule.ori_index} appears in both "
+                             f"{owner[molecule.ori_index]} and {split}")
+        owner[molecule.ori_index] = split
+        molecules.append(molecule)
+    labels = np.stack([m.labels for m in molecules]).astype(np.float32)
+    summary = _qc_summary(config, split, molecules, labels)
+    summary["coordinates"] = check_coordinate_scale(config, split, molecules)
+    schema = {"format": "unimol_molnet_v1", "conformer": "first", "hydrogens": "dropped",
+              "source": config["source_name"], "revision": str(config["processed_revision"]),
+              "coordinate_unit": "angstrom", "coordinate_source_unit": config["coordinate_unit"],
+              "coordinate_scale": config["coordinate_scale"]}
+    ids = [f"{config['dataset']}_{m.ori_index}" for m in molecules]
+    return payload_from_molecules(config, split, molecules, ids, summary, schema), molecules, summary
 
 
 def _write_qc(out_dir: Path, split: str, ids: Sequence[str], molecules: Sequence[Molecule], summary: dict) -> None:
@@ -529,7 +539,7 @@ class MolnetProcessedSplit:
                 raise ValueError(f"{self.path}: processed split lacks {key!r}")
         if payload["kind"] not in MOLNET_KINDS:
             raise ValueError(f"{self.path}: unknown kind {payload['kind']!r}")
-        check_schema_matches_task_yaml(payload, self.path)
+        self._check_schema(payload)
         count = len(payload["ids"])
         targets = int(payload["num_targets"])
         labels, mask = payload["labels"].numpy(), payload["label_mask"].numpy()
@@ -574,6 +584,10 @@ class MolnetProcessedSplit:
         self._elements = [payload["element_table"][int(i)] for i in payload["atom_element_index"].tolist()]
         self._positions = payload["atom_positions"].numpy().astype(np.float32)
         self.report = {"molecules": count, "not_embeddable": int((~self.embeddable).sum())}
+
+    def _check_schema(self, payload: dict) -> None:
+        """Family hook: refuse a payload whose schema record does not match the family's task.yaml."""
+        check_schema_matches_task_yaml(payload, self.path)
 
     def __len__(self) -> int:
         return len(self.ids)

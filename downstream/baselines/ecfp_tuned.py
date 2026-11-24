@@ -40,7 +40,7 @@ from downstream.baselines.ecfp import (
 from downstream.common.metrics import evaluate_multitask_classification, multitarget_regression_errors
 from downstream.common.registry import embeddings_path, new_results_dir, outputs_root, run_record
 from downstream.probe import evaluate_masked_subsets, validation_score
-from downstream.tasks import MOLNET_TASKS, load_task
+from downstream.tasks import SMILES_TASKS, load_task
 
 MODEL_ID, PROTOCOL, SEED = TUNED_MODEL_ID, TUNED_PROTOCOL, TUNED_SEED
 FEATURE_SCALING = "none"
@@ -182,7 +182,7 @@ def run_task(task_name: str, spec: FingerprintSpec, root: Path, *, threads: int,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--task", required=True, choices=MOLNET_TASKS)
+    parser.add_argument("--task", required=True, choices=SMILES_TASKS)
     parser.add_argument("--feature", default="bits", choices=("bits", "counts"))
     parser.add_argument("--n-bits", type=int, default=2048)
     parser.add_argument("--threads", type=int, default=8, help="worker processes fitting targets in parallel")

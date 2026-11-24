@@ -1,4 +1,4 @@
-"""ECFP4 fingerprint baseline for the MoleculeNet tasks (CPU only).
+"""ECFP4 fingerprint baseline for the MoleculeNet and NPASS tasks (CPU only).
 
     python -m downstream.baselines.ecfp --tasks all --heads linear,mlp --seeds 0 1 2 [--models probe|tuned|both]
         [--feature bits|counts] [--n-bits 2048] [--threads 8] [--jobs 1] [--outputs-root DIR] [--log-root DIR]
@@ -8,7 +8,7 @@ The baseline is a frozen-feature probe whose feature is a Morgan fingerprint of 
 ECFP4) instead of a pooled encoder embedding. Everything after the feature is the code of the MIND probes:
 ``downstream.probe`` (linear or MLP head, masked BCE / masked MSE on train-standardized targets, the same epoch
 selection on the validation metric, the same evaluation functions and the same ``task.yaml`` probe settings), run
-once per seed, on the Uni-Mol scaffold split of the processed MoleculeNet files.
+once per seed, on the fixed split of the processed MoleculeNet or NPASS files.
 
 Steps per task (what already exists is skipped, so an interrupted run can be repeated):
 
@@ -51,7 +51,7 @@ import numpy as np
 
 from downstream import ledger, ledger_report
 from downstream.common.registry import REPO_ROOT, embeddings_path, git_commit, outputs_root, results_dir, sha256_file
-from downstream.tasks import MOLNET_TASKS, load_task
+from downstream.tasks import MOLNET_TASKS, NPASS_TASKS, SMILES_TASKS, load_task
 
 MODEL_ID = "ecfp4"
 TUNED_MODEL_ID = "ecfp4_tuned"  # downstream.baselines.ecfp_tuned
@@ -196,17 +196,19 @@ def write_task_embeddings(task_name: str, spec: FingerprintSpec, root: Path) -> 
 # ---------------------------------------------------------------------------------------------------------
 
 def expand_tasks(text: str) -> list:
-    """``all`` / ``molnet`` or a comma list of ``mn_*`` tasks; any other task is refused (it has no SMILES)."""
+    """``all`` (MoleculeNet + NPASS), ``molnet``, ``npass`` or a comma list of their tasks; any other task is refused
+    (it has no SMILES)."""
     names = [t.strip() for t in text.split(",") if t.strip()]
     if not names:
         raise ValueError("--tasks is empty")
+    groups = {"all": SMILES_TASKS, "molnet": MOLNET_TASKS, "npass": NPASS_TASKS}
     expanded = []
     for name in names:
-        expanded += list(MOLNET_TASKS) if name in ("all", "molnet") else [name]
-    unknown = [t for t in expanded if t not in MOLNET_TASKS]
+        expanded += list(groups.get(name, [name]))
+    unknown = [t for t in expanded if t not in SMILES_TASKS]
     if unknown:
-        raise ValueError(f"the fingerprint baseline covers the MoleculeNet tasks only; unknown or unsupported: "
-                         f"{unknown}. Choose from {', '.join(MOLNET_TASKS)}")
+        raise ValueError(f"the fingerprint baseline covers the MoleculeNet and NPASS tasks only; unknown or unsupported: "
+                         f"{unknown}. Choose from {', '.join(SMILES_TASKS)}")
     return list(dict.fromkeys(expanded))
 
 
@@ -296,7 +298,7 @@ def summary_table(results: Path, tasks: Sequence[str], heads: Sequence[str], mod
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--tasks", default="all", help="'all' / 'molnet' (the 14 MoleculeNet tasks) or a comma list")
+    parser.add_argument("--tasks", default="all", help="'all' / 'molnet' (14 tasks) / 'npass' (8 tasks) or a comma list")
     parser.add_argument("--heads", default="linear,mlp")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--feature", default="bits", choices=VARIANTS, help="bit vector (default) or count vector")

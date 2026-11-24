@@ -68,6 +68,14 @@ MOLNET_NOTE = (
     "single class in the split are skipped and counted. Regression: errors in original units, averaged over targets. "
     "Subset rows (flat conformers, rare elements, ...) are reported in addition to, never instead of, the full test set."
 )
+NPASS_NOTE = (
+    "NPASS (NaFM benchmark; random 80/10/10 split of the NaFM reference code, seed 0, one split for every training "
+    "seed; RDKit ETKDGv3 + MMFF94 conformer, H dropped). The reference paper's Table 2 reports RMSE mean +- std over "
+    "three runs of fine-tuned models whose split is most likely redrawn per seed and whose activity unit is not "
+    "documented; its numbers are not entered here and are not strictly comparable. Errors in the units of the "
+    "activity_value column, which the data release does not define. Subset rows (embedding-failed molecules with flat "
+    "2-D coordinates, rare elements, ...) are reported in addition to, never instead of, the full test set."
+)
 # Fold has three test sets; GearNet's table adds an "Avg." column over them.
 FOLD_TEST_SPLITS = ("test_fold", "test_superfamily", "test_family")
 
@@ -161,7 +169,7 @@ def _masked_row(model_id: str, protocol: str, runs: list) -> dict:
     return row
 
 
-def masked_markdown(rows: list) -> str:
+def masked_markdown(rows: list, task: str = "") -> str:
     classification = rows[0]["kind"] == "multilabel_masked"
     header = (["model_id", "protocol", "val ROC-AUC", "test ROC-AUC", "test PRC-AUC", "tasks evaluated", "tasks skipped"]
               if classification else ["model_id", "protocol", "val RMSE", "val MAE", "test RMSE", "test MAE"])
@@ -179,7 +187,8 @@ def masked_markdown(rows: list) -> str:
             values = ", ".join(f"{f} {_fmt(entry[f])}" for f in (("roc_auc", "prc_auc") if classification else ("rmse", "mae")))
             subset_lines.append(f"- {row['model_id']} / {row['protocol']} / {name} ({entry['molecules']} test molecules): "
                                 f"{values}; undefined in {entry['undefined_seeds']} of {len(row['seeds'])} seeds")
-    return "\n".join(lines) + "\n\n" + MOLNET_NOTE + "\n" + ("\nFlagged test subsets:\n" + "\n".join(subset_lines) + "\n"
+    note = NPASS_NOTE if task.startswith("npass_") else MOLNET_NOTE
+    return "\n".join(lines) + "\n\n" + note + "\n" + ("\nFlagged test subsets:\n" + "\n".join(subset_lines) + "\n"
                                                            if subset_lines else "")
 
 
@@ -255,7 +264,7 @@ def multiclass_markdown(task: str, rows: list) -> str:
 
 def to_markdown(task: str, rows: list) -> str:
     if rows and rows[0].get("kind") in MASKED_KINDS:
-        return masked_markdown(rows)
+        return masked_markdown(rows, task)
     if task in REGRESSION_TASKS:
         return regression_markdown(task, rows)
     if task in MULTICLASS_TASKS:

@@ -1,0 +1,133 @@
+# NPASS natural-product bioactivity regression, the eight-target benchmark of the NaFM paper (Ding et al., arXiv
+# 2503.17656, Table 2): one regression task per protein target, one task family (MoleculeNet style), one processed
+# directory per task under <source_root>/<task>/processed/<revision>.
+#
+# Source (established from primary sources; see "What is and is not known" below): `regression_data.csv` of the NaFM
+# data release (Figshare 10.6084/m9.figshare.28980254.v1, file 54346484, CC BY 4.0), columns np_id, SMILES, target_id,
+# activity_value; 4,928 rows over 28 target ids. `download` fetches it into <source_root>/raw (a file already there is
+# checked, never fetched again), verifies size, md5 and sha256 and records the run in <source_root>/provenance.json.
+#
+# Protocol of the reference code (github.com/TomAIDD/NaFM-Official, branch master: gnn/datasets/npc.py,
+# gnn/data.py `_prepare_Regression_dataset`, gnn/utils.py `make_splits`):
+#   * one dataset per target id, rows in CSV order, label = activity_value as stored (no transform, no filtering);
+#   * random 80 / 10 / 10 split: np.random.default_rng(seed).permutation(n), sizes round(0.8 n), round(0.1 n) and the
+#     rest, the test size reduced by one when the three rounded sizes exceed n;
+#   * the split depends on the run seed (make_splits receives the training seed), so repeated runs of the paper
+#     most likely use a new split each time (the seed list is not stated; the README example uses --seed 0).
+#
+# What is and is not known (nothing here is invented; every item is marked):
+#   known       data file, per-target row counts (7 of 8 equal the paper's Table 2, COX-2 has 189 against 190), the
+#               random 80/10/10 split rule above, MSE loss on raw activity_value in the reference code, "three
+#               random seeds" and "RMSE averaged over them" in the paper text.
+#   not stated  the unit and transform of activity_value (no document gives it; the values look like -log10 of a
+#               molar potency, range e.g. PTP1B -0.2 .. 6.7, AChE 0 .. 15.2; this is NOT verified), the NPASS activity
+#               type (IC50 / Ki / ...) and filtering behind the file, the seed list of the paper, the split of the
+#               paper's Table 2 (the code's default is random, the paper text says nothing), the origin of the
+#               COX-2 count 190, and whether the reference code's test.py reproduces Table 2 (its README calls it a
+#               minimal demonstration, not the production evaluation).
+#
+# Decision taken here (the framework trains every seed on ONE fixed split per task): the split is the reference code's
+# split for seed 0 (`split.seed`), the three training seeds only change the initialization and batch order. The
+# paper's standard deviations most likely include split-to-split variance; ours cover initialization only. Literature
+# numbers are therefore NOT strictly comparable to ours (different split draw, frozen-probe or our fine-tune recipe,
+# conformer-based graphs), and the reports say so. Per-seed splits would need a split tag like LBA's (embed / probe /
+# finetune / ledger); that is not implemented.
+#
+# Graph input: SMILES -> RDKit ETKDGv3 conformer with explicit hydrogens (fixed seed), MMFF94 optimization, hydrogens
+# dropped, first (only) conformer, no cropping; the ligand graph is the one of the MoleculeNet path. A molecule whose
+# embedding fails is NEVER dropped: it keeps flat 2-D coordinates (the Uni-Mol fallback), is flagged
+# `all_conformers_flat` and counted in qc_<split>.json / .tsv; test subsets report those molecules separately.
+# MMFF outcomes (converged / not converged / no parameters) are counted too.
+
+family: npass
+modality: small_molecule
+processed_revision: v1
+plausible_median_nn_angstrom: [1.0, 2.0]
+source_name: nafm_npass
+source_root: ${MIND_DATA_ROOT}/downstream/nafm_npass      # task data_root = <source_root>/<task>
+raw_subdir: raw
+
+source_file:
+  url: https://ndownloader.figshare.com/files/54346484
+  name: regression_data.csv
+  record: 10.6084/m9.figshare.28980254.v1
+  bytes: 480277
+  md5: c58a59afc8dd2111109eed7f23550a3a        # equals the md5 Figshare reports for the file
+  sha256: bdcd122f5455334288d1bcd3e4af04a4c8f47f79d2857c131042f7ebe9e995a1
+  rows: 4928
+  columns: {id: np_id, smiles: SMILES, target: target_id, value: activity_value}
+
+splits: [train, valid, test]
+split:
+  policy: random_permutation       # np.random.default_rng(seed).permutation, as the NaFM reference code
+  seed: 0
+  fractions: [0.8, 0.1, 0.1]
+
+conformer:
+  policy: etkdg_mmff
+  seed: 0
+  embed_retry_random_coords: true  # one retry with useRandomCoords=True before the 2-D fallback
+  mmff_variant: MMFF94
+  mmff_max_iters: 2000
+  expected_per_molecule: 1
+hydrogens: drop
+max_atoms_policy: none
+report_atom_threshold: 256         # only a counter in the QC report, never a filter
+
+embedding:
+  seed: 0
+  poolings: [mean_atoms]
+  max_atoms_per_batch: 30000
+
+probe:
+  pooling: mean_atoms
+  seeds: [0, 1, 2]
+  epochs: 300
+  patience: 30
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+# Fine-tuning (downstream.finetune, user-run on one GPU), the MoleculeNet recipe with the decided encoder learning rate
+# for small tasks (1e-4). These sets have 112 to 490 training molecules (4 to 16 optimizer steps per epoch at 32
+# molecules); that 50 epochs suffice for them is not measured.
+finetune:
+  pooling: mean_atoms
+  head: mlp
+  seeds: [0, 1, 2]
+  epochs: 50
+  patience: null
+  max_atoms_per_batch: 15000
+  max_samples_per_batch: 32
+  lr_encoder: 0.0001
+  lr_encoder_random_init: 0.0003
+  lr_head: 0.001
+  weight_decay: 0.0001
+  grad_clip_norm: 0.5
+  mlp_hidden: 512
+  mlp_dropout: 0.2
+
+finetune_overrides: {}
+# Estimated seconds per fine-tune epoch of one job alone on a GPU (train molecules / 32 steps x 0.047 s + validation),
+# used only to start the longest jobs first.
+finetune_seconds_per_epoch: {ptp1b: 2, ache: 1, cox2: 1, hivrt: 1, tyrosinase: 1, cyp3a4: 1, mrp4: 1, cox1: 1}
+
+# One entry per target. `target_id` selects the rows of the CSV; `paper_molecules` is the count of the paper's Table 2;
+# `expected_molecules` is the row count of the pinned file (processing fails on any difference) and must equal the
+# paper's count unless `count_note` explains the difference. `expected_counts` are the split sizes the rule above
+# gives for `expected_molecules`; the config loader recomputes and checks them. Target names come from the NaFM
+# adapter of a third-party repository (not from the paper or the release); the counts agree for 7 of 8.
+datasets:
+  ptp1b: {task: npass_ptp1b, target_id: NPT178, target_name: PTP1B, paper_molecules: 612, expected_molecules: 612, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 490, valid: 61, test: 61}}
+  ache: {task: npass_ache, target_id: NPT204, target_name: AChE, paper_molecules: 341, expected_molecules: 341, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 273, valid: 34, test: 34}}
+  cox2: {task: npass_cox2, target_id: NPT31, target_name: COX-2, paper_molecules: 190, expected_molecules: 189, count_note: "the release holds 189 rows for NPT31, the paper's Table 2 lists 190; the origin of the difference is not documented", kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 151, valid: 19, test: 19}}
+  hivrt: {task: npass_hivrt, target_id: NPT43, target_name: HIV type-1 RT, paper_molecules: 186, expected_molecules: 186, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 149, valid: 19, test: 18}}
+  tyrosinase: {task: npass_tyrosinase, target_id: NPT459, target_name: Tyrosinase, paper_molecules: 186, expected_molecules: 186, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 149, valid: 19, test: 18}}
+  cyp3a4: {task: npass_cyp3a4, target_id: NPT109, target_name: CYP3A4, paper_molecules: 178, expected_molecules: 178, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 142, valid: 18, test: 18}}
+  mrp4: {task: npass_mrp4, target_id: NPT1028, target_name: MRP4, paper_molecules: 177, expected_molecules: 177, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 142, valid: 18, test: 17}}
+  cox1: {task: npass_cox1, target_id: NPT30, target_name: COX-1, paper_molecules: 140, expected_molecules: 140, kind: multitarget_regression, num_targets: 1, metrics: [rmse, mae], primary_metric: rmse, expected_counts: {train: 112, valid: 14, test: 14}}
+
+# Measured sizes for `make ds-prepare` (GiB; the CSV is 0.46 MiB, the processed conformer graphs of all eight tasks a few MB).
+disk_estimate_gib: {extracted: 0.001, processed: 0.01}

@@ -344,14 +344,14 @@ def data_root(tmp_path, monkeypatch):
 
 
 def test_real_registry_every_task_has_a_spec_and_shares_the_expected_archives(data_root, capsys):
-    from downstream.tasks import MOLNET_TASKS, TASKS
+    from downstream.tasks import MOLNET_TASKS, NPASS_TASKS, TASKS
 
     infos = [prepare_all.inspect_task(name) for name in TASKS]
     assert all(i.spec is not None for i in infos), "every registered task needs download_spec"
     plan = prepare_all.build_plan(infos, [], [], free_bytes=lambda p: 10 ** 15)
     downloads = {s.tasks: s for s in plan.downloads}
     assert ("go_mf", "go_bp", "go_cc") in downloads and tuple(MOLNET_TASKS) in downloads
-    assert len(plan.downloads) == 6 and len(plan.processes) == 4 + 1 + len(MOLNET_TASKS)  # ec lba go fold reaction + mn
+    assert len(plan.downloads) == 7 and len(plan.processes) == 4 + 1 + len(MOLNET_TASKS) + len(NPASS_TASKS)  # ec lba go fold reaction + mn + npass
     pinned = sum(a.bytes for s in plan.downloads for a in s.spec.archives if a.bytes)
     assert 7.5 * GIB < pinned < 8.0 * GIB
     assert downloads[("reaction",)].state == "unavailable" and plan.errors == []

@@ -11,6 +11,7 @@ for MIND encoders.
 | `reaction` | multi-class, 384 EC numbers | IEConv ProtFunct (github.com/phermosilla/IEConv_proteins, Google Drive archive), 29,215 / 2,562 / 5,651 | accuracy |
 | `lba` | regression, pK | ATOM3D LBA (PDBbind 2019 refined, 4,463 complexes), 30 % split 3507/466/490, 60 % split 3563/448/452 | RMSE (lower) |
 | `mn_bbbp` ... `mn_qm8` (14 MoleculeNet tasks, QM9 excluded) | `multilabel_masked` (BBBP, BACE, ClinTox, Tox21, ToxCast, SIDER, HIV, PCBA, MUV) or `multitarget_regression` (ESOL, FreeSolv, Lipo, QM7, QM8) | Uni-Mol LMDB release, scaffold split as shipped; first conformer, hydrogens dropped, no cropping | ROC-AUC + PRC-AUC (classification); RMSE + MAE (regression; primary: RMSE for ESOL/FreeSolv/Lipo, MAE for QM7/QM8) |
+| `npass_ptp1b`, `npass_ache`, `npass_cox2`, `npass_hivrt`, `npass_tyrosinase`, `npass_cyp3a4`, `npass_mrp4`, `npass_cox1` (8 NPASS tasks) | `multitarget_regression`, one target | NaFM data release (Figshare 10.6084/m9.figshare.28980254.v1, `regression_data.csv`, CC BY 4.0), 612 / 341 / 189 (paper: 190) / 186 / 186 / 178 / 177 / 140 molecules; random 80/10/10 split of the NaFM reference code (seed 0); RDKit ETKDGv3 + MMFF94 conformer, hydrogens dropped | RMSE (primary) + MAE |
 
 ## Quick use
 
@@ -101,6 +102,32 @@ neighbours). The probe trains a masked BCE head (classification) or a masked MSE
 (regression), selects the epoch by the primary metric and also reports the QC-flagged subsets of the test set.
 `downstream.finetune` fine-tunes both kinds with the same losses and metrics. Embedding with a MIND checkpoint requires CUDA and a checkpoint trained with
 `geometry_neutral_virtual_slots` (protein flag set).
+
+### NPASS (`npass_*`)
+
+Eight natural-product bioactivity regressions of the NaFM paper (Table 2). `make ds-download TASK=npass_ptp1b` fetches
+the 0.46 MiB `regression_data.csv` (url, size, md5, sha256 and row count pinned in `downstream/tasks/npass/task.yaml`; a
+difference stops the run) into `<source_root>/raw`, shared by the eight tasks. `make ds-process TASK=npass_ptp1b` (or
+`TASK=npass` for all eight; `ds-validate` is the read-only dry run) selects the rows of the target id, splits them with
+the NaFM reference code's rule (`np.random.default_rng(0).permutation`, `round(0.8 n)` / `round(0.1 n)` / rest), builds one
+RDKit ETKDGv3 conformer with explicit hydrogens and seed 0, MMFF94-optimizes it and drops the hydrogens. Output:
+`<source_root>/<task>/processed/v1/{train,valid,test}.pt`, `qc_<split>.json/.tsv`, `provenance.json`. The payload and loader
+are the MoleculeNet ones, so `embed`, `probe`, `finetune` and the ECFP4 baselines (`make ds-ecfp TASKS=npass`) apply
+unchanged; `TASKS=npass` selects the family in `ds-run`.
+
+Every molecule is kept. One whose embedding fails (also after a retry with random start coordinates) gets flat 2-D
+coordinates, the flag `all_conformers_flat`, and is counted and listed in `qc_<split>.json` / `.tsv`; the test subsets
+report it separately. MMFF outcomes (converged, not converged, no parameters) are counted. The counts must equal the
+pinned ones: 7 targets equal the paper's Table 2, COX-2 has 189 molecules in the release against 190 in the paper (the
+cause is not documented; `count_note`).
+
+What the primary sources fix and what they do not (details in the `task.yaml` header): the data file, the per-target
+counts and the reference code's random 80/10/10 split are established; the reference code draws the split from the run
+seed, while here one split (seed 0) serves all three training seeds, so our standard deviations cover initialization
+only. The unit and transform of `activity_value`, the NPASS activity type and filtering behind the file, the paper's seed
+list and the split of its Table 2 are not stated anywhere (the paper says only "three random seeds"); errors are therefore
+in the unit of that column. Literature numbers are not strictly comparable to ours. Per-seed splits would need a split tag
+like LBA's through embed, probe, finetune and the ledger; that is not implemented.
 
 SaProt (`saprot_650m_pdb`, `saprot_650m_af2`, `saprot_35m_af2`) sees the residues
 MIND kept, one `<AA><3Di>` token each; the 3Di state comes from Foldseek on the
@@ -364,8 +391,8 @@ A checkpoint path is first snapshotted as NAME (a NAME that already names anothe
 store or in the ledger, stops the run). Then one embedding job per task on the GPUs (at most PER_GPU per GPU; splits
 already embedded are skipped), then, after every embedding job has ended, the probes on CPU (SEEDS; seeds already
 done are skipped), `ledger add`, and a table of the primary metric per task and head plus the missing required
-cells. `all` is EC, GO, Fold, LBA (identity30 and identity60, joint) and the 14 MoleculeNet tasks; Reaction only
-when named. A task outside the model's pretraining domains (protein needs `pdb`, MoleculeNet `unimol`) is skipped
+cells. `all` is EC, GO, Fold, LBA (identity30 and identity60, joint), the 14 MoleculeNet and the 8 NPASS tasks (`TASKS=molnet`, `TASKS=npass`);
+Reaction only when named. A task outside the model's pretraining domains (protein needs `pdb`, MoleculeNet and NPASS `unimol`) is skipped
 and listed under `all`, refused when named. A failing job is reported with its log and the others continue; the
 run ends with the list of what is missing and exit code 1. `PLAN=1` prints what would run (and recorded embedding
 times of other models, when there are any) and writes nothing. Logs and `summary.md` go to
@@ -407,9 +434,9 @@ lists this month's `ds_*.log` files with that line (no line: still running or ki
 
 ## ECFP4 fingerprint baselines (`make ds-ecfp`)
 
-`downstream/baselines/ecfp.py` and `ecfp_tuned.py`: two baselines for the 14 MoleculeNet tasks on the same features, the
+`downstream/baselines/ecfp.py` and `ecfp_tuned.py`: two baselines for the 14 MoleculeNet and the 8 NPASS tasks on the same features, the
 Morgan fingerprint (radius 2 = ECFP4, 2048 bits, RDKit `rdFingerprintGenerator`) of the SMILES stored in the processed
-splits, and on the same Uni-Mol scaffold split. CPU only, no checkpoint.
+splits, and on the same fixed split (Uni-Mol scaffold split; NPASS: the seed-0 random split). CPU only, no checkpoint.
 
 | model id | protocol | what it is | seeds |
 |---|---|---|---|
